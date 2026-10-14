@@ -18,6 +18,7 @@
 - [ ] 回调 GET 验证和 POST 解密已验证
 - [ ] 日志不包含 Secret、Token 和 AESKey
 - [ ] 临期/超期提醒重复执行不重复发送
+- [ ] `scripts/run-demo-pilot.py` 全部检查通过
 
 ## C. 试点门禁
 
