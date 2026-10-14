@@ -48,6 +48,12 @@ AI 草稿默认使用规则解析。若配置兼容 OpenAI Chat Completions 的 
 python3 -m unittest discover -s tests -v
 ```
 
+查看真实企业微信接入前置条件：
+
+```bash
+python3 scripts/readiness-check.py
+```
+
 ## 无凭据演示
 
 可用隔离数据库先验证完整流程：

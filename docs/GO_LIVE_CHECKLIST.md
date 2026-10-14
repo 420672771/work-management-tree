@@ -19,6 +19,7 @@
 - [ ] 日志不包含 Secret、Token 和 AESKey
 - [ ] 临期/超期提醒重复执行不重复发送
 - [ ] `scripts/run-demo-pilot.py` 全部检查通过
+- [ ] `scripts/readiness-check.py` 报告 `ready_for_real_wecom: true`
 
 ## C. 试点门禁
 
