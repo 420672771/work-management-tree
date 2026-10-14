@@ -20,6 +20,12 @@ chmod +x scripts/*.sh
 ./scripts/stop-local.sh
 ```
 
+临期/超期提醒可由本地计划任务执行（同一天、同一任务、同一提醒类型幂等）：
+
+```bash
+python3 scripts/send-reminders.py
+```
+
 ## 已实现
 
 - 责任域/责任事项树

@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, task_
 CREATE TABLE IF NOT EXISTS acceptance (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, acceptor_id INTEGER, result TEXT NOT NULL, reason TEXT DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, object_type TEXT NOT NULL, object_id INTEGER NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, before_json TEXT, after_json TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS wecom_message (id INTEGER PRIMARY KEY AUTOINCREMENT, userid TEXT NOT NULL, msg_type TEXT NOT NULL, content TEXT DEFAULT '', task_id INTEGER, received_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notify_log (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, user_id INTEGER NOT NULL, kind TEXT NOT NULL, notify_day TEXT NOT NULL, status TEXT NOT NULL, response_json TEXT DEFAULT '', created_at TEXT NOT NULL, UNIQUE(task_id,user_id,kind,notify_day));
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -107,8 +108,9 @@ class WeComCallback:
         root=ET.fromstring(xml_text); userid=root.findtext('FromUserName') or ''; msg_type=root.findtext('MsgType') or 'unknown'; content=root.findtext('Content') or ''
         task_id=self.task_id_from_text(content)
         c.execute('INSERT INTO wecom_message(userid,msg_type,content,task_id,received_at) VALUES(?,?,?,?,?)',(userid,msg_type,content,task_id,now()))
+        user_row=c.execute('SELECT id FROM user WHERE wecom_userid=?',(userid,)).fetchone(); internal_user_id=user_row[0] if user_row else None
         if task_id and c.execute('SELECT 1 FROM task WHERE id=?',(task_id,)).fetchone():
-            c.execute('INSERT INTO feedback(task_id,user_id,content,parsed_due_at,progress,risk,created_at) VALUES(?,?,?,?,?,?,?)',(task_id,None,content,parse_due(content),content,'',now()))
+            c.execute('INSERT INTO feedback(task_id,user_id,content,parsed_due_at,progress,risk,created_at) VALUES(?,?,?,?,?,?,?)',(task_id,internal_user_id,content,parse_due(content),content,'',now()))
             c.execute('UPDATE task SET updated_at=? WHERE id=?',(now(),task_id)); audit(c,'task',task_id,'wecom_feedback',userid,after={'content':content})
         return {'userid':userid,'msg_type':msg_type,'content':content,'task_id':task_id}
 
@@ -146,6 +148,13 @@ class Handler(BaseHTTPRequestHandler):
             if p.path=='/api/tree':
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,effective_at,created_at) VALUES(?,?,?,?,?,?,?)',(b.get('parent_id'),b.get('node_type','domain'),b['name'],b.get('boundary',''),b.get('owner_id'),t,t)).lastrowid; audit(c,'org_node',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/users':
+                required=['name','wecom_userid']; missing=[x for x in required if not b.get(x)]
+                if missing: return self.json(400,{'error':'missing fields','fields':missing})
+                try:
+                    oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','owner'),b['wecom_userid'])).lastrowid
+                except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
+                audit(c,'user',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/tasks':
                 required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
