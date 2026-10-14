@@ -1,0 +1,13 @@
+services:
+  worktree:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      PORT: "8080"
+      WMT_DB: /app/data/worktree.db
+      WECOM_CORP_ID: ""
+      WECOM_AGENT_ID: ""
+      WECOM_SECRET: ""
