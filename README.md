@@ -47,3 +47,14 @@ AI 草稿默认使用规则解析。若配置兼容 OpenAI Chat Completions 的 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+## 无凭据演示
+
+可用隔离数据库先验证完整流程：
+
+```bash
+WMT_DB=/tmp/worktree-demo.db python3 scripts/bootstrap-demo.py
+WMT_DB=/tmp/worktree-demo.db PORT=8090 python3 app.py
+```
+
+默认服务只绑定本机使用；若要让企业微信回调访问，必须部署到企业内网可达地址或使用经过批准的安全网关。
