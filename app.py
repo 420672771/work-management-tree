@@ -1,7 +1,8 @@
-import json, os, re, sqlite3, urllib.request, urllib.parse
+import base64, hashlib, json, os, re, sqlite3, struct, urllib.request, urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
@@ -14,6 +15,7 @@ CREATE TABLE IF NOT EXISTS task (id INTEGER PRIMARY KEY AUTOINCREMENT, org_node_
 CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, user_id INTEGER, content TEXT NOT NULL, parsed_due_at TEXT, progress TEXT DEFAULT '', risk TEXT DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS acceptance (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, acceptor_id INTEGER, result TEXT NOT NULL, reason TEXT DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, object_type TEXT NOT NULL, object_id INTEGER NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, before_json TEXT, after_json TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS wecom_message (id INTEGER PRIMARY KEY AUTOINCREMENT, userid TEXT NOT NULL, msg_type TEXT NOT NULL, content TEXT DEFAULT '', task_id INTEGER, received_at TEXT NOT NULL);
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -82,6 +84,34 @@ class WeComAdapter:
         req=urllib.request.Request('https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token='+token,payload,{'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=10) as f: return {'sent':True,'response':json.load(f)}
 
+class WeComCallback:
+    """Enterprise WeChat secure callback codec and feedback mapper."""
+    def __init__(self):
+        self.token=os.getenv('WECOM_TOKEN'); self.aes_key=os.getenv('WECOM_AES_KEY'); self.receive_id=os.getenv('WECOM_CORP_ID','')
+    def configured(self): return bool(self.token and self.aes_key and len(self.aes_key)==43)
+    def signature(self, timestamp, nonce, encrypted):
+        return hashlib.sha1(''.join(sorted([self.token,timestamp,nonce,encrypted])).encode()).hexdigest()
+    def decrypt(self, encrypted):
+        from Crypto.Cipher import AES
+        key=base64.b64decode(self.aes_key+'=')
+        raw=AES.new(key,AES.MODE_CBC,key[:16]).decrypt(base64.b64decode(encrypted)); pad=raw[-1]
+        if pad<1 or pad>32: raise ValueError('invalid PKCS7 padding')
+        raw=raw[:-pad]; length=struct.unpack('>I',raw[16:20])[0]
+        message=raw[20:20+length].decode('utf-8'); receive_id=raw[20+length:].decode('utf-8')
+        if self.receive_id and receive_id and receive_id != self.receive_id: raise ValueError('receive id mismatch')
+        return message
+    def task_id_from_text(self, text):
+        m=re.search(r'(?:任务|task)\s*[#编号：:\-]?\s*(\d+)',text,re.I)
+        return int(m.group(1)) if m else None
+    def handle_message(self, c, xml_text):
+        root=ET.fromstring(xml_text); userid=root.findtext('FromUserName') or ''; msg_type=root.findtext('MsgType') or 'unknown'; content=root.findtext('Content') or ''
+        task_id=self.task_id_from_text(content)
+        c.execute('INSERT INTO wecom_message(userid,msg_type,content,task_id,received_at) VALUES(?,?,?,?,?)',(userid,msg_type,content,task_id,now()))
+        if task_id and c.execute('SELECT 1 FROM task WHERE id=?',(task_id,)).fetchone():
+            c.execute('INSERT INTO feedback(task_id,user_id,content,parsed_due_at,progress,risk,created_at) VALUES(?,?,?,?,?,?,?)',(task_id,None,content,parse_due(content),content,'',now()))
+            c.execute('UPDATE task SET updated_at=? WHERE id=?',(now(),task_id)); audit(c,'task',task_id,'wecom_feedback',userid,after={'content':content})
+        return {'userid':userid,'msg_type':msg_type,'content':content,'task_id':task_id}
+
 class Handler(BaseHTTPRequestHandler):
     def json(self, code, payload):
         data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
@@ -90,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path=='/' or self.path=='/index.html':
             data=(ROOT/'static'/'index.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if self.path.startswith('/wecom/callback'):
+            self.handle_wecom_get(); return
         c=db(); p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
         if p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
@@ -98,7 +130,17 @@ class Handler(BaseHTTPRequestHandler):
             tasks=[task_view(c,x) for x in c.execute('SELECT * FROM task')]; out={'total':len(tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks)}
         else: self.json(404,{'error':'not found'}); c.close(); return
         self.json(200,out); c.close()
+    def handle_wecom_get(self):
+        p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query); codec=WeComCallback()
+        if not codec.configured(): return self.json(503,{'error':'WECOM_TOKEN and WECOM_AES_KEY are required'})
+        try:
+            signature=q.get('msg_signature',[''])[0]; timestamp=q.get('timestamp',[''])[0]; nonce=q.get('nonce',[''])[0]; encrypted=q.get('echostr',[''])[0]
+            if signature != codec.signature(timestamp,nonce,encrypted): return self.json(403,{'error':'invalid signature'})
+            plain=codec.decrypt(encrypted); data=plain.encode(); self.send_response(200); self.send_header('Content-Type','text/plain'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        except Exception as exc: self.json(400,{'error':'callback verification failed','detail':str(exc)})
     def do_POST(self):
+        if self.path.startswith('/wecom/callback'):
+            self.handle_wecom_post(); return
         c=db(); p=urllib.parse.urlparse(self.path); b=self.body(); t=now()
         try:
             if p.path=='/api/tree':
@@ -129,6 +171,15 @@ class Handler(BaseHTTPRequestHandler):
             else: return self.json(404,{'error':'not found'})
             self.json(200,out)
         finally: c.close()
+    def handle_wecom_post(self):
+        p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query); codec=WeComCallback()
+        if not codec.configured(): return self.json(503,{'error':'WECOM_TOKEN and WECOM_AES_KEY are required'})
+        try:
+            raw=self.rfile.read(int(self.headers.get('Content-Length','0'))); root=ET.fromstring(raw); encrypted=root.findtext('Encrypt') or ''
+            if q.get('msg_signature',[''])[0] != codec.signature(q.get('timestamp',[''])[0],q.get('nonce',[''])[0],encrypted): return self.json(403,{'error':'invalid signature'})
+            plain=codec.decrypt(encrypted); c=db(); codec.handle_message(c,plain); c.commit(); c.close()
+            data=b'success'; self.send_response(200); self.send_header('Content-Type','text/plain'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        except Exception as exc: self.json(400,{'error':'callback processing failed','detail':str(exc)})
 
 if __name__=='__main__':
     initialize(); port=int(os.getenv('PORT','8080')); print(f'Work Management Tree listening on http://127.0.0.1:{port}'); ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

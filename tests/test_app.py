@@ -1,4 +1,4 @@
-import os, tempfile, unittest
+import base64, os, struct, tempfile, unittest
 from pathlib import Path
 os.environ['WMT_DB']=str(Path(tempfile.mkdtemp())/'test.db')
 import sys; sys.path.insert(0,str(Path(__file__).parents[1]))
@@ -29,5 +29,16 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(x['risk_status'],'blocked')
             self.assertEqual(x['time_status'],'overdue')
         finally: c.close()
+    def test_wecom_callback_decrypts_and_maps_feedback(self):
+        from Crypto.Cipher import AES
+        key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]
+        # 32-byte AES key encoded as the 43-character Enterprise WeChat key.
+        os.environ.update({'WECOM_TOKEN':'test-token','WECOM_AES_KEY':key,'WECOM_CORP_ID':'corp-test'})
+        codec=app.WeComCallback(); self.assertTrue(codec.configured())
+        c=app.db(); c.execute("insert into task(title,owner_id,due_at,deliverable,created_at,updated_at) values(?,?,?,?,?,?)",('callback-task',1,'2030-01-01T00:00:00+00:00','x',app.now(),app.now())); tid=c.execute('select last_insert_rowid()').fetchone()[0]; c.commit()
+        xml=f'<xml><FromUserName>wecom-user-1</FromUserName><MsgType>text</MsgType><Content>任务#{tid} 已完成，预计2026-10-20</Content></xml>'.encode()
+        raw=b'0123456789abcdef'+struct.pack('>I',len(xml))+xml+b'corp-test'; pad=32-(len(raw)%32); raw+=bytes([pad])*pad
+        decoded=base64.b64decode(key+'='); encrypted=base64.b64encode(AES.new(decoded,AES.MODE_CBC,decoded[:16]).encrypt(raw)).decode()
+        self.assertEqual(codec.decrypt(encrypted),xml.decode()); self.assertEqual(codec.task_id_from_text(f'任务#{tid} 已完成'),tid); result=codec.handle_message(c,xml.decode()); c.commit(); self.assertEqual(result['task_id'],tid); self.assertEqual(c.execute('select count(*) from feedback where task_id=?',(tid,)).fetchone()[0],1); c.close()
 
 if __name__=='__main__': unittest.main()

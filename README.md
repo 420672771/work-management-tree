@@ -32,7 +32,7 @@ chmod +x scripts/*.sh
 
 ## 企业微信配置
 
-设置 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET` 后，系统可通过 `/api/notify` 发送应用消息；未配置时只记录 dry-run 日志，不会误发消息。
+设置 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET` 后，系统可通过 `/api/notify` 发送应用消息；未配置时只记录 dry-run 日志，不会误发消息。设置 `WECOM_TOKEN` 和 43 位 `WECOM_AES_KEY` 后，将企业微信应用“接收消息” URL 配置为 `/wecom/callback`，员工可发送 `任务#123 已完成/预计周五` 回写任务反馈。
 
 AI 草稿默认使用规则解析。若配置兼容 OpenAI Chat Completions 的 `AI_API_BASE`、`AI_API_KEY`、`AI_MODEL`（例如企业批准的模型服务），则优先调用模型；模型错误时会安全回退为规则草稿，且始终要求 PM 人工确认。
 
