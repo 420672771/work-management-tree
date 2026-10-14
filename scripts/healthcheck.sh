@@ -3,10 +3,14 @@ set -euo pipefail
 PORT="${PORT:-8080}"
 for attempt in 1 2 3 4 5; do
   if python3 - <<PY
-import json, sys, urllib.request
+import base64, json, os, sys, urllib.request
 try:
     url='http://127.0.0.1:${PORT}/api/dashboard'
-    print(json.dumps(json.load(urllib.request.urlopen(url, timeout=2)), ensure_ascii=False))
+    req=urllib.request.Request(url)
+    user, password=os.getenv('WMT_PUBLIC_USER'), os.getenv('WMT_PUBLIC_PASSWORD')
+    if user and password:
+        req.add_header('Authorization','Basic '+base64.b64encode((user+':'+password).encode()).decode())
+    print(json.dumps(json.load(urllib.request.urlopen(req, timeout=2)), ensure_ascii=False))
 except Exception:
     sys.exit(1)
 PY

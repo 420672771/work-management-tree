@@ -1,4 +1,5 @@
 import base64, hashlib, json, os, re, sqlite3, struct, urllib.request, urllib.parse
+from base64 import b64decode
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -115,11 +116,25 @@ class WeComCallback:
         return {'userid':userid,'msg_type':msg_type,'content':content,'task_id':task_id}
 
 class Handler(BaseHTTPRequestHandler):
+    def authorized(self):
+        # Local-only mode remains frictionless; public/tunnel mode must set both values.
+        username=os.getenv('WMT_PUBLIC_USER'); password=os.getenv('WMT_PUBLIC_PASSWORD')
+        if not username and not password: return True
+        if not username or not password: return False
+        supplied=self.headers.get('Authorization','')
+        if not supplied.startswith('Basic '): return False
+        try: got=b64decode(supplied[6:]).decode('utf-8'); user,sep,pwd=got.partition(':')
+        except Exception: return False
+        return bool(sep and user==username and pwd==password)
+    def require_auth(self):
+        if self.authorized(): return True
+        self.send_response(401); self.send_header('WWW-Authenticate','Basic realm="Work Management Tree"'); self.send_header('Content-Length','0'); self.end_headers(); return False
     def json(self, code, payload):
         data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def body(self):
         n=int(self.headers.get('Content-Length','0')); return json.loads(self.rfile.read(n) or '{}')
     def do_GET(self):
+        if not self.path.startswith('/wecom/callback') and not self.require_auth(): return
         if self.path=='/' or self.path=='/index.html':
             data=(ROOT/'static'/'index.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if self.path.startswith('/wecom/callback'):
@@ -143,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path.startswith('/wecom/callback'):
             self.handle_wecom_post(); return
+        if not self.require_auth(): return
         c=db(); p=urllib.parse.urlparse(self.path); b=self.body(); t=now()
         try:
             if p.path=='/api/tree':
