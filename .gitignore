@@ -5,3 +5,4 @@ data/*.db-*
 logs/
 worktree.pid
 .env
+bin/

@@ -72,3 +72,5 @@ WMT_DB=/tmp/worktree-pilot.db python3 scripts/run-demo-pilot.py
 默认服务只绑定本机使用；若要让企业微信回调访问，必须部署到企业内网可达地址或使用经过批准的安全网关。
 
 公网/临时隧道发布前必须设置 `WMT_PUBLIC_USER` 和 `WMT_PUBLIC_PASSWORD`，否则不要暴露端口。当前服务提供可选 HTTP Basic Auth；正式生产建议放在 HTTPS 反向代理和企业身份认证之后。
+
+如使用 Cloudflare Quick Tunnel：先启动带认证的本地服务，再运行 `scripts/start-cloudflare-preview.sh`。Quick Tunnel 适合临时验证，无固定域名和 uptime 保证。
