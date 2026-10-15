@@ -14,7 +14,7 @@ input,textarea,select,button{width:100%;box-sizing:border-box;padding:9px;border
 </style></head>
 <body><header><h1>科技产品中心 · 工作管理树</h1><div class="muted" style="color:#cbd5e1">唯一责任人 · 任务闭环 · 本地 MVP</div></header>
 <main><div class="stats" id="stats"></div>
-<div class="grid"><section class="card"><h2>责任树</h2><div class="tree" id="tree">加载中…</div></section>
+<div class="grid"><section class="card"><h2>管理树</h2><div class="tree" id="tree">加载中…</div></section>
 <section class="card"><h2>创建任务</h2><form id="form"><label>任务内容</label><input name="title" required>
 <label>挂载责任域</label><select name="org_node_id" id="taskNode" required></select><label>责任人</label><select name="owner_id" id="owners" required></select><label>截止时间</label><input type="datetime-local" name="due_at" required>
 <label>交付物/验收标准</label><textarea name="deliverable" required></textarea><label>优先级</label><select name="priority"><option>P0</option><option selected>P1</option><option>P2</option></select><button>创建任务</button></form><p id="msg" class="muted"></p></section></div>
