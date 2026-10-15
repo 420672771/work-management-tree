@@ -10,13 +10,13 @@ header{background:#172b4d;color:white;padding:18px 28px} main{max-width:1200px;m
 h1{margin:0;font-size:22px}h2{font-size:17px;margin-top:0}label{display:block;margin:8px 0 4px;font-size:13px;color:#667085}
 input,textarea,select,button{width:100%;box-sizing:border-box;padding:9px;border:1px solid #d0d5dd;border-radius:6px;font:inherit}button{background:#2563eb;color:white;border:0;cursor:pointer;margin-top:10px}.secondary{background:#64748b}
 .stats{display:flex;gap:12px}.stat{flex:1;background:#eef4ff;border-radius:8px;padding:12px}.stat b{display:block;font-size:24px}.task{border-left:4px solid #2563eb;padding:10px 12px;margin:10px 0;background:#f8fafc}.overdue{border-color:#dc2626}
-.tag{font-size:12px;padding:3px 7px;border-radius:99px;background:#e5e7eb;margin-left:5px}.tree ul{padding-left:22px}.tree li{margin:8px}.muted{color:#667085;font-size:13px}@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.tag{font-size:12px;padding:3px 7px;border-radius:99px;background:#e5e7eb;margin-left:5px}.tree ul{padding-left:22px}.tree li{margin:8px}.tree-task{margin:8px 0;padding:8px 10px;border-left:3px solid #2563eb;background:#f8fafc;border-radius:5px;font-size:13px}.tree-task.risk{border-left-color:#dc2626}.muted{color:#667085;font-size:13px}@media(max-width:800px){.grid{grid-template-columns:1fr}}
 </style></head>
 <body><header><h1>科技产品中心 · 工作管理树</h1><div class="muted" style="color:#cbd5e1">唯一责任人 · 任务闭环 · 本地 MVP</div></header>
 <main><div class="stats" id="stats"></div>
 <div class="grid"><section class="card"><h2>责任树</h2><div class="tree" id="tree">加载中…</div></section>
 <section class="card"><h2>创建任务</h2><form id="form"><label>任务内容</label><input name="title" required>
-<label>责任人</label><select name="owner_id" id="owners" required></select><label>截止时间</label><input type="datetime-local" name="due_at" required>
+<label>挂载责任域</label><select name="org_node_id" id="taskNode" required></select><label>责任人</label><select name="owner_id" id="owners" required></select><label>截止时间</label><input type="datetime-local" name="due_at" required>
 <label>交付物/验收标准</label><textarea name="deliverable" required></textarea><label>优先级</label><select name="priority"><option>P0</option><option selected>P1</option><option>P2</option></select><button>创建任务</button></form><p id="msg" class="muted"></p></section></div>
 <section class="card"><h2>任务看板</h2><div id="tasks">加载中…</div></section></main>
 <script>
@@ -28,7 +28,10 @@ async function accept(id,result){let reason=result==='rejected'?prompt('请输�
 async function load(){const [d,u,tree,tasks]=await Promise.all([get('/api/dashboard'),get('/api/users'),get('/api/tree'),get('/api/tasks')]);
 $('#stats').innerHTML=`<div class="stat"><b>${d.total}</b>任务</div><div class="stat"><b>${d.completed}</b>已完成</div><div class="stat"><b>${d.overdue}</b>超期</div><div class="stat"><b>${d.risk}</b>风险</div>`;
 $('#owners').innerHTML=u.filter(x=>x.role!=='manager').map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');let by={};tree.forEach(x=>by[x.id]={...x,children:[]});tree.forEach(x=>x.parent_id&&by[x.parent_id]&&by[x.parent_id].children.push(by[x.id]));
-function ul(n){return `<li><b>${esc(n.name)}</b><span class="tag">${esc(n.node_type)}</span>${n.boundary?`<div class="muted">${esc(n.boundary)}</div>`:''}${n.children.length?`<ul>${n.children.map(ul).join('')}</ul>`:''}</li>`}
+const tasksByNode={};tasks.forEach(t=>(tasksByNode[t.org_node_id]??=[]).push(t));
+$('#taskNode').innerHTML=tree.filter(x=>x.node_type==='domain').map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');
+function taskMini(t){return `<div class="tree-task ${t.risk_status!=='normal'?'risk':''}"><b>${esc(t.title)}</b><span class="tag">${esc(t.owner_name)}</span><span class="tag">${esc(t.work_status)}</span><div class="muted">截止：${esc(t.due_at)} · ${esc(t.deliverable)}</div></div>`}
+function ul(n){const nodeTasks=(tasksByNode[n.id]||[]).map(taskMini).join('');return `<li><b>${esc(n.name)}</b><span class="tag">${esc(n.node_type)}</span>${n.boundary?`<div class="muted">${esc(n.boundary)}</div>`:''}${nodeTasks}${n.children.length?`<ul>${n.children.map(ul).join('')}</ul>`:''}</li>`}
 $('#tree').innerHTML='<ul>'+tree.filter(x=>!x.parent_id).map(x=>ul(by[x.id])).join('')+'</ul>';
 $('#tasks').innerHTML=tasks.length?tasks.map(t=>`<div class="task ${t.time_status==='overdue'?'overdue':''}"><b>${esc(t.title)}</b><span class="tag">${esc(t.owner_name)}</span><span class="tag">${esc(t.work_status)}</span><span class="tag">${esc(t.time_status)}</span><div class="muted">截止：${esc(t.due_at)} · 验收：${esc(t.deliverable)}</div><button class="secondary" onclick="feedback(${t.id})">反馈进度/风险</button> <button onclick="update(${t.id},'in_progress')">开始执行</button> <button onclick="accept(${t.id},'passed')">验收通过</button> <button class="secondary" onclick="accept(${t.id},'rejected')">驳回</button></div>`).join(''):'暂无任务';
 $('#form').onsubmit=async e=>{e.preventDefault();let x=Object.fromEntries(new FormData(e.target));x.due_at=new Date(x.due_at).toISOString();let r=await post('/api/tasks',x);$('#msg').textContent=r.ok?'任务已创建':'创建失败';if(r.ok){e.target.reset();load()}}} load();
