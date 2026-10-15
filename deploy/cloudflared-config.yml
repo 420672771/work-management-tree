@@ -1,0 +1,10 @@
+# Named Tunnel only. Quick Tunnel URLs must not be used for production.
+# Create the tunnel and credentials with: cloudflared tunnel login
+# Then replace the values below and create a DNS route.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: worktree.example.com
+    service: http://127.0.0.1:8080
+  - service: http_status:404

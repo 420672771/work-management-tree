@@ -1,0 +1,23 @@
+[Unit]
+Description=Work Management Tree
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/work-management-tree
+ExecStart=/usr/bin/python3 /opt/work-management-tree/app.py
+Restart=always
+RestartSec=5
+Environment=PORT=8080
+Environment=WMT_DB=/opt/work-management-tree/data/worktree.db
+EnvironmentFile=-/etc/worktree/worktree.env
+User=worktree
+Group=worktree
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/work-management-tree/data /opt/work-management-tree/logs
+
+[Install]
+WantedBy=multi-user.target
