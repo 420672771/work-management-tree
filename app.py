@@ -144,7 +144,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
         elif p.path=='/api/dashboard':
-            tasks=[task_view(c,x) for x in c.execute('SELECT * FROM task')]; out={'total':len(tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks)}
+            tasks=[task_view(c,x) for x in c.execute('SELECT * FROM task')]; out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks)}
         else: self.json(404,{'error':'not found'}); c.close(); return
         self.json(200,out); c.close()
     def handle_wecom_get(self):
