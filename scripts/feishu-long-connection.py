@@ -37,8 +37,15 @@ def receive(data):
                 reply='已识别任务草稿：'+slots['title']+('。请补充：'+'、'.join(missing) if missing else '。已进入待确认草稿，请在工作管理树中确认生成。')
             else:
                 reply='已识别任务草稿：'+slots['title']+'。当前飞书账号尚未绑定系统成员，请管理员在“组织配置 → 飞书成员绑定”中完成绑定；绑定后再次发送即可自动带入责任人。'
-            app.FeishuAdapter().send_text(sender,reply)
-        c.commit()
+            # Persist the event and draft before calling the remote send API. A transient
+            # Feishu send failure must not cause the event receiver to fail or retry-create.
+            c.commit()
+            try:
+                app.FeishuAdapter().send_text(sender,reply)
+            except Exception as exc:
+                print(f'Feishu reply failed: {exc}', file=sys.stderr)
+        else:
+            c.commit()
     finally: c.close()
 
 if not os.getenv('FEISHU_APP_ID') or not os.getenv('FEISHU_APP_SECRET'):
