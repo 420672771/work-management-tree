@@ -25,12 +25,14 @@ CREATE TABLE IF NOT EXISTS reporting_line (id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE TABLE IF NOT EXISTS delegate (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, delegate_user_id INTEGER NOT NULL, scope TEXT NOT NULL DEFAULT 'approval', start_at TEXT NOT NULL, end_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS progress_record (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, reported_percent INTEGER NOT NULL, report_text TEXT NOT NULL, is_blocked INTEGER NOT NULL DEFAULT 0, block_reason TEXT DEFAULT '', expected_finish TEXT, status TEXT NOT NULL DEFAULT 'pending', reported_by INTEGER, reported_at TEXT NOT NULL, confirmed_by INTEGER, confirmed_at TEXT, effective_percent INTEGER, source TEXT NOT NULL DEFAULT 'web');
 CREATE TABLE IF NOT EXISTS approval_record (id INTEGER PRIMARY KEY AUTOINCREMENT, biz_type TEXT NOT NULL, biz_id INTEGER NOT NULL, task_id INTEGER, approver_id INTEGER, due_at TEXT, status TEXT NOT NULL DEFAULT 'pending', result_reason TEXT DEFAULT '', operated_by INTEGER, created_at TEXT NOT NULL, operated_at TEXT);
+CREATE TABLE IF NOT EXISTS task_template (id INTEGER PRIMARY KEY AUTOINCREMENT, org_node_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', owner_id INTEGER NOT NULL, deliverable TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'P1', recurrence TEXT NOT NULL, due_offset_days INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', review_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS task_instance (id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, instance_date TEXT NOT NULL, task_id INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(template_id,instance_date));
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def db():
     c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA)
-    for statement in ("ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
+    for statement in ("ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
     return c
@@ -44,6 +46,19 @@ def approver_for(c, user_id):
     return manager[0] if manager else None
 def create_approval(c, biz_type, biz_id, task_id, approver_id):
     return c.execute("INSERT INTO approval_record(biz_type,biz_id,task_id,approver_id,due_at,created_at) VALUES(?,?,?,?,?,?)",(biz_type,biz_id,task_id,approver_id,now(),now())).lastrowid
+def generate_routines(c, instance_date=None):
+    from datetime import date, timedelta
+    day=date.fromisoformat(instance_date) if instance_date else datetime.now(timezone.utc).date(); created=[]
+    weekday=day.strftime('%a').upper()
+    for template in c.execute("SELECT * FROM task_template WHERE status='active'"):
+        recurrence=template['recurrence'].upper()
+        if recurrence=='WEEKLY' and weekday!='MON': continue
+        if recurrence not in ('DAILY','WEEKLY'): continue
+        if c.execute('SELECT 1 FROM task_instance WHERE template_id=? AND instance_date=?',(template['id'],day.isoformat())).fetchone(): continue
+        due=(day+timedelta(days=template['due_offset_days'])).isoformat()+'T17:00:00+08:00'; t=now(); approver=approver_for(c,template['owner_id'])
+        tid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,deliverable,source,task_type,parent_template_id,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(template['org_node_id'],template['title'],template['description'],template['owner_id'],due,template['priority'],template['deliverable'],'routine_generator','ROUTINE',template['id'],'approved',approver,t,t)).lastrowid
+        c.execute('INSERT INTO task_instance(template_id,instance_date,task_id,created_at) VALUES(?,?,?,?)',(template['id'],day.isoformat(),tid,t)); audit(c,'task',tid,'routine_generated','system',after={'template_id':template['id'],'instance_date':day.isoformat()}); created.append(tid)
+    return created
 def seed(c):
     if c.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 0:
         c.execute("INSERT INTO user(name,department,role) VALUES('科技产品中心负责人','科技产品中心','manager')")
@@ -173,6 +188,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]
         elif p.path=='/api/org/departments': out=[rowdict(x) for x in c.execute('SELECT * FROM org_department WHERE status=? ORDER BY name',('active',))]
         elif p.path=='/api/progress': out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(q.get('task_id',[0])[0],))]
+        elif p.path=='/api/routine/templates': out=[rowdict(x) for x in c.execute("SELECT tt.*,u.name AS owner_name,n.name AS node_name FROM task_template tt LEFT JOIN user u ON u.id=tt.owner_id LEFT JOIN org_node n ON n.id=tt.org_node_id WHERE tt.status='active' ORDER BY tt.id DESC")]
         elif p.path=='/api/dashboard':
             tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]}
         else: self.json(404,{'error':'not found'}); c.close(); return
@@ -210,6 +226,14 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path=='/api/org/departments':
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_department(name,parent_id,owner_user_id,status,created_at) VALUES(?,?,?,?,?)',(b['name'],b.get('parent_id'),b.get('owner_user_id'),'active',t)).lastrowid; audit(c,'org_department',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/routine/templates':
+                required=['org_node_id','title','owner_id','deliverable','recurrence']; missing=[x for x in required if not b.get(x)]
+                if missing: return self.json(400,{'error':'missing fields','fields':missing})
+                recurrence=b['recurrence'].upper()
+                if recurrence not in ('DAILY','WEEKLY'): return self.json(400,{'error':'recurrence must be DAILY or WEEKLY'})
+                oid=c.execute('INSERT INTO task_template(org_node_id,title,description,owner_id,deliverable,priority,recurrence,due_offset_days,review_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(b['org_node_id'],b['title'],b.get('description',''),b['owner_id'],b['deliverable'],b.get('priority','P1'),recurrence,int(b.get('due_offset_days',0)),b.get('review_at'),t)).lastrowid; audit(c,'task_template',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/routine/generate':
+                generated=generate_routines(c,b.get('instance_date')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/tasks':
                 required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})

@@ -41,6 +41,15 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(c.execute('select status from approval_record where id=?',(aid,)).fetchone()[0],'pending')
             self.assertEqual(c.execute('select effective_percent from progress_record where id=?',(rid,)).fetchone()[0],None)
         finally: c.close()
+    def test_routine_generation_is_idempotent(self):
+        c=app.db()
+        try:
+            owner=2; node=c.execute("select id from org_node where node_type='domain' limit 1").fetchone()[0]
+            c.execute("insert into task_template(org_node_id,title,owner_id,deliverable,recurrence,created_at) values(?,?,?,?,?,?)",(node,'每日站会',owner,'站会纪要','DAILY',app.now()))
+            self.assertEqual(len(app.generate_routines(c,'2030-01-01')),1)
+            self.assertEqual(len(app.generate_routines(c,'2030-01-01')),0)
+            self.assertEqual(c.execute("select count(*) from task where task_type='ROUTINE'").fetchone()[0],1)
+        finally: c.close()
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]
