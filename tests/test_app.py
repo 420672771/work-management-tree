@@ -29,6 +29,18 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(x['risk_status'],'blocked')
             self.assertEqual(x['time_status'],'overdue')
         finally: c.close()
+    def test_v2_reporting_line_and_progress_confirmation_models(self):
+        c=app.db()
+        try:
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            owner=c.execute("select id from user where id<>? limit 1",(manager,)).fetchone()[0]
+            self.assertEqual(app.approver_for(c,owner),manager)
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,approver_id,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('v2',owner,'2030-01-01T00:00:00+00:00','x','approved',manager,app.now(),app.now())).lastrowid
+            rid=c.execute("insert into progress_record(task_id,reported_percent,report_text,reported_at) values(?,?,?,?)",(tid,60,'完成核心流程',app.now())).lastrowid
+            aid=app.create_approval(c,'progress_confirm',rid,tid,manager); c.commit()
+            self.assertEqual(c.execute('select status from approval_record where id=?',(aid,)).fetchone()[0],'pending')
+            self.assertEqual(c.execute('select effective_percent from progress_record where id=?',(rid,)).fetchone()[0],None)
+        finally: c.close()
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]

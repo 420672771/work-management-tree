@@ -18,14 +18,32 @@ CREATE TABLE IF NOT EXISTS acceptance (id INTEGER PRIMARY KEY AUTOINCREMENT, tas
 CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, object_type TEXT NOT NULL, object_id INTEGER NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL, before_json TEXT, after_json TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS wecom_message (id INTEGER PRIMARY KEY AUTOINCREMENT, userid TEXT NOT NULL, msg_type TEXT NOT NULL, content TEXT DEFAULT '', task_id INTEGER, received_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notify_log (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, user_id INTEGER NOT NULL, kind TEXT NOT NULL, notify_day TEXT NOT NULL, status TEXT NOT NULL, response_json TEXT DEFAULT '', created_at TEXT NOT NULL, UNIQUE(task_id,user_id,kind,notify_day));
+CREATE TABLE IF NOT EXISTS org_department (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, parent_id INTEGER, owner_user_id INTEGER, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS org_position (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, dept_id INTEGER, level TEXT DEFAULT '', default_role TEXT DEFAULT 'member', status TEXT NOT NULL DEFAULT 'active');
+CREATE TABLE IF NOT EXISTS user_position (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, position_id INTEGER NOT NULL, is_primary INTEGER NOT NULL DEFAULT 1, valid_from TEXT, valid_to TEXT);
+CREATE TABLE IF NOT EXISTS reporting_line (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, direct_leader_id INTEGER, approver_id INTEGER, dotted_leader_id INTEGER, effective_from TEXT NOT NULL, effective_to TEXT, UNIQUE(user_id,effective_from));
+CREATE TABLE IF NOT EXISTS delegate (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, delegate_user_id INTEGER NOT NULL, scope TEXT NOT NULL DEFAULT 'approval', start_at TEXT NOT NULL, end_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS progress_record (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, reported_percent INTEGER NOT NULL, report_text TEXT NOT NULL, is_blocked INTEGER NOT NULL DEFAULT 0, block_reason TEXT DEFAULT '', expected_finish TEXT, status TEXT NOT NULL DEFAULT 'pending', reported_by INTEGER, reported_at TEXT NOT NULL, confirmed_by INTEGER, confirmed_at TEXT, effective_percent INTEGER, source TEXT NOT NULL DEFAULT 'web');
+CREATE TABLE IF NOT EXISTS approval_record (id INTEGER PRIMARY KEY AUTOINCREMENT, biz_type TEXT NOT NULL, biz_id INTEGER NOT NULL, task_id INTEGER, approver_id INTEGER, due_at TEXT, status TEXT NOT NULL DEFAULT 'pending', result_reason TEXT DEFAULT '', operated_by INTEGER, created_at TEXT NOT NULL, operated_at TEXT);
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def db():
-    c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA); return c
+    c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA)
+    for statement in ("ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
+        try: c.execute(statement)
+        except sqlite3.OperationalError: pass
+    return c
 def rowdict(row): return dict(row) if row else None
 def audit(c, typ, oid, action, actor, before=None, after=None):
     c.execute("INSERT INTO audit_log(object_type,object_id,action,actor,before_json,after_json,created_at) VALUES(?,?,?,?,?,?,?)", (typ, oid, action, actor, json.dumps(before, ensure_ascii=False) if before else None, json.dumps(after, ensure_ascii=False) if after else None, now()))
+def approver_for(c, user_id):
+    line=c.execute("SELECT approver_id,direct_leader_id FROM reporting_line WHERE user_id=? AND (effective_to IS NULL OR effective_to>?) ORDER BY effective_from DESC LIMIT 1",(user_id,now())).fetchone()
+    if line and (line['approver_id'] or line['direct_leader_id']): return line['approver_id'] or line['direct_leader_id']
+    manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
+    return manager[0] if manager else None
+def create_approval(c, biz_type, biz_id, task_id, approver_id):
+    return c.execute("INSERT INTO approval_record(biz_type,biz_id,task_id,approver_id,due_at,created_at) VALUES(?,?,?,?,?,?)",(biz_type,biz_id,task_id,approver_id,now(),now())).lastrowid
 def seed(c):
     if c.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 0:
         c.execute("INSERT INTO user(name,department,role) VALUES('科技产品中心负责人','科技产品中心','manager')")
@@ -34,6 +52,10 @@ def seed(c):
     if c.execute("SELECT COUNT(*) FROM org_node").fetchone()[0] == 0:
         t=now(); c.execute("INSERT INTO org_node(node_type,name,boundary,effective_at,created_at) VALUES('department','科技产品中心','科技产品中心全部责任域',?,?)",(t,t))
         root=c.execute("INSERT INTO org_node(parent_id,node_type,name,boundary,effective_at,created_at) VALUES(?,?,?,?,?,?)",(c.execute("SELECT id FROM org_node ORDER BY id DESC LIMIT 1").fetchone()[0],'domain','产品与项目管理','负责产品规划、项目交付和跨部门推进',t,t)).lastrowid
+    manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
+    if manager:
+        for row in c.execute("SELECT id FROM user WHERE id<>?",(manager[0],)):
+            if not c.execute("SELECT 1 FROM reporting_line WHERE user_id=? AND effective_to IS NULL",(row[0],)).fetchone(): c.execute("INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,effective_from) VALUES(?,?,?,?)",(row[0],manager[0],manager[0],now()))
 
 def initialize():
     c=db()
@@ -44,6 +66,7 @@ def initialize():
 
 def task_view(c, r):
     d=rowdict(r); owner=c.execute('SELECT name FROM user WHERE id=?',(d['owner_id'],)).fetchone(); d['owner_name']=owner[0] if owner else '未知责任人'
+    approver=c.execute('SELECT name FROM user WHERE id=?',(d.get('approver_id'),)).fetchone() if d.get('approver_id') else None; d['approver_name']=approver[0] if approver else ''
     due=datetime.fromisoformat(d['due_at'].replace('Z','+00:00')); current=datetime.now(timezone.utc)
     d['time_status']='overdue' if due < current and d['work_status'] not in ('completed','cancelled') else ('due_soon' if (due-current).total_seconds()<86400 and d['work_status'] not in ('completed','cancelled') else 'normal')
     return d
@@ -143,8 +166,11 @@ class Handler(BaseHTTPRequestHandler):
         if p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
+        elif p.path=='/api/approvals':
+            out=[rowdict(x) for x in c.execute("SELECT a.*,t.title,u.name AS approver_name FROM approval_record a LEFT JOIN task t ON t.id=a.task_id LEFT JOIN user u ON u.id=a.approver_id WHERE a.status=? ORDER BY a.created_at",(q.get('status',['pending'])[0],))]
+        elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]
         elif p.path=='/api/dashboard':
-            tasks=[task_view(c,x) for x in c.execute('SELECT * FROM task')]; out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks)}
+            tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]}
         else: self.json(404,{'error':'not found'}); c.close(); return
         self.json(200,out); c.close()
     def handle_wecom_get(self):
@@ -175,8 +201,28 @@ class Handler(BaseHTTPRequestHandler):
                 required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
                 if not c.execute('SELECT 1 FROM user WHERE id=?',(b['owner_id'],)).fetchone(): return self.json(400,{'error':'owner_id does not exist'})
-                oid=c.execute('INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(b.get('org_node_id'),b['title'],b.get('description',''),b['owner_id'],b['due_at'],b.get('priority','P1'),b.get('risk_status','normal'),b['deliverable'],b.get('source','manual'),t,t)).lastrowid; audit(c,'task',oid,'create','local',after=b); c.commit(); out={'id':oid}
+                approver_id=approver_for(c,b['owner_id'])
+                oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(b.get('org_node_id'),b['title'],b.get('description',''),b['owner_id'],b['due_at'],b.get('priority','P1'),b.get('risk_status','normal'),b['deliverable'],b.get('source','manual'),b.get('task_type','PROJECT'),'pending',approver_id,t,t)).lastrowid
+                aid=create_approval(c,'task_confirm',oid,oid,approver_id); audit(c,'task',oid,'create_pending','local',after=b); c.commit(); out={'id':oid,'approval_id':aid,'approval_status':'pending'}
             elif p.path=='/api/ai/draft': out=ai_draft(b.get('text',''))
+            elif p.path.startswith('/api/approvals/') and p.path.endswith('/confirm'):
+                aid=int(p.path.split('/')[3]); approval=c.execute('SELECT * FROM approval_record WHERE id=?',(aid,)).fetchone()
+                if not approval or approval['status']!='pending': return self.json(404,{'error':'pending approval not found'})
+                result=b.get('result'); operator=b.get('operator_id')
+                if result not in ('approved','rejected'): return self.json(400,{'error':'result must be approved or rejected'})
+                if approval['approver_id'] and operator and int(operator)!=approval['approver_id']: return self.json(403,{'error':'only assigned approver may confirm'})
+                c.execute('UPDATE approval_record SET status=?,result_reason=?,operated_by=?,operated_at=? WHERE id=?',(result,b.get('reason',''),operator,t,aid))
+                if approval['biz_type']=='task_confirm': c.execute("UPDATE task SET approval_status=?,work_status=?,confirmed_by=?,confirmed_at=?,confirm_source='manual',updated_at=? WHERE id=?",('approved' if result=='approved' else 'rejected','assigned' if result=='approved' else 'draft',operator,t,t,approval['task_id']))
+                elif approval['biz_type']=='progress_confirm' and result=='approved':
+                    record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone(); c.execute("UPDATE progress_record SET status='approved',effective_percent=?,confirmed_by=?,confirmed_at=? WHERE id=?",(record['reported_percent'],operator,t,record['id'])); c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],'completed' if record['reported_percent']==100 else 'in_progress',t,approval['task_id']))
+                audit(c,'approval',aid,result,str(operator or 'local'),after=b); c.commit(); out={'id':aid,'status':result}
+            elif p.path.startswith('/api/tasks/') and p.path.endswith('/progress'):
+                tid=int(p.path.split('/')[3]); task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+                if not task or task['approval_status']!='approved': return self.json(400,{'error':'only approved tasks may receive progress'})
+                percent=b.get('percent');
+                if not isinstance(percent,int) or percent<0 or percent>100 or not b.get('comment'): return self.json(400,{'error':'percent (0-100 integer) and comment are required'})
+                reporter=b.get('reporter_id',task['owner_id']); rid=c.execute("INSERT INTO progress_record(task_id,reported_percent,report_text,is_blocked,block_reason,expected_finish,reported_by,reported_at,source) VALUES(?,?,?,?,?,?,?,?,?)",(tid,percent,b['comment'],1 if b.get('blocked') else 0,b.get('block_reason',''),b.get('expected_finish'),reporter,t,b.get('source','web'))).lastrowid
+                aid=create_approval(c,'progress_confirm',rid,tid,task['approver_id']); c.execute("UPDATE task SET work_status='in_progress',updated_at=? WHERE id=?",(t,tid)); audit(c,'progress',rid,'report_pending',str(reporter),after=b); c.commit(); out={'id':rid,'approval_id':aid,'status':'pending'}
             elif p.path.startswith('/api/tasks/'):
                 tid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone();
                 if not old: return self.json(404,{'error':'task not found'})
