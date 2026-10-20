@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS progress_record (id INTEGER PRIMARY KEY AUTOINCREMENT
 CREATE TABLE IF NOT EXISTS approval_record (id INTEGER PRIMARY KEY AUTOINCREMENT, biz_type TEXT NOT NULL, biz_id INTEGER NOT NULL, task_id INTEGER, approver_id INTEGER, due_at TEXT, status TEXT NOT NULL DEFAULT 'pending', result_reason TEXT DEFAULT '', operated_by INTEGER, created_at TEXT NOT NULL, operated_at TEXT);
 CREATE TABLE IF NOT EXISTS task_template (id INTEGER PRIMARY KEY AUTOINCREMENT, org_node_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', owner_id INTEGER NOT NULL, deliverable TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'P1', recurrence TEXT NOT NULL, due_offset_days INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', review_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS task_instance (id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, instance_date TEXT NOT NULL, task_id INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(template_id,instance_date));
+CREATE TABLE IF NOT EXISTS daily_report_status (id INTEGER PRIMARY KEY AUTOINCREMENT, report_date TEXT NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL, task_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, UNIQUE(report_date,user_id));
+CREATE TABLE IF NOT EXISTS job_run_log (id INTEGER PRIMARY KEY AUTOINCREMENT, job_name TEXT NOT NULL, run_key TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_name,run_key));
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -59,6 +61,28 @@ def generate_routines(c, instance_date=None):
         tid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,deliverable,source,task_type,parent_template_id,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(template['org_node_id'],template['title'],template['description'],template['owner_id'],due,template['priority'],template['deliverable'],'routine_generator','ROUTINE',template['id'],'approved',approver,t,t)).lastrowid
         c.execute('INSERT INTO task_instance(template_id,instance_date,task_id,created_at) VALUES(?,?,?,?)',(template['id'],day.isoformat(),tid,t)); audit(c,'task',tid,'routine_generated','system',after={'template_id':template['id'],'instance_date':day.isoformat()}); created.append(tid)
     return created
+def daily_targets(c, report_date=None):
+    day=report_date or datetime.now(timezone.utc).date().isoformat(); rows=[]
+    for user in c.execute("SELECT id,name FROM user WHERE role<>'manager' ORDER BY id"):
+        tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled')",(user['id'],))]
+        focus=[x for x in tasks if x['work_status']=='in_progress' or x['time_status'] in ('overdue','due_soon') or x['due_at'][:10]==day]
+        if focus: rows.append({'user_id':user['id'],'user_name':user['name'],'tasks':focus})
+    return rows
+def run_daily_jobs(c, report_date=None, kind='all'):
+    day=report_date or datetime.now(timezone.utc).date().isoformat(); out={'date':day,'morning':0,'evening':0,'redboard':0,'approval_reminders':0}
+    if kind in ('all','morning'):
+        targets=daily_targets(c,day); out['morning']=len(targets)
+        for target in targets: c.execute("INSERT OR REPLACE INTO notify_log(task_id,user_id,kind,notify_day,status,response_json,created_at) VALUES(?,?,?,?,?,?,?)",(target['tasks'][0]['id'],target['user_id'],'morning_digest',day,'dry-run',json.dumps({'count':len(target['tasks'])},ensure_ascii=False),now()))
+    if kind in ('all','evening','close'):
+        for target in daily_targets(c,day):
+            reported=c.execute("SELECT 1 FROM progress_record WHERE reported_by=? AND substr(reported_at,1,10)=? LIMIT 1",(target['user_id'],day)).fetchone()
+            status='reported' if reported else 'unreported'; c.execute("INSERT OR REPLACE INTO daily_report_status(report_date,user_id,status,task_count,created_at) VALUES(?,?,?,?,?)",(day,target['user_id'],status,len(target['tasks']),now()))
+            if kind!='close': out['evening']+=1
+            if status=='unreported': out['redboard']+=1
+    if kind in ('all','approval'):
+        pending=c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]; out['approval_reminders']=pending
+    c.execute("INSERT OR REPLACE INTO job_run_log(job_name,run_key,result_json,created_at) VALUES(?,?,?,?)",('daily_'+kind,day,json.dumps(out,ensure_ascii=False),now()))
+    return out
 def seed(c):
     if c.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 0:
         c.execute("INSERT INTO user(name,department,role) VALUES('科技产品中心负责人','科技产品中心','manager')")
@@ -189,8 +213,9 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/org/departments': out=[rowdict(x) for x in c.execute('SELECT * FROM org_department WHERE status=? ORDER BY name',('active',))]
         elif p.path=='/api/progress': out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(q.get('task_id',[0])[0],))]
         elif p.path=='/api/routine/templates': out=[rowdict(x) for x in c.execute("SELECT tt.*,u.name AS owner_name,n.name AS node_name FROM task_template tt LEFT JOIN user u ON u.id=tt.owner_id LEFT JOIN org_node n ON n.id=tt.org_node_id WHERE tt.status='active' ORDER BY tt.id DESC")]
+        elif p.path=='/api/ops/daily-preview': out={'date':q.get('date',[None])[0] or datetime.now(timezone.utc).date().isoformat(),'targets':daily_targets(c,q.get('date',[None])[0])}
         elif p.path=='/api/dashboard':
-            tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]}
+            tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; today=datetime.now(timezone.utc).date().isoformat(); out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]}
         else: self.json(404,{'error':'not found'}); c.close(); return
         self.json(200,out); c.close()
     def handle_wecom_get(self):
@@ -234,6 +259,8 @@ class Handler(BaseHTTPRequestHandler):
                 oid=c.execute('INSERT INTO task_template(org_node_id,title,description,owner_id,deliverable,priority,recurrence,due_offset_days,review_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(b['org_node_id'],b['title'],b.get('description',''),b['owner_id'],b['deliverable'],b.get('priority','P1'),recurrence,int(b.get('due_offset_days',0)),b.get('review_at'),t)).lastrowid; audit(c,'task_template',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/routine/generate':
                 generated=generate_routines(c,b.get('instance_date')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
+            elif p.path=='/api/ops/daily-run':
+                out=run_daily_jobs(c,b.get('report_date'),b.get('kind','all')); c.commit()
             elif p.path=='/api/tasks':
                 required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})

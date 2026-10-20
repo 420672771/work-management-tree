@@ -50,6 +50,15 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(len(app.generate_routines(c,'2030-01-01')),0)
             self.assertEqual(c.execute("select count(*) from task where task_type='ROUTINE'").fetchone()[0],1)
         finally: c.close()
+    def test_daily_jobs_mark_unreported_without_duplicate_failures(self):
+        c=app.db()
+        try:
+            c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,work_status,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('日报验收',2,'2030-01-01T00:00:00+00:00','日报','approved','in_progress',app.now(),app.now()))
+            result=app.run_daily_jobs(c,'2030-01-01','all')
+            self.assertGreaterEqual(result['morning'],1)
+            self.assertGreaterEqual(result['redboard'],1)
+            self.assertGreater(c.execute("select count(*) from daily_report_status where report_date='2030-01-01'").fetchone()[0],0)
+        finally: c.close()
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]
