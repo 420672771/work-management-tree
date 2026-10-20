@@ -251,6 +251,12 @@ class Handler(BaseHTTPRequestHandler):
                     if sender and not any(x['open_id']==sender for x in rows): rows.append({'open_id':sender,'last_text':content[:80],'last_seen_at':log['created_at']})
                 except Exception: pass
             out=rows
+        elif p.path=='/api/task/drafts':
+            status=q.get('status',['preview,collecting'])[0].split(',')
+            marks=','.join('?' for _ in status)
+            out=[]
+            for draft in c.execute(f"SELECT d.*,u.name AS user_name FROM conversation_draft d LEFT JOIN user u ON u.id=d.user_id WHERE d.status IN ({marks}) AND d.expire_at>? ORDER BY d.updated_at DESC",(*status,now())):
+                item=rowdict(draft); item['slots']=json.loads(item.pop('slots_json')); item['missing_slots']=json.loads(item['missing_slots']); out.append(item)
         elif p.path=='/api/ops/daily-preview': out={'date':q.get('date',[None])[0] or datetime.now(timezone.utc).date().isoformat(),'targets':daily_targets(c,q.get('date',[None])[0])}
         elif p.path=='/api/dashboard':
             tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; today=datetime.now(timezone.utc).date().isoformat(); out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]}
