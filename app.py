@@ -107,6 +107,13 @@ SLOT_LABELS={
 }
 def friendly_slot_labels(keys):
     return '、'.join(SLOT_LABELS.get(key,'必要信息') for key in keys)
+def discard_draft(c, draft_id, actor='local'):
+    draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(draft_id,)).fetchone()
+    if not draft or draft['status'] not in ('collecting','preview'):
+        return False
+    c.execute("UPDATE conversation_draft SET status='discarded',updated_at=? WHERE id=?",(now(),draft_id))
+    audit(c,'conversation_draft',draft_id,'discard',actor,after={'status':'discarded'})
+    return True
 def seed(c):
     if c.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 0:
         c.execute("INSERT INTO user(name,department,role) VALUES('科技产品中心负责人','科技产品中心','manager')")
@@ -350,6 +357,10 @@ class Handler(BaseHTTPRequestHandler):
                 slots=json.loads(draft['slots_json']); missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
                 if missing: return self.json(400,{'error':'missing slots','fields':missing})
                 approver_id=approver_for(c,slots['owner_id']); oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(slots.get('org_node_id'),slots['title'],slots.get('description',''),slots['owner_id'],slots['due_at'],slots.get('priority','P1'),'normal',slots.get('deliverable') or '待明确','conversation',slots.get('task_type','PROJECT'),'pending',approver_id,t,t)).lastrowid; aid=create_approval(c,'task_confirm',oid,oid,approver_id); c.execute("UPDATE conversation_draft SET status='generated',updated_at=? WHERE id=?",(t,did)); audit(c,'task',oid,'create_from_draft',str(draft['user_id'] or 'local'),after=slots); c.commit(); out={'task_id':oid,'approval_id':aid,'status':'pending'}
+            elif p.path.startswith('/api/task/draft/') and p.path.endswith('/discard'):
+                did=int(p.path.split('/')[4])
+                if not discard_draft(c,did,'local'): return self.json(404,{'error':'draft is no longer available'})
+                c.commit(); out={'id':did,'status':'discarded'}
             elif p.path=='/api/tasks':
                 required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})

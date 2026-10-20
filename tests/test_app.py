@@ -76,6 +76,15 @@ class WorkTreeTests(unittest.TestCase):
         self.assertEqual(labels,'任务责任人、截止日期、必要信息')
         self.assertNotIn('owner_id',labels)
         self.assertNotIn('due_at',labels)
+    def test_discard_draft_hides_it_but_keeps_audit_record(self):
+        c=app.db()
+        try:
+            did=c.execute("insert into conversation_draft(session_id,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('test','无需创建','{}','[]','preview','2030-01-01T00:00:00+00:00',app.now(),app.now())).lastrowid
+            self.assertTrue(app.discard_draft(c,did))
+            c.commit()
+            self.assertEqual(c.execute('select status from conversation_draft where id=?',(did,)).fetchone()[0],'discarded')
+            self.assertEqual(c.execute("select count(*) from audit_log where object_type='conversation_draft' and object_id=? and action='discard'",(did,)).fetchone()[0],1)
+        finally: c.close()
     def test_expired_progress_is_auto_confirmed(self):
         c=app.db()
         try:
