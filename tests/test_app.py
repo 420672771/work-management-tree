@@ -66,6 +66,11 @@ class WorkTreeTests(unittest.TestCase):
         slots,missing=app.draft_slots('请在2030-01-01完成会议纪要',2)
         self.assertFalse(missing)
         self.assertEqual(slots['due_at'][:10],'2030-01-01')
+    def test_parse_due_understands_chinese_weekday(self):
+        from datetime import datetime
+        due=app.parse_due('本周四之前完成部门总结报告')
+        self.assertIsNotNone(due)
+        self.assertEqual(datetime.fromisoformat(due).weekday(),3)
     def test_expired_progress_is_auto_confirmed(self):
         c=app.db()
         try:
