@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Receive Feishu events via WebSocket; no public callback URL is required."""
 import json, os, sys
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -28,7 +29,7 @@ def receive(data):
             except Exception: text=message.get('content','')
         if text and sender:
             slots,missing=app.draft_slots(text,user[0] if user else None)
-            expire=(app.datetime.now(app.timezone.utc)+app.timedelta(minutes=30)).isoformat()
+            expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
             state='collecting' if missing else 'preview'
             c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
                       (f'feishu:{sender}',user[0] if user else None,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),state,expire,app.now(),app.now()))
