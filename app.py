@@ -69,6 +69,8 @@ def task_view(c, r):
     approver=c.execute('SELECT name FROM user WHERE id=?',(d.get('approver_id'),)).fetchone() if d.get('approver_id') else None; d['approver_name']=approver[0] if approver else ''
     due=datetime.fromisoformat(d['due_at'].replace('Z','+00:00')); current=datetime.now(timezone.utc)
     d['time_status']='overdue' if due < current and d['work_status'] not in ('completed','cancelled') else ('due_soon' if (due-current).total_seconds()<86400 and d['work_status'] not in ('completed','cancelled') else 'normal')
+    progress=c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC LIMIT 1',(d['id'],)).fetchone()
+    d['latest_progress']=rowdict(progress)
     return d
 
 def parse_due(text):
@@ -167,8 +169,10 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
         elif p.path=='/api/approvals':
-            out=[rowdict(x) for x in c.execute("SELECT a.*,t.title,u.name AS approver_name FROM approval_record a LEFT JOIN task t ON t.id=a.task_id LEFT JOIN user u ON u.id=a.approver_id WHERE a.status=? ORDER BY a.created_at",(q.get('status',['pending'])[0],))]
+            out=[rowdict(x) for x in c.execute("SELECT a.*,t.title,u.name AS approver_name,p.reported_percent,p.report_text,p.is_blocked,p.block_reason,p.expected_finish FROM approval_record a LEFT JOIN task t ON t.id=a.task_id LEFT JOIN user u ON u.id=a.approver_id LEFT JOIN progress_record p ON a.biz_type='progress_confirm' AND p.id=a.biz_id WHERE a.status=? ORDER BY a.created_at",(q.get('status',['pending'])[0],))]
         elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]
+        elif p.path=='/api/org/departments': out=[rowdict(x) for x in c.execute('SELECT * FROM org_department WHERE status=? ORDER BY name',('active',))]
+        elif p.path=='/api/progress': out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(q.get('task_id',[0])[0],))]
         elif p.path=='/api/dashboard':
             tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]}
         else: self.json(404,{'error':'not found'}); c.close(); return
@@ -197,6 +201,15 @@ class Handler(BaseHTTPRequestHandler):
                     oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','owner'),b['wecom_userid'])).lastrowid
                 except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
                 audit(c,'user',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/reporting-lines':
+                required=['user_id','direct_leader_id']; missing=[x for x in required if not b.get(x)]
+                if missing: return self.json(400,{'error':'missing fields','fields':missing})
+                if int(b['user_id'])==int(b['direct_leader_id']): return self.json(400,{'error':'a user cannot report to self'})
+                c.execute('UPDATE reporting_line SET effective_to=? WHERE user_id=? AND effective_to IS NULL',(t,b['user_id']))
+                oid=c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,dotted_leader_id,effective_from) VALUES(?,?,?,?,?)',(b['user_id'],b['direct_leader_id'],b.get('approver_id') or b['direct_leader_id'],b.get('dotted_leader_id'),t)).lastrowid; audit(c,'reporting_line',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/org/departments':
+                if not b.get('name'): return self.json(400,{'error':'name is required'})
+                oid=c.execute('INSERT INTO org_department(name,parent_id,owner_user_id,status,created_at) VALUES(?,?,?,?,?)',(b['name'],b.get('parent_id'),b.get('owner_user_id'),'active',t)).lastrowid; audit(c,'org_department',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/tasks':
                 required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
