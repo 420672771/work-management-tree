@@ -243,6 +243,14 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/org/departments': out=[rowdict(x) for x in c.execute('SELECT * FROM org_department WHERE status=? ORDER BY name',('active',))]
         elif p.path=='/api/progress': out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(q.get('task_id',[0])[0],))]
         elif p.path=='/api/routine/templates': out=[rowdict(x) for x in c.execute("SELECT tt.*,u.name AS owner_name,n.name AS node_name FROM task_template tt LEFT JOIN user u ON u.id=tt.owner_id LEFT JOIN org_node n ON n.id=tt.org_node_id WHERE tt.status='active' ORDER BY tt.id DESC")]
+        elif p.path=='/api/feishu/unbound-identities':
+            rows=[]
+            for log in c.execute("SELECT id,payload_json,created_at FROM im_message_log WHERE channel='feishu_ws' AND user_id IS NULL ORDER BY id DESC"):
+                try:
+                    payload=json.loads(log['payload_json']); event=payload.get('event',payload); sender=((event.get('sender') or {}).get('sender_id') or {}).get('open_id'); content=json.loads((event.get('message') or {}).get('content','{}')).get('text','')
+                    if sender and not any(x['open_id']==sender for x in rows): rows.append({'open_id':sender,'last_text':content[:80],'last_seen_at':log['created_at']})
+                except Exception: pass
+            out=rows
         elif p.path=='/api/ops/daily-preview': out={'date':q.get('date',[None])[0] or datetime.now(timezone.utc).date().isoformat(),'targets':daily_targets(c,q.get('date',[None])[0])}
         elif p.path=='/api/dashboard':
             tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; today=datetime.now(timezone.utc).date().isoformat(); out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]}

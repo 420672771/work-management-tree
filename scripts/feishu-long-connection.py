@@ -28,7 +28,14 @@ def receive(data):
             except Exception: text=message.get('content','')
         if text and sender:
             slots,missing=app.draft_slots(text,user[0] if user else None)
-            reply='已识别任务草稿：'+slots['title']+('。请补充：'+'、'.join(missing) if missing else '。请在网页确认生成。')
+            expire=(app.datetime.now(app.timezone.utc)+app.timedelta(minutes=30)).isoformat()
+            state='collecting' if missing else 'preview'
+            c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      (f'feishu:{sender}',user[0] if user else None,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),state,expire,app.now(),app.now()))
+            if user:
+                reply='已识别任务草稿：'+slots['title']+('。请补充：'+'、'.join(missing) if missing else '。已进入待确认草稿，请在工作管理树中确认生成。')
+            else:
+                reply='已识别任务草稿：'+slots['title']+'。当前飞书账号尚未绑定系统成员，请管理员在“组织配置 → 飞书成员绑定”中完成绑定；绑定后再次发送即可自动带入责任人。'
             app.FeishuAdapter().send_text(sender,reply)
         c.commit()
     finally: c.close()
