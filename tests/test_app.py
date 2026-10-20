@@ -66,6 +66,15 @@ class WorkTreeTests(unittest.TestCase):
         slots,missing=app.draft_slots('请在2030-01-01完成会议纪要',2)
         self.assertFalse(missing)
         self.assertEqual(slots['due_at'][:10],'2030-01-01')
+    def test_expired_progress_is_auto_confirmed(self):
+        c=app.db()
+        try:
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,work_status,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('超时进度',2,'2030-01-01T00:00:00+00:00','x','approved','in_progress',app.now(),app.now())).lastrowid
+            rid=c.execute("insert into progress_record(task_id,reported_percent,report_text,reported_at) values(?,?,?,?)",(tid,75,'等待确认',app.now())).lastrowid
+            aid=app.create_approval(c,'progress_confirm',rid,tid,1); c.execute("update approval_record set created_at='2020-01-01T00:00:00+00:00' where id=?",(aid,)); result=app.run_daily_jobs(c,'2030-01-01','approval')
+            self.assertEqual(result['auto_confirmed_progress'],1)
+            self.assertEqual(c.execute('select effective_percent from task where id=?',(tid,)).fetchone()[0],75)
+        finally: c.close()
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]

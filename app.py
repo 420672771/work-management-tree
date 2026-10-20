@@ -81,7 +81,16 @@ def run_daily_jobs(c, report_date=None, kind='all'):
             if kind!='close': out['evening']+=1
             if status=='unreported': out['redboard']+=1
     if kind in ('all','approval'):
-        pending=c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]; out['approval_reminders']=pending
+        from datetime import timedelta
+        hours=int(os.getenv('WMT_PROGRESS_AUTO_CONFIRM_HOURS','24')); cutoff=(datetime.now(timezone.utc)-timedelta(hours=hours)).isoformat(); auto=0
+        for approval in c.execute("SELECT * FROM approval_record WHERE status='pending' AND biz_type='progress_confirm' AND created_at<=?",(cutoff,)).fetchall():
+            record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone()
+            if not record: continue
+            c.execute("UPDATE approval_record SET status='approved',result_reason=?,operated_at=? WHERE id=?",('超时自动生效',now(),approval['id']))
+            c.execute("UPDATE progress_record SET status='auto_approved',effective_percent=?,confirmed_at=? WHERE id=?",(record['reported_percent'],now(),record['id']))
+            c.execute("UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,confirm_source='timeout_auto',updated_at=? WHERE id=?",(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],'completed' if record['reported_percent']==100 else 'in_progress',now(),approval['task_id']))
+            audit(c,'approval',approval['id'],'timeout_auto','system',after={'hours':hours}); auto+=1
+        pending=c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]; out['approval_reminders']=pending; out['auto_confirmed_progress']=auto
     c.execute("INSERT OR REPLACE INTO job_run_log(job_name,run_key,result_json,created_at) VALUES(?,?,?,?)",('daily_'+kind,day,json.dumps(out,ensure_ascii=False),now()))
     return out
 def draft_slots(text, owner_id=None):
