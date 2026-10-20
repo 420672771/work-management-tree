@@ -245,10 +245,11 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/routine/templates': out=[rowdict(x) for x in c.execute("SELECT tt.*,u.name AS owner_name,n.name AS node_name FROM task_template tt LEFT JOIN user u ON u.id=tt.owner_id LEFT JOIN org_node n ON n.id=tt.org_node_id WHERE tt.status='active' ORDER BY tt.id DESC")]
         elif p.path=='/api/feishu/unbound-identities':
             rows=[]
-            for log in c.execute("SELECT id,payload_json,created_at FROM im_message_log WHERE channel='feishu_ws' AND user_id IS NULL ORDER BY id DESC"):
+            for log in c.execute("SELECT id,payload_json,created_at FROM im_message_log WHERE channel='feishu_ws' ORDER BY id DESC"):
                 try:
                     payload=json.loads(log['payload_json']); event=payload.get('event',payload); sender=((event.get('sender') or {}).get('sender_id') or {}).get('open_id'); content=json.loads((event.get('message') or {}).get('content','{}')).get('text','')
-                    if sender and not any(x['open_id']==sender for x in rows): rows.append({'open_id':sender,'last_text':content[:80],'last_seen_at':log['created_at']})
+                    bound=c.execute('SELECT 1 FROM user WHERE feishu_open_id=?',(sender,)).fetchone() if sender else None
+                    if sender and not bound and not any(x['open_id']==sender for x in rows): rows.append({'open_id':sender,'last_text':content[:80],'last_seen_at':log['created_at']})
                 except Exception: pass
             out=rows
         elif p.path=='/api/task/drafts':
@@ -291,7 +292,13 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id'):
                 uid=int(p.path.split('/')[3])
                 if not b.get('feishu_open_id'): return self.json(400,{'error':'feishu_open_id is required'})
-                c.execute('UPDATE user SET feishu_open_id=? WHERE id=?',(b['feishu_open_id'],uid)); audit(c,'user',uid,'bind_feishu','local',after={'feishu_open_id':b['feishu_open_id']}); c.commit(); out={'id':uid}
+                open_id=b['feishu_open_id'].strip()
+                existing=c.execute('SELECT id FROM user WHERE feishu_open_id=? AND id<>?',(open_id,uid)).fetchone()
+                if existing: return self.json(409,{'error':'feishu_open_id already bound to another user'})
+                c.execute('UPDATE user SET feishu_open_id=? WHERE id=?',(open_id,uid))
+                c.execute("UPDATE conversation_draft SET user_id=?,updated_at=? WHERE source_type='feishu' AND session_id=? AND user_id IS NULL",(uid,t,f'feishu:{open_id}'))
+                c.execute("UPDATE im_message_log SET user_id=? WHERE channel='feishu_ws' AND user_id IS NULL AND payload_json LIKE ?",(uid,f'%{open_id}%'))
+                audit(c,'user',uid,'bind_feishu','local',after={'feishu_open_id':open_id}); c.commit(); out={'id':uid}
             elif p.path=='/api/reporting-lines':
                 required=['user_id','direct_leader_id']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
