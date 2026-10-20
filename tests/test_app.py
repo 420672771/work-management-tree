@@ -71,6 +71,11 @@ class WorkTreeTests(unittest.TestCase):
         due=app.parse_due('本周四之前完成部门总结报告')
         self.assertIsNotNone(due)
         self.assertEqual(datetime.fromisoformat(due).weekday(),3)
+    def test_friendly_slot_labels_never_returns_internal_names(self):
+        labels=app.friendly_slot_labels(['owner_id','due_at','unexpected_key'])
+        self.assertEqual(labels,'任务责任人、截止日期、必要信息')
+        self.assertNotIn('owner_id',labels)
+        self.assertNotIn('due_at',labels)
     def test_expired_progress_is_auto_confirmed(self):
         c=app.db()
         try:

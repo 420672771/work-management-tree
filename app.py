@@ -98,6 +98,15 @@ def draft_slots(text, owner_id=None):
     draft=ai_draft(text); slots={'title':draft['title'],'due_at':draft['due_at'],'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':None,'task_type':'PROJECT'}
     missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
     return slots,missing
+
+# Internal storage keys must never be exposed in conversational or UI prompts.
+SLOT_LABELS={
+    'title':'任务内容', 'owner_id':'任务责任人', 'due_at':'截止日期',
+    'deliverable':'交付物或验收标准', 'org_node_id':'责任域',
+    'priority':'优先级', 'task_type':'任务类型',
+}
+def friendly_slot_labels(keys):
+    return '、'.join(SLOT_LABELS.get(key,'必要信息') for key in keys)
 def seed(c):
     if c.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 0:
         c.execute("INSERT INTO user(name,department,role) VALUES('科技产品中心负责人','科技产品中心','manager')")
@@ -405,7 +414,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception: text=content
             if text:
                 slots,missing=draft_slots(text,user[0] if user else None)
-                reply='已识别任务草稿：'+slots['title']+('。请补充：'+ '、'.join(missing) if missing else '。请在网页确认生成。')
+                reply='已识别任务草稿：'+slots['title']+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
                 if sender: adapter.send_text(sender,reply)
             c.commit(); c.close(); self.json(200,{'code':0})
         except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})

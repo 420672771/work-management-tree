@@ -21,7 +21,7 @@ def main():
                 c.execute('INSERT INTO notify_log(task_id,user_id,kind,notify_day,status,created_at) VALUES(?,?,?,?,?,?)',(task['id'],owner['id'],kind,today,'pending',app.now()))
             except Exception:
                 skipped+=1; continue
-            text=('【超期提醒】' if kind=='overdue' else '【临期提醒】')+f"\n任务：{task['title']}\n截止：{task['due_at']}\n交付：{task['deliverable']}\n请回复：任务#{task['id']} + 进度/风险。"
+            text=('【超期提醒】' if kind=='overdue' else '【临期提醒】')+f"\n任务：{task['title']}\n截止日期：{task['due_at'][:10]}\n交付物：{task['deliverable']}\n请回复：任务#{task['id']} + 进度/风险。"
             try:
                 result=adapter.send(owner['wecom_userid'],text); status='sent' if result.get('sent') else 'dry-run'
                 c.execute('UPDATE notify_log SET status=?,response_json=? WHERE task_id=? AND user_id=? AND kind=? AND notify_day=?',(status,json.dumps(result,ensure_ascii=False),task['id'],owner['id'],kind,today)); sent+=1
