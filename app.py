@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS task_template (id INTEGER PRIMARY KEY AUTOINCREMENT, 
 CREATE TABLE IF NOT EXISTS task_instance (id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, instance_date TEXT NOT NULL, task_id INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(template_id,instance_date));
 CREATE TABLE IF NOT EXISTS daily_report_status (id INTEGER PRIMARY KEY AUTOINCREMENT, report_date TEXT NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL, task_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, UNIQUE(report_date,user_id));
 CREATE TABLE IF NOT EXISTS job_run_log (id INTEGER PRIMARY KEY AUTOINCREMENT, job_name TEXT NOT NULL, run_key TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_name,run_key));
+CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, source_type TEXT NOT NULL DEFAULT 'text', raw_text TEXT NOT NULL, slots_json TEXT NOT NULL DEFAULT '{}', missing_slots TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'collecting', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -83,6 +84,10 @@ def run_daily_jobs(c, report_date=None, kind='all'):
         pending=c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]; out['approval_reminders']=pending
     c.execute("INSERT OR REPLACE INTO job_run_log(job_name,run_key,result_json,created_at) VALUES(?,?,?,?)",('daily_'+kind,day,json.dumps(out,ensure_ascii=False),now()))
     return out
+def draft_slots(text, owner_id=None):
+    draft=ai_draft(text); slots={'title':draft['title'],'due_at':draft['due_at'],'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':None,'task_type':'PROJECT'}
+    missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
+    return slots,missing
 def seed(c):
     if c.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 0:
         c.execute("INSERT INTO user(name,department,role) VALUES('科技产品中心负责人','科技产品中心','manager')")
@@ -261,6 +266,22 @@ class Handler(BaseHTTPRequestHandler):
                 generated=generate_routines(c,b.get('instance_date')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/ops/daily-run':
                 out=run_daily_jobs(c,b.get('report_date'),b.get('kind','all')); c.commit()
+            elif p.path=='/api/task/draft/parse':
+                if not b.get('text'): return self.json(400,{'error':'text is required'})
+                from datetime import timedelta
+                slots,missing=draft_slots(b['text'],b.get('user_id')); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                oid=c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(b.get('session_id') or f"web:{b.get('user_id','anonymous')}",b.get('user_id'),b.get('source_type','text'),b['text'],json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,t,t)).lastrowid; c.commit(); out={'id':oid,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','expire_at':expire}
+            elif p.path.startswith('/api/task/draft/') and p.path.endswith('/complete'):
+                did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
+                if not draft or draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
+                slots=json.loads(draft['slots_json']); slots.update({k:v for k,v in b.items() if v not in (None,'')}); missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
+                c.execute('UPDATE conversation_draft SET slots_json=?,missing_slots=?,status=?,updated_at=? WHERE id=?',(json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',t,did)); c.commit(); out={'id':did,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview'}
+            elif p.path.startswith('/api/task/draft/') and p.path.endswith('/confirm'):
+                did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
+                if not draft or draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
+                slots=json.loads(draft['slots_json']); missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
+                if missing: return self.json(400,{'error':'missing slots','fields':missing})
+                approver_id=approver_for(c,slots['owner_id']); oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(slots.get('org_node_id'),slots['title'],slots.get('description',''),slots['owner_id'],slots['due_at'],slots.get('priority','P1'),'normal',slots.get('deliverable') or '待明确','conversation',slots.get('task_type','PROJECT'),'pending',approver_id,t,t)).lastrowid; aid=create_approval(c,'task_confirm',oid,oid,approver_id); c.execute("UPDATE conversation_draft SET status='generated',updated_at=? WHERE id=?",(t,did)); audit(c,'task',oid,'create_from_draft',str(draft['user_id'] or 'local'),after=slots); c.commit(); out={'task_id':oid,'approval_id':aid,'status':'pending'}
             elif p.path=='/api/tasks':
                 required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})

@@ -59,6 +59,13 @@ class WorkTreeTests(unittest.TestCase):
             self.assertGreaterEqual(result['redboard'],1)
             self.assertGreater(c.execute("select count(*) from daily_report_status where report_date='2030-01-01'").fetchone()[0],0)
         finally: c.close()
+    def test_conversation_draft_slots_require_owner_and_deadline(self):
+        slots,missing=app.draft_slots('请完成会议纪要')
+        self.assertIn('owner_id',missing)
+        self.assertIn('due_at',missing)
+        slots,missing=app.draft_slots('请在2030-01-01完成会议纪要',2)
+        self.assertFalse(missing)
+        self.assertEqual(slots['due_at'][:10],'2030-01-01')
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]
