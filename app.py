@@ -274,6 +274,10 @@ class Handler(BaseHTTPRequestHandler):
                     oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','owner'),b['wecom_userid'])).lastrowid
                 except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
                 audit(c,'user',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id'):
+                uid=int(p.path.split('/')[3])
+                if not b.get('feishu_open_id'): return self.json(400,{'error':'feishu_open_id is required'})
+                c.execute('UPDATE user SET feishu_open_id=? WHERE id=?',(b['feishu_open_id'],uid)); audit(c,'user',uid,'bind_feishu','local',after={'feishu_open_id':b['feishu_open_id']}); c.commit(); out={'id':uid}
             elif p.path=='/api/reporting-lines':
                 required=['user_id','direct_leader_id']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
