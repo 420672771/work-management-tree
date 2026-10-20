@@ -30,12 +30,13 @@ CREATE TABLE IF NOT EXISTS task_instance (id INTEGER PRIMARY KEY AUTOINCREMENT, 
 CREATE TABLE IF NOT EXISTS daily_report_status (id INTEGER PRIMARY KEY AUTOINCREMENT, report_date TEXT NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL, task_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, UNIQUE(report_date,user_id));
 CREATE TABLE IF NOT EXISTS job_run_log (id INTEGER PRIMARY KEY AUTOINCREMENT, job_name TEXT NOT NULL, run_key TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_name,run_key));
 CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, source_type TEXT NOT NULL DEFAULT 'text', raw_text TEXT NOT NULL, slots_json TEXT NOT NULL DEFAULT '{}', missing_slots TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'collecting', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS im_message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, external_msg_id TEXT NOT NULL, user_id INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(channel,external_msg_id));
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def db():
     c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA)
-    for statement in ("ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
+    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
     return c
@@ -164,6 +165,21 @@ class WeComAdapter:
         req=urllib.request.Request('https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token='+token,payload,{'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=10) as f: return {'sent':True,'response':json.load(f)}
 
+class FeishuAdapter:
+    """Minimal Feishu tenant-token sender and HTTP event verifier; secrets stay in env."""
+    def __init__(self): self.app_id=os.getenv('FEISHU_APP_ID'); self.secret=os.getenv('FEISHU_APP_SECRET'); self.verify_token=os.getenv('FEISHU_VERIFICATION_TOKEN')
+    def configured(self): return bool(self.app_id and self.secret and self.verify_token)
+    def token(self):
+        req=urllib.request.Request('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',json.dumps({'app_id':self.app_id,'app_secret':self.secret}).encode(),{'Content-Type':'application/json'})
+        with urllib.request.urlopen(req,timeout=10) as f:
+            out=json.load(f)
+        if out.get('code',0)!=0: raise RuntimeError('feishu token request failed')
+        return out['tenant_access_token']
+    def send_text(self, open_id, text):
+        if not self.configured(): return {'sent':False,'mode':'dry-run','open_id':open_id,'text':text}
+        req=urllib.request.Request('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',json.dumps({'receive_id':open_id,'msg_type':'text','content':json.dumps({'text':text},ensure_ascii=False)}).encode(),{'Authorization':'Bearer '+self.token(),'Content-Type':'application/json; charset=utf-8'})
+        with urllib.request.urlopen(req,timeout=10) as f: return {'sent':True,'response':json.load(f)}
+
 class WeComCallback:
     """Enterprise WeChat secure callback codec and feedback mapper."""
     def __init__(self):
@@ -243,6 +259,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path.startswith('/wecom/callback'):
             self.handle_wecom_post(); return
+        if self.path.startswith('/im/callback/feishu'):
+            self.handle_feishu_post(); return
         if not self.require_auth(): return
         c=db(); p=urllib.parse.urlparse(self.path); b=self.body(); t=now()
         try:
@@ -336,6 +354,29 @@ class Handler(BaseHTTPRequestHandler):
             else: return self.json(404,{'error':'not found'})
             self.json(200,out)
         finally: c.close()
+    def handle_feishu_post(self):
+        try:
+            payload=self.body(); adapter=FeishuAdapter()
+            if not adapter.configured(): return self.json(503,{'error':'Feishu credentials are required'})
+            if payload.get('type')=='url_verification':
+                if payload.get('token')!=adapter.verify_token: return self.json(403,{'error':'invalid verification token'})
+                return self.json(200,{'challenge':payload.get('challenge','')})
+            header=payload.get('header',{}); event=payload.get('event',{}); event_id=header.get('event_id') or event.get('message',{}).get('message_id')
+            if not event_id: return self.json(400,{'error':'event id is required'})
+            sender=(event.get('sender') or {}).get('sender_id',{}).get('open_id'); message=event.get('message') or {}; content=message.get('content','')
+            c=db(); user=c.execute('SELECT id FROM user WHERE feishu_open_id=?',(sender,)).fetchone() if sender else None
+            try: c.execute('INSERT INTO im_message_log(channel,external_msg_id,user_id,payload_json,created_at) VALUES(?,?,?,?,?)',('feishu',event_id,user[0] if user else None,json.dumps(payload,ensure_ascii=False),now()))
+            except sqlite3.IntegrityError: c.close(); return self.json(200,{'code':0})
+            text='';
+            if message.get('message_type')=='text':
+                try: text=json.loads(content).get('text','')
+                except Exception: text=content
+            if text:
+                slots,missing=draft_slots(text,user[0] if user else None)
+                reply='已识别任务草稿：'+slots['title']+('。请补充：'+ '、'.join(missing) if missing else '。请在网页确认生成。')
+                if sender: adapter.send_text(sender,reply)
+            c.commit(); c.close(); self.json(200,{'code':0})
+        except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})
     def handle_wecom_post(self):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query); codec=WeComCallback()
         if not codec.configured(): return self.json(503,{'error':'WECOM_TOKEN and WECOM_AES_KEY are required'})

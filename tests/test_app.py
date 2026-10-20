@@ -75,6 +75,10 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(result['auto_confirmed_progress'],1)
             self.assertEqual(c.execute('select effective_percent from task where id=?',(tid,)).fetchone()[0],75)
         finally: c.close()
+    def test_feishu_adapter_is_safe_without_configuration(self):
+        for key in ('FEISHU_APP_ID','FEISHU_APP_SECRET','FEISHU_VERIFICATION_TOKEN'): os.environ.pop(key,None)
+        self.assertFalse(app.FeishuAdapter().configured())
+        self.assertEqual(app.FeishuAdapter().send_text('ou_test','hello')['mode'],'dry-run')
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]
