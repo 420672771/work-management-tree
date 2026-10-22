@@ -1,0 +1,10 @@
+[Unit]
+Description=Send Work Management Tree approval reminders on workdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 18:00:00
+Persistent=true
+Unit=worktree-approval-reminder.service
+
+[Install]
+WantedBy=timers.target

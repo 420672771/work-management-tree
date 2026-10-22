@@ -1,0 +1,10 @@
+[Unit]
+Description=Send Work Management Tree morning digest on workdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:00:00
+Persistent=true
+Unit=worktree-daily-morning.service
+
+[Install]
+WantedBy=timers.target

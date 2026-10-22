@@ -75,17 +75,43 @@ def daily_targets(c, report_date=None):
         focus=[x for x in tasks if x['work_status']=='in_progress' or x['time_status'] in ('overdue','due_soon') or x['due_at'][:10]==day]
         if focus: rows.append({'user_id':user['id'],'user_name':user['name'],'tasks':focus})
     return rows
+
+def send_feishu_once(c, task_id, user_id, kind, day, text):
+    """Send one user-facing notification at most once per task/kind/day."""
+    if c.execute('SELECT 1 FROM notify_log WHERE task_id=? AND user_id=? AND kind=? AND notify_day=?',(task_id,user_id,kind,day)).fetchone():
+        return 'skipped_duplicate'
+    user=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(user_id,)).fetchone()
+    if not user or not user['feishu_open_id']:
+        status,response='skipped_no_binding',{'reason':'member is not bound to Feishu'}
+    else:
+        try:
+            response=FeishuAdapter().send_text(user['feishu_open_id'],text)
+            status='sent' if response.get('sent') else response.get('mode','failed')
+        except Exception as exc:
+            status,response='failed',{'reason':str(exc)}
+    c.execute("INSERT INTO notify_log(task_id,user_id,kind,notify_day,status,response_json,created_at) VALUES(?,?,?,?,?,?,?)",(task_id,user_id,kind,day,status,json.dumps(response,ensure_ascii=False),now()))
+    return status
+
 def run_daily_jobs(c, report_date=None, kind='all'):
-    day=report_date or datetime.now(timezone.utc).date().isoformat(); out={'date':day,'morning':0,'evening':0,'redboard':0,'approval_reminders':0}
+    day=report_date or datetime.now(timezone.utc).date().isoformat(); out={'date':day,'morning':0,'evening':0,'redboard':0,'approval_reminders':0,'sent':0,'skipped':0,'failed':0}
+    def count_delivery(status):
+        if status=='sent': out['sent']+=1
+        elif status=='failed': out['failed']+=1
+        else: out['skipped']+=1
     if kind in ('all','morning'):
         targets=daily_targets(c,day); out['morning']=len(targets)
-        for target in targets: c.execute("INSERT OR REPLACE INTO notify_log(task_id,user_id,kind,notify_day,status,response_json,created_at) VALUES(?,?,?,?,?,?,?)",(target['tasks'][0]['id'],target['user_id'],'morning_digest',day,'dry-run',json.dumps({'count':len(target['tasks'])},ensure_ascii=False),now()))
+        for target in targets:
+            lines='\n'.join(f"{i+1}. #{task['id']} {task['title']}（截止 {task['due_at'][:10]}）" for i,task in enumerate(target['tasks'][:5]))
+            status=send_feishu_once(c,target['tasks'][0]['id'],target['user_id'],'morning_digest',day,'【今日任务清单】\n'+lines+'\n请按计划推进，并在有进展时填报进度。'); count_delivery(status)
     if kind in ('all','evening','close'):
         for target in daily_targets(c,day):
             reported=c.execute("SELECT 1 FROM progress_record WHERE reported_by=? AND substr(reported_at,1,10)=? LIMIT 1",(target['user_id'],day)).fetchone()
             status='reported' if reported else 'unreported'; c.execute("INSERT OR REPLACE INTO daily_report_status(report_date,user_id,status,task_count,created_at) VALUES(?,?,?,?,?)",(day,target['user_id'],status,len(target['tasks']),now()))
             if kind!='close': out['evening']+=1
-            if status=='unreported': out['redboard']+=1
+            if status=='unreported':
+                out['redboard']+=1
+                lines='、'.join(f"#{task['id']} {task['title']}" for task in target['tasks'][:3])
+                delivery=send_feishu_once(c,target['tasks'][0]['id'],target['user_id'],'evening_progress',day,'【进度填报提醒】\n请更新今日重点任务进度：'+lines+'\n示例：任务#编号 完成 60%。'); count_delivery(delivery)
     if kind in ('all','approval'):
         from datetime import timedelta
         hours=int(os.getenv('WMT_PROGRESS_AUTO_CONFIRM_HOURS','24')); cutoff=(datetime.now(timezone.utc)-timedelta(hours=hours)).isoformat(); auto=0
@@ -96,7 +122,12 @@ def run_daily_jobs(c, report_date=None, kind='all'):
             c.execute("UPDATE progress_record SET status='auto_approved',effective_percent=?,confirmed_at=? WHERE id=?",(record['reported_percent'],now(),record['id']))
             c.execute("UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,confirm_source='timeout_auto',updated_at=? WHERE id=?",(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],'completed' if record['reported_percent']==100 else 'in_progress',now(),approval['task_id']))
             audit(c,'approval',approval['id'],'timeout_auto','system',after={'hours':hours}); auto+=1
-        pending=c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0]; out['approval_reminders']=pending; out['auto_confirmed_progress']=auto
+        approvals=c.execute("SELECT a.*,t.title FROM approval_record a LEFT JOIN task t ON t.id=a.task_id WHERE a.status='pending'").fetchall()
+        out['approval_reminders']=len(approvals); out['auto_confirmed_progress']=auto
+        for approval in approvals:
+            if not approval['approver_id'] or not approval['task_id']: continue
+            title=approval['title'] or '一项工作事项'
+            delivery=send_feishu_once(c,approval['task_id'],approval['approver_id'],'approval_reminder',day,'【待确认提醒】\n《'+title+'》等待您的'+('任务确认' if approval['biz_type']=='task_confirm' else '进度确认')+'，请在工作管理树确认中心处理。'); count_delivery(delivery)
     c.execute("INSERT OR REPLACE INTO job_run_log(job_name,run_key,result_json,created_at) VALUES(?,?,?,?)",('daily_'+kind,day,json.dumps(out,ensure_ascii=False),now()))
     return out
 def draft_slots(text, owner_id=None):

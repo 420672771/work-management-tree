@@ -1,0 +1,7 @@
+[Unit]
+Description=Work Management Tree pending approval reminder
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/admin/work-management-tree
+ExecStart=/usr/bin/python3 /home/admin/work-management-tree/scripts/run-daily-jobs.py --kind approval

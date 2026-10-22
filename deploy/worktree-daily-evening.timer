@@ -1,0 +1,10 @@
+[Unit]
+Description=Send Work Management Tree evening reminder on workdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 17:30:00
+Persistent=true
+Unit=worktree-daily-evening.service
+
+[Install]
+WantedBy=timers.target
