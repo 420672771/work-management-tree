@@ -1,6 +1,7 @@
 import base64, json, os, struct, tempfile, threading, unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 os.environ['WMT_DB']=str(Path(tempfile.mkdtemp())/'test.db')
 import sys; sys.path.insert(0,str(Path(__file__).parents[1]))
@@ -175,6 +176,12 @@ class WorkTreeTests(unittest.TestCase):
                     self.assertEqual(response.status,200)
                     return json.loads(response.read())
 
+            def call_status(path, body):
+                request=Request(base+path,data=json.dumps(body).encode(),headers={'Content-Type':'application/json'})
+                try:
+                    with urlopen(request,timeout=5) as response: return response.status
+                except HTTPError as error: return error.code
+
             users=call('/api/users'); tree=call('/api/tree')
             self.assertGreaterEqual(len(users),2); self.assertTrue(tree)
             manager=next(user for user in users if user['role']=='manager')
@@ -204,6 +211,13 @@ class WorkTreeTests(unittest.TestCase):
             manual=call('/api/tasks',{'org_node_id':child['id'],'title':'接口测试手工任务','owner_id':owner['id'],'due_at':'2031-01-02T17:00:00+08:00','deliverable':'手工任务验收记录'})
             self.assertEqual(manual['approval_status'],'pending')
             self.assertEqual(call(f"/api/approvals/{manual['approval_id']}/confirm",{'result':'approved','operator_id':manager['id']})['status'],'approved')
+            self.assertEqual(call_status(f"/api/tasks/{manual['id']}",{'work_status':'in_progress','operator_id':manager['id']}),403)
+            self.assertEqual(call(f"/api/tasks/{manual['id']}",{'work_status':'in_progress','operator_id':owner['id']})['status'],'ok')
+            self.assertEqual(call(f"/api/tasks/{manual['id']}",{'work_status':'awaiting_acceptance','operator_id':owner['id']})['status'],'ok')
+            self.assertEqual(call_status(f"/api/tasks/{manual['id']}/accept",{'result':'passed','acceptor_id':owner['id']}),403)
+            self.assertEqual(call(f"/api/tasks/{manual['id']}/accept",{'result':'passed','acceptor_id':manager['id']})['status'],'ok')
+            manual_done=next(row for row in call('/api/tasks') if row['id']==manual['id'])
+            self.assertEqual(manual_done['work_status'],'completed')
 
             draft=call('/api/task/draft/parse',{'text':'完成接口端到端验收','user_id':owner['id'],'session_id':'e2e'})
             self.assertIn('due_at',draft['missing_slots'])
@@ -224,7 +238,6 @@ class WorkTreeTests(unittest.TestCase):
             self.assertTrue(call(f"/api/progress?task_id={created['task_id']}"))
 
             self.assertEqual(call(f"/api/tasks/{created['task_id']}/feedback",{'content':'验收通过','user_id':manager['id']})['status'],'ok')
-            self.assertEqual(call(f"/api/tasks/{created['task_id']}/accept",{'result':'passed','acceptor_id':manager['id']})['status'],'ok')
             self.assertEqual(call(f"/api/tasks/{created['task_id']}",{'priority':'P0'})['status'],'ok')
             discarded=call('/api/task/draft/parse',{'text':'无需立项的测试信息','session_id':'discard-e2e'})
             self.assertEqual(call(f"/api/task/draft/{discarded['id']}/discard",{})['status'],'discarded')

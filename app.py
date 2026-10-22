@@ -586,10 +586,20 @@ class Handler(BaseHTTPRequestHandler):
                 elif p.path.endswith('/accept'):
                     result=b.get('result');
                     if result not in ('passed','rejected'): return self.json(400,{'error':'result must be passed or rejected'})
+                    if old['work_status']!='awaiting_acceptance': return self.json(400,{'error':'task is not awaiting acceptance'})
+                    acceptor_id=b.get('acceptor_id')
+                    approver_id=old['approver_id'] or approver_for(c,old['owner_id'])
+                    if not acceptor_id or int(acceptor_id)!=int(approver_id): return self.json(403,{'error':'only the task owner\'s approver may accept'})
                     c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,b.get('acceptor_id'),result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
                 else:
                     allowed={'work_status','risk_status','due_at','priority','owner_id','deliverable'}; changes={k:v for k,v in b.items() if k in allowed};
                     if not changes: return self.json(400,{'error':'no editable fields'})
+                    if 'work_status' in changes:
+                        operator_id=b.get('operator_id')
+                        if not operator_id or int(operator_id)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may update task status'})
+                        transition=(old['work_status'],changes['work_status'])
+                        if transition not in {('assigned','in_progress'),('in_progress','awaiting_acceptance')}:
+                            return self.json(400,{'error':'invalid task status transition'})
                     changes['updated_at']=t; c.execute('UPDATE task SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',(*changes.values(),tid)); action='update'
                 audit(c,'task',tid,action,'local',before=rowdict(old),after=b); c.commit(); out={'id':tid,'status':'ok'}
             elif p.path=='/api/notify': out=WeComAdapter().send(b.get('userid',''),b.get('text',''))
