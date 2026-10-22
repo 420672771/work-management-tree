@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS daily_report_status (id INTEGER PRIMARY KEY AUTOINCRE
 CREATE TABLE IF NOT EXISTS job_run_log (id INTEGER PRIMARY KEY AUTOINCREMENT, job_name TEXT NOT NULL, run_key TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_name,run_key));
 CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, source_type TEXT NOT NULL DEFAULT 'text', raw_text TEXT NOT NULL, slots_json TEXT NOT NULL DEFAULT '{}', missing_slots TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'collecting', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS im_message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, external_msg_id TEXT NOT NULL, user_id INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(channel,external_msg_id));
+CREATE TABLE IF NOT EXISTS feishu_binding_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, action TEXT NOT NULL, old_open_id TEXT DEFAULT '', new_open_id TEXT DEFAULT '', operator TEXT DEFAULT 'local', created_at TEXT NOT NULL);
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -43,6 +44,16 @@ def db():
 def rowdict(row): return dict(row) if row else None
 def audit(c, typ, oid, action, actor, before=None, after=None):
     c.execute("INSERT INTO audit_log(object_type,object_id,action,actor,before_json,after_json,created_at) VALUES(?,?,?,?,?,?,?)", (typ, oid, action, actor, json.dumps(before, ensure_ascii=False) if before else None, json.dumps(after, ensure_ascii=False) if after else None, now()))
+def mask_external_id(value):
+    value=str(value or '')
+    return ('••••'+value[-4:]) if len(value)>4 else ('••••' if value else '')
+def record_feishu_binding(c, user_id, action, old_open_id='', new_open_id='', operator='local'):
+    return c.execute('INSERT INTO feishu_binding_history(user_id,action,old_open_id,new_open_id,operator,created_at) VALUES(?,?,?,?,?,?)',(user_id,action,old_open_id or '',new_open_id or '',operator,now())).lastrowid
+def ensure_feishu_binding_history(c):
+    """Backfill one auditable baseline record for bindings that predate the ledger."""
+    for user in c.execute("SELECT id,feishu_open_id FROM user WHERE feishu_open_id IS NOT NULL AND feishu_open_id<>''"):
+        exists=c.execute('SELECT 1 FROM feishu_binding_history WHERE user_id=? LIMIT 1',(user['id'],)).fetchone()
+        if not exists: record_feishu_binding(c,user['id'],'baseline','',user['feishu_open_id'],'system')
 def approver_for(c, user_id):
     line=c.execute("SELECT approver_id,direct_leader_id FROM reporting_line WHERE user_id=? AND (effective_to IS NULL OR effective_to>?) ORDER BY effective_from DESC LIMIT 1",(user_id,now())).fetchone()
     approver=(line['approver_id'] or line['direct_leader_id']) if line and (line['approver_id'] or line['direct_leader_id']) else None
@@ -198,7 +209,7 @@ def initialize_responsibility_domains(c):
 def initialize():
     c=db()
     try:
-        seed(c); initialize_responsibility_domains(c); c.commit()
+        seed(c); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); c.commit()
     finally:
         c.close()
 
@@ -389,6 +400,17 @@ class Handler(BaseHTTPRequestHandler):
                     if sender and not bound and not any(x['open_id']==sender for x in rows): rows.append({'open_id':sender,'last_text':content[:80],'last_seen_at':log['created_at']})
                 except Exception: pass
             out=rows
+        elif p.path=='/api/feishu/bindings':
+            out=[]
+            for row in c.execute("SELECT id,name,feishu_open_id FROM user WHERE feishu_open_id IS NOT NULL AND feishu_open_id<>'' ORDER BY name,id"):
+                out.append({'user_id':row['id'],'user_name':row['name'],'open_id_masked':mask_external_id(row['feishu_open_id'])})
+        elif p.path=='/api/feishu/binding-history':
+            out=[]
+            for row in c.execute("SELECT h.*,u.name AS user_name FROM feishu_binding_history h JOIN user u ON u.id=h.user_id ORDER BY h.created_at DESC,h.id DESC"):
+                item=rowdict(row)
+                item['old_open_id_masked']=mask_external_id(item.pop('old_open_id',''))
+                item['new_open_id_masked']=mask_external_id(item.pop('new_open_id',''))
+                out.append(item)
         elif p.path=='/api/task/drafts':
             status=q.get('status',['preview,collecting'])[0].split(',')
             marks=','.join('?' for _ in status)
@@ -426,16 +448,32 @@ class Handler(BaseHTTPRequestHandler):
                     oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','owner'),b['wecom_userid'])).lastrowid
                 except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
                 audit(c,'user',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id/unbind'):
+                uid=int(p.path.split('/')[3])
+                user=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(uid,)).fetchone()
+                if not user: return self.json(404,{'error':'user not found'})
+                old_open_id=user['feishu_open_id'] or ''
+                if not old_open_id: return self.json(400,{'error':'user has no feishu binding'})
+                c.execute('UPDATE user SET feishu_open_id=NULL WHERE id=?',(uid,))
+                record_feishu_binding(c,uid,'unbind',old_open_id,'')
+                audit(c,'user',uid,'unbind_feishu','local',before={'bound':True},after={'bound':False})
+                c.commit(); out={'id':uid,'status':'unbound'}
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id'):
                 uid=int(p.path.split('/')[3])
                 if not b.get('feishu_open_id'): return self.json(400,{'error':'feishu_open_id is required'})
                 open_id=b['feishu_open_id'].strip()
+                user=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(uid,)).fetchone()
+                if not user: return self.json(404,{'error':'user not found'})
+                old_open_id=user['feishu_open_id'] or ''
                 existing=c.execute('SELECT id FROM user WHERE feishu_open_id=? AND id<>?',(open_id,uid)).fetchone()
                 if existing: return self.json(409,{'error':'feishu_open_id already bound to another user'})
+                if old_open_id==open_id: return self.json(200,{'id':uid,'status':'unchanged'})
                 c.execute('UPDATE user SET feishu_open_id=? WHERE id=?',(open_id,uid))
                 c.execute("UPDATE conversation_draft SET user_id=?,updated_at=? WHERE source_type='feishu' AND session_id=? AND user_id IS NULL",(uid,t,f'feishu:{open_id}'))
                 c.execute("UPDATE im_message_log SET user_id=? WHERE channel='feishu_ws' AND user_id IS NULL AND payload_json LIKE ?",(uid,f'%{open_id}%'))
-                audit(c,'user',uid,'bind_feishu','local',after={'feishu_open_id':open_id}); c.commit(); out={'id':uid}
+                action='modify' if old_open_id else 'bind'
+                record_feishu_binding(c,uid,action,old_open_id,open_id)
+                audit(c,'user',uid,action+'_feishu','local',before={'bound':bool(old_open_id)},after={'bound':True}); c.commit(); out={'id':uid,'status':'modified' if old_open_id else 'bound'}
             elif p.path=='/api/reporting-lines':
                 required=['user_id','direct_leader_id']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
