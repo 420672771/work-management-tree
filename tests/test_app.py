@@ -111,6 +111,14 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(c.execute('select source from progress_record where id=?',(rid,)).fetchone()[0],'feishu')
             self.assertEqual(app.parse_progress_message(f'任务#{tid} 已完成')['percent'],100)
         finally: c.close()
+    def test_extract_common_document_text_without_inventing_content(self):
+        self.assertEqual(app.extract_document_text('会议纪要：完成试点'.encode(),'minutes.txt'),'会议纪要：完成试点')
+        import io, zipfile
+        body='<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>完成评审</w:t></w:r></w:p></w:body></w:document>'.encode()
+        stream=io.BytesIO()
+        with zipfile.ZipFile(stream,'w') as doc: doc.writestr('word/document.xml',body)
+        self.assertEqual(app.extract_document_text(stream.getvalue(),'minutes.docx'),'完成评审')
+        self.assertEqual(app.extract_document_text(b'not-a-pdf','minutes.pdf'),'')
     def test_expired_progress_is_auto_confirmed(self):
         c=app.db()
         try:

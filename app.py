@@ -1,4 +1,4 @@
-import base64, hashlib, json, os, re, sqlite3, struct, urllib.request, urllib.parse
+import base64, hashlib, io, json, os, re, sqlite3, struct, urllib.request, urllib.parse, zipfile
 from base64 import b64decode
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -205,6 +205,20 @@ def parse_progress_message(text):
     blocked_match=re.search(r'(?:阻塞|风险)(?:原因)?\s*[：:]?\s*(.+)',text)
     return {'task_id':int(task_match.group(1)),'percent':percent,'comment':text.strip(),'blocked':bool(blocked_match),'block_reason':blocked_match.group(1).strip() if blocked_match else '','expected_finish':parse_due(text)}
 
+def extract_document_text(data, filename=''):
+    """Best-effort local extraction for common text documents; never invents content."""
+    name=(filename or '').lower()
+    if name.endswith(('.txt','.md','.csv','.log')):
+        return data.decode('utf-8',errors='replace').strip()
+    if name.endswith('.docx'):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as doc:
+                root=ET.fromstring(doc.read('word/document.xml'))
+            return ''.join(root.itertext()).strip()
+        except Exception:
+            return ''
+    return ''
+
 def submit_progress(c, task_id, reporter_id, percent, comment, blocked=False, block_reason='', expected_finish=None, source='web'):
     task=c.execute('SELECT * FROM task WHERE id=?',(task_id,)).fetchone()
     if not task: raise ValueError('任务不存在')
@@ -260,6 +274,12 @@ class FeishuAdapter:
         if not self.configured(): return {'sent':False,'mode':'dry-run','open_id':open_id,'text':text}
         req=urllib.request.Request('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',json.dumps({'receive_id':open_id,'msg_type':'text','content':json.dumps({'text':text},ensure_ascii=False)}).encode(),{'Authorization':'Bearer '+self.token(),'Content-Type':'application/json; charset=utf-8'})
         with urllib.request.urlopen(req,timeout=10) as f: return {'sent':True,'response':json.load(f)}
+    def download_message_resource(self, message_id, file_key, resource_type='file'):
+        if not self.configured(): raise RuntimeError('Feishu integration is not configured')
+        query=urllib.parse.urlencode({'type':resource_type})
+        url=f'https://open.feishu.cn/open-apis/im/v1/messages/{urllib.parse.quote(message_id)}/resources/{urllib.parse.quote(file_key)}?{query}'
+        req=urllib.request.Request(url,headers={'Authorization':'Bearer '+self.token()})
+        with urllib.request.urlopen(req,timeout=30) as f: return f.read()
 
 class WeComCallback:
     """Enterprise WeChat secure callback codec and feedback mapper."""

@@ -13,6 +13,14 @@ try:
 except ImportError as exc:
     raise SystemExit('Install dependencies: pip install -r requirements.txt') from exc
 
+def save_draft(c, sender, user, text, source_type, event_id):
+    slots,missing=app.draft_slots(text,user[0] if user else None)
+    expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+    state='collecting' if missing else 'preview'
+    c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+              (f'feishu:{sender}:{event_id}',user[0] if user else None,source_type,text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),state,expire,app.now(),app.now()))
+    return slots,missing
+
 def receive(data):
     raw=json.loads(lark.JSON.marshal(data)); event=raw.get('event',raw)
     message=event.get('message',{}); sender=(event.get('sender') or {}).get('sender_id',{}).get('open_id')
@@ -23,36 +31,55 @@ def receive(data):
         user=c.execute('SELECT id FROM user WHERE feishu_open_id=?',(sender,)).fetchone() if sender else None
         try: c.execute('INSERT INTO im_message_log(channel,external_msg_id,user_id,payload_json,created_at) VALUES(?,?,?,?,?)',('feishu_ws',event_id,user[0] if user else None,json.dumps(raw,ensure_ascii=False),app.now()))
         except Exception: return
-        text=''
-        if message.get('message_type')=='text':
+        text=''; material=None; message_type=message.get('message_type')
+        if message_type=='text':
             try: text=json.loads(message.get('content','{}')).get('text','')
             except Exception: text=message.get('content','')
-        if text and sender:
-            progress=app.parse_progress_message(text)
-            if progress:
-                if not user:
-                    reply='已识别为任务进度，但当前飞书账号尚未绑定系统成员，请先完成成员绑定。'
-                elif progress['percent'] is None:
-                    reply=f"已识别任务#{progress['task_id']}。请补充完成比例，例如：任务#{progress['task_id']} 完成 60%。"
-                else:
+        elif message_type in ('file','audio','media'):
+            try: content=json.loads(message.get('content','{}'))
+            except Exception: content={}
+            material={'type':message_type,'file_key':content.get('file_key',''),'name':content.get('file_name') or content.get('name') or ''}
+        if (text or material) and sender:
+            if material:
+                kind='飞书语音' if material['type']=='audio' else '飞书文件'
+                source_type='feishu_audio' if material['type']=='audio' else 'feishu_document'
+                title=f"{kind}材料：{material['name'] or '未命名材料'}"
+                extracted=''
+                if material['type']=='file' and material['file_key']:
                     try:
-                        _,_,task=app.submit_progress(c,progress['task_id'],user[0],progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
-                        reply=f"已提交《{task['title']}》进度 {progress['percent']}%，等待上级确认后生效。"
-                    except PermissionError:
-                        reply='该任务的进度只能由任务责任人提交。'
-                    except ValueError as exc:
-                        reply='进度提交未成功：'+str(exc)
-            else:
-                slots,missing=app.draft_slots(text,user[0] if user else None)
-                expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-                state='collecting' if missing else 'preview'
-                c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                          (f'feishu:{sender}',user[0] if user else None,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),state,expire,app.now(),app.now()))
-                if user:
-                    missing_text=app.friendly_slot_labels(missing)
-                    reply='已识别任务草稿：'+slots['title']+('。请补充：'+missing_text if missing else '。已进入待确认草稿，请在工作管理树中确认生成。')
+                        blob=app.FeishuAdapter().download_message_resource(message.get('message_id',''),material['file_key'])
+                        extracted=app.extract_document_text(blob,material['name'])
+                    except Exception as exc:
+                        print(f'Feishu material fetch failed: {exc}', file=sys.stderr)
+                slots,missing=save_draft(c,sender,user,extracted or title,source_type,event_id)
+                if not user:
+                    reply='已收取'+kind+'，但当前飞书账号尚未绑定系统成员，请先完成成员绑定后再确认任务。'
+                elif extracted:
+                    reply='已提取文件内容并生成任务草稿，请在工作管理树的确认中心补全并确认。'
                 else:
-                    reply='已识别任务草稿：'+slots['title']+'。当前飞书账号尚未绑定系统成员，请管理员在“组织配置 → 飞书成员绑定”中完成绑定；绑定后再次发送即可自动带入责任人。'
+                    reply='已收取'+kind+'并生成待解析草稿。请在工作管理树的确认中心补充任务内容和截止日期后确认。'
+            else:
+                progress=app.parse_progress_message(text)
+                if progress:
+                    if not user:
+                        reply='已识别为任务进度，但当前飞书账号尚未绑定系统成员，请先完成成员绑定。'
+                    elif progress['percent'] is None:
+                        reply=f"已识别任务#{progress['task_id']}。请补充完成比例，例如：任务#{progress['task_id']} 完成 60%。"
+                    else:
+                        try:
+                            _,_,task=app.submit_progress(c,progress['task_id'],user[0],progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
+                            reply=f"已提交《{task['title']}》进度 {progress['percent']}%，等待上级确认后生效。"
+                        except PermissionError:
+                            reply='该任务的进度只能由任务责任人提交。'
+                        except ValueError as exc:
+                            reply='进度提交未成功：'+str(exc)
+                else:
+                    slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
+                    if user:
+                        missing_text=app.friendly_slot_labels(missing)
+                        reply='已识别任务草稿：'+slots['title']+('。请补充：'+missing_text if missing else '。已进入待确认草稿，请在工作管理树中确认生成。')
+                    else:
+                        reply='已识别任务草稿：'+slots['title']+'。当前飞书账号尚未绑定系统成员，请管理员在“组织配置 → 飞书成员绑定”中完成绑定；绑定后再次发送即可自动带入责任人。'
             # Persist the event and draft before calling the remote send API. A transient
             # Feishu send failure must not cause the event receiver to fail or retry-create.
             c.commit()
