@@ -1,6 +1,7 @@
-import base64, os, struct, tempfile, unittest
+import base64, json, os, struct, tempfile, threading, unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.request import Request, urlopen
 os.environ['WMT_DB']=str(Path(tempfile.mkdtemp())/'test.db')
 import sys; sys.path.insert(0,str(Path(__file__).parents[1]))
 import app
@@ -143,5 +144,86 @@ class WorkTreeTests(unittest.TestCase):
         raw=b'0123456789abcdef'+struct.pack('>I',len(xml))+xml+b'corp-test'; pad=32-(len(raw)%32); raw+=bytes([pad])*pad
         decoded=base64.b64decode(key+'='); encrypted=base64.b64encode(AES.new(decoded,AES.MODE_CBC,decoded[:16]).encrypt(raw)).decode()
         self.assertEqual(codec.decrypt(encrypted),xml.decode()); self.assertEqual(codec.task_id_from_text(f'任务#{tid} 已完成'),tid); result=codec.handle_message(c,xml.decode()); c.commit(); self.assertEqual(result['task_id'],tid); self.assertEqual(c.execute('select count(*) from feedback where task_id=?',(tid,)).fetchone()[0],1); c.close()
+
+    def test_z_http_api_end_to_end_full_task_lifecycle(self):
+        """Exercise the same JSON API calls used by the browser, end to end."""
+        old_user=os.environ.pop('WMT_PUBLIC_USER',None); old_password=os.environ.pop('WMT_PUBLIC_PASSWORD',None)
+        server=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
+        thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+        base=f'http://127.0.0.1:{server.server_port}'
+        try:
+            def call(path, body=None):
+                data=None if body is None else json.dumps(body).encode()
+                request=Request(base+path,data=data,headers={'Content-Type':'application/json'} if data else {})
+                with urlopen(request,timeout=5) as response:
+                    self.assertEqual(response.status,200)
+                    return json.loads(response.read())
+
+            users=call('/api/users'); tree=call('/api/tree')
+            self.assertGreaterEqual(len(users),2); self.assertTrue(tree)
+            manager=next(user for user in users if user['role']=='manager')
+            owner=next(user for user in users if user['id']!=manager['id'])
+            domain=next(node for node in tree if node['node_type']=='domain')
+            child=call('/api/tree',{'parent_id':domain['id'],'node_type':'subdomain','name':'接口测试责任域','boundary':'接口测试边界','owner_id':owner['id']})
+            self.assertTrue(any(node['id']==child['id'] for node in call('/api/tree')))
+
+            dept=call('/api/org/departments',{'name':'接口测试部门','owner_user_id':manager['id']})
+            position=call('/api/org/positions',{'name':'接口测试岗位','dept_id':dept['id'],'level':'P6'})
+            assignment=call('/api/org/user-positions',{'user_id':owner['id'],'position_id':position['id'],'is_primary':True})
+            self.assertGreater(assignment['id'],0)
+            self.assertTrue(any(row['id']==position['id'] for row in call('/api/org/positions')))
+
+            reporting=call('/api/reporting-lines',{'user_id':owner['id'],'direct_leader_id':manager['id']})
+            self.assertGreater(reporting['id'],0)
+            delegate=call('/api/delegates',{'user_id':manager['id'],'delegate_user_id':owner['id'],'scope':'approval','start_at':'2000-01-01T00:00:00+00:00','end_at':'2000-01-02T00:00:00+00:00'})
+            self.assertGreater(delegate['id'],0)
+            self.assertTrue(any(row['id']==delegate['id'] for row in call('/api/delegates')))
+
+            template=call('/api/routine/templates',{'org_node_id':child['id'],'title':'接口测试例行任务','owner_id':owner['id'],'deliverable':'测试记录','recurrence':'DAILY'})
+            self.assertGreater(template['id'],0)
+            generated=call('/api/routine/generate',{'instance_date':'2031-01-01'})
+            self.assertGreaterEqual(generated['count'],1)
+            self.assertEqual(call('/api/routine/generate',{'instance_date':'2031-01-01'})['count'],0)
+
+            manual=call('/api/tasks',{'org_node_id':child['id'],'title':'接口测试手工任务','owner_id':owner['id'],'due_at':'2031-01-02T17:00:00+08:00','deliverable':'手工任务验收记录'})
+            self.assertEqual(manual['approval_status'],'pending')
+            self.assertEqual(call(f"/api/approvals/{manual['approval_id']}/confirm",{'result':'approved','operator_id':manager['id']})['status'],'approved')
+
+            draft=call('/api/task/draft/parse',{'text':'完成接口端到端验收','user_id':owner['id'],'session_id':'e2e'})
+            self.assertIn('due_at',draft['missing_slots'])
+            completed=call(f"/api/task/draft/{draft['id']}/complete",{'due_at':'2031-01-02T17:00:00+08:00','deliverable':'接口验收记录','org_node_id':domain['id']})
+            self.assertEqual(completed['missing_slots'],[])
+            created=call(f"/api/task/draft/{draft['id']}/confirm",{})
+            self.assertEqual(created['status'],'pending')
+            self.assertTrue(any(item['id']==created['approval_id'] for item in call('/api/approvals')))
+            approved=call(f"/api/approvals/{created['approval_id']}/confirm",{'result':'approved','operator_id':manager['id']})
+            self.assertEqual(approved['status'],'approved')
+
+            progress=call(f"/api/tasks/{created['task_id']}/progress",{'reporter_id':owner['id'],'percent':100,'comment':'接口端到端验收完成'})
+            self.assertEqual(progress['status'],'pending')
+            self.assertEqual(call(f"/api/approvals/{progress['approval_id']}/confirm",{'result':'approved','operator_id':manager['id']})['status'],'approved')
+            task=next(row for row in call('/api/tasks') if row['id']==created['task_id'])
+            self.assertEqual(task['work_status'],'completed')
+            self.assertEqual(task['effective_percent'],100)
+            self.assertTrue(call(f"/api/progress?task_id={created['task_id']}"))
+
+            self.assertEqual(call(f"/api/tasks/{created['task_id']}/feedback",{'content':'验收通过','user_id':manager['id']})['status'],'ok')
+            self.assertEqual(call(f"/api/tasks/{created['task_id']}/accept",{'result':'passed','acceptor_id':manager['id']})['status'],'ok')
+            self.assertEqual(call(f"/api/tasks/{created['task_id']}",{'priority':'P0'})['status'],'ok')
+            discarded=call('/api/task/draft/parse',{'text':'无需立项的测试信息','session_id':'discard-e2e'})
+            self.assertEqual(call(f"/api/task/draft/{discarded['id']}/discard",{})['status'],'discarded')
+
+            new_user=call('/api/users',{'name':'接口测试成员','wecom_userid':'api-e2e-user','role':'member'})
+            self.assertEqual(call(f"/api/users/{new_user['id']}/feishu-open-id",{'feishu_open_id':'ou_api_e2e_test'})['id'],new_user['id'])
+            self.assertIn('requires_human_confirmation',call('/api/ai/draft',{'text':'请在2031年1月3日前完成接口测试'}))
+            self.assertIn('total',call('/api/dashboard'))
+            self.assertIn('targets',call('/api/ops/daily-preview?date=2031-01-01'))
+            self.assertIn('morning',call('/api/ops/daily-run',{'report_date':'2031-01-01','kind':'all'}))
+            self.assertIsInstance(call('/api/feishu/unbound-identities'),list)
+            self.assertEqual(call('/api/notify',{'userid':'api-e2e-user','text':'test'})['mode'],'dry-run')
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+            if old_user is not None: os.environ['WMT_PUBLIC_USER']=old_user
+            if old_password is not None: os.environ['WMT_PUBLIC_PASSWORD']=old_password
 
 if __name__=='__main__': unittest.main()

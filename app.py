@@ -423,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not c.execute('SELECT 1 FROM user WHERE id=?',(b['user_id'],)).fetchone() or not c.execute('SELECT 1 FROM org_position WHERE id=? AND status=?',(b['position_id'],'active')).fetchone(): return self.json(400,{'error':'user or position not found'})
                 primary=1 if b.get('is_primary',True) else 0
                 if primary: c.execute('UPDATE user_position SET is_primary=0 WHERE user_id=? AND valid_to IS NULL',(b['user_id'],))
-                oid=c.execute('INSERT INTO user_position(user_id,position_id,is_primary,valid_from) VALUES(?,?,?,?)',(b['user_id'],b['position_id'],primary,t)); audit(c,'user_position',oid,'create','local',after=b); c.commit(); out={'id':oid}
+                oid=c.execute('INSERT INTO user_position(user_id,position_id,is_primary,valid_from) VALUES(?,?,?,?)',(b['user_id'],b['position_id'],primary,t)).lastrowid; audit(c,'user_position',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/delegates':
                 required=['user_id','delegate_user_id','start_at','end_at']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'delegate details are required'})
