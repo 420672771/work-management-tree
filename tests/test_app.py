@@ -150,6 +150,23 @@ class WorkTreeTests(unittest.TestCase):
             c.execute("insert or replace into feishu_profile(open_id,display_name,avatar_url,fetched_at) values(?,?,?,?)",('ou_profile_test','飞书测试成员','https://example.com/avatar.png',app.now())); c.commit()
             self.assertEqual(app.feishu_profile_for(c,'ou_profile_test'),{'display_name':'飞书测试成员','avatar_url':'https://example.com/avatar.png'})
         finally: c.close()
+    def test_feishu_login_mode_requires_server_session(self):
+        keys=('WMT_AUTH_MODE','WMT_PUBLIC_BASE_URL','FEISHU_APP_ID','FEISHU_APP_SECRET')
+        previous={key:os.environ.get(key) for key in keys}
+        os.environ.update({'WMT_AUTH_MODE':'feishu','WMT_PUBLIC_BASE_URL':'https://worktree.example.test','FEISHU_APP_ID':'cli_test','FEISHU_APP_SECRET':'secret'})
+        c=app.db(); user=c.execute('select id from user order by id limit 1').fetchone(); session_id='test-feishu-session'; expiry=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(); c.execute('insert or replace into login_session(session_id,user_id,expire_at,created_at,last_seen_at) values(?,?,?,?,?)',(session_id,user['id'],expiry,app.now(),app.now())); c.commit(); c.close()
+        server=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler); thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start(); base=f'http://127.0.0.1:{server.server_port}'
+        try:
+            with urlopen(base+'/api/session',timeout=5) as response: self.assertFalse(json.loads(response.read())['authenticated'])
+            with self.assertRaises(HTTPError) as denied: urlopen(base+'/api/users',timeout=5)
+            self.assertEqual(denied.exception.code,401)
+            request=Request(base+'/api/users',headers={'Cookie':'wmt_session='+session_id})
+            with urlopen(request,timeout=5) as response: self.assertEqual(response.status,200)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+            for key,value in previous.items():
+                if value is None: os.environ.pop(key,None)
+                else: os.environ[key]=value
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]
@@ -237,7 +254,7 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(task['effective_percent'],100)
             self.assertTrue(call(f"/api/progress?task_id={created['task_id']}"))
 
-            self.assertEqual(call(f"/api/tasks/{created['task_id']}/feedback",{'content':'验收通过','user_id':manager['id']})['status'],'ok')
+            self.assertEqual(call(f"/api/tasks/{created['task_id']}/feedback",{'content':'验收通过','user_id':owner['id']})['status'],'ok')
             self.assertEqual(call(f"/api/tasks/{created['task_id']}",{'priority':'P0'})['status'],'ok')
             discarded=call('/api/task/draft/parse',{'text':'无需立项的测试信息','session_id':'discard-e2e'})
             self.assertEqual(call(f"/api/task/draft/{discarded['id']}/discard",{})['status'],'discarded')

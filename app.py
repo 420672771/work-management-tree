@@ -1,6 +1,6 @@
-import base64, hashlib, io, json, os, re, sqlite3, struct, urllib.request, urllib.parse, zipfile
+import base64, hashlib, io, json, os, re, secrets, sqlite3, struct, urllib.request, urllib.parse, zipfile
 from base64 import b64decode
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -33,9 +33,17 @@ CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY AUTOINCREM
 CREATE TABLE IF NOT EXISTS im_message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, external_msg_id TEXT NOT NULL, user_id INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(channel,external_msg_id));
 CREATE TABLE IF NOT EXISTS feishu_binding_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, action TEXT NOT NULL, old_open_id TEXT DEFAULT '', new_open_id TEXT DEFAULT '', operator TEXT DEFAULT 'local', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feishu_profile (open_id TEXT PRIMARY KEY, display_name TEXT DEFAULT '', avatar_url TEXT DEFAULT '', fetched_at TEXT NOT NULL, fetch_error TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS login_state (state_hash TEXT PRIMARY KEY, expire_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS login_session (session_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expire_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
+def feishu_login_enabled(): return os.getenv('WMT_AUTH_MODE','').lower()=='feishu'
+def feishu_redirect_uri():
+    configured=os.getenv('WMT_FEISHU_OAUTH_REDIRECT_URI','').strip()
+    if configured: return configured
+    base=os.getenv('WMT_PUBLIC_BASE_URL','').strip().rstrip('/')
+    return base+'/auth/feishu/callback' if base else ''
 def db():
     c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA)
     for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
@@ -317,6 +325,25 @@ class FeishuAdapter:
     """Minimal Feishu tenant-token sender and HTTP event verifier; secrets stay in env."""
     def __init__(self): self.app_id=os.getenv('FEISHU_APP_ID'); self.secret=os.getenv('FEISHU_APP_SECRET'); self.verify_token=os.getenv('FEISHU_VERIFICATION_TOKEN')
     def configured(self): return bool(self.app_id and self.secret and self.verify_token)
+    def login_configured(self): return bool(self.app_id and self.secret and feishu_redirect_uri())
+    def authorization_url(self, state):
+        if not self.login_configured(): raise RuntimeError('Feishu login is not configured')
+        query=urllib.parse.urlencode({'app_id':self.app_id,'redirect_uri':feishu_redirect_uri(),'state':state,'response_type':'code'})
+        return 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?'+query
+    def exchange_login_code(self, code):
+        if not self.login_configured(): raise RuntimeError('Feishu login is not configured')
+        payload={'grant_type':'authorization_code','code':code,'client_id':self.app_id,'client_secret':self.secret,'redirect_uri':feishu_redirect_uri()}
+        req=urllib.request.Request('https://open.feishu.cn/open-apis/authen/v1/access_token',json.dumps(payload).encode(),{'Content-Type':'application/json'})
+        with urllib.request.urlopen(req,timeout=10) as f: out=json.load(f)
+        data=out.get('data') or out
+        if out.get('code',0)!=0 or not data.get('access_token'): raise RuntimeError(out.get('msg','Feishu authorization failed'))
+        return data
+    def login_open_id(self, access_token):
+        req=urllib.request.Request('https://open.feishu.cn/open-apis/authen/v1/user_info',headers={'Authorization':'Bearer '+access_token})
+        with urllib.request.urlopen(req,timeout=10) as f: out=json.load(f)
+        data=out.get('data') or out
+        if out.get('code',0)!=0 or not data.get('open_id'): raise RuntimeError(out.get('msg','Feishu user identity unavailable'))
+        return data['open_id']
     def token(self):
         req=urllib.request.Request('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',json.dumps({'app_id':self.app_id,'app_secret':self.secret}).encode(),{'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=10) as f:
@@ -372,7 +399,23 @@ class WeComCallback:
         return {'userid':userid,'msg_type':msg_type,'content':content,'task_id':task_id}
 
 class Handler(BaseHTTPRequestHandler):
+    def cookie(self, name):
+        for value in self.headers.get('Cookie','').split(';'):
+            key,sep,item=value.strip().partition('=')
+            if sep and key==name: return item
+        return ''
+    def session_user(self):
+        session_id=self.cookie('wmt_session')
+        if not session_id: return None
+        c=db()
+        try:
+            row=c.execute("SELECT u.* FROM login_session s JOIN user u ON u.id=s.user_id WHERE s.session_id=? AND s.expire_at>?",(session_id,now())).fetchone()
+            if row: c.execute('UPDATE login_session SET last_seen_at=? WHERE session_id=?',(now(),session_id)); c.commit()
+            return rowdict(row)
+        finally: c.close()
+    def actor_id(self, submitted=None): return getattr(self,'authenticated_user_id',None) or submitted
     def authorized(self):
+        if feishu_login_enabled(): return bool(self.session_user())
         # Local-only mode remains frictionless; public/tunnel mode must set both values.
         username=os.getenv('WMT_PUBLIC_USER'); password=os.getenv('WMT_PUBLIC_PASSWORD')
         if not username and not password: return True
@@ -383,19 +426,73 @@ class Handler(BaseHTTPRequestHandler):
         except Exception: return False
         return bool(sep and user==username and pwd==password)
     def require_auth(self):
+        user=self.session_user() if feishu_login_enabled() else None
+        if user:
+            self.authenticated_user_id=user['id']; return True
         if self.authorized(): return True
+        if feishu_login_enabled(): return self.json(401,{'error':'login_required','login_url':'/auth/feishu/start'}) or False
         self.send_response(401); self.send_header('WWW-Authenticate','Basic realm="Work Management Tree"'); self.send_header('Content-Length','0'); self.end_headers(); return False
+    def redirect(self, location, cookie=None):
+        self.send_response(302); self.send_header('Location',location)
+        if cookie: self.send_header('Set-Cookie',cookie)
+        self.send_header('Content-Length','0'); self.end_headers()
+    def session_payload(self):
+        user=self.session_user()
+        return {'authenticated':bool(user),'mode':'feishu' if feishu_login_enabled() else 'demo','user':user}
+    def start_feishu_login(self):
+        adapter=FeishuAdapter()
+        if not feishu_login_enabled(): return self.redirect('/?login_error=disabled')
+        if not adapter.login_configured(): return self.redirect('/?login_error=not_configured')
+        state=secrets.token_urlsafe(32); c=db()
+        try:
+            c.execute('DELETE FROM login_state WHERE expire_at<=?',(now(),))
+            c.execute('INSERT INTO login_state(state_hash,expire_at,created_at) VALUES(?,?,?)',(hashlib.sha256(state.encode()).hexdigest(),(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat(),now())); c.commit()
+        finally: c.close()
+        self.redirect(adapter.authorization_url(state))
+    def finish_feishu_login(self, query):
+        state=query.get('state',[''])[0]; code=query.get('code',[''])[0]
+        if not state or not code: return self.redirect('/?login_error=invalid_callback')
+        c=db()
+        try:
+            valid=c.execute('SELECT 1 FROM login_state WHERE state_hash=? AND expire_at>?',(hashlib.sha256(state.encode()).hexdigest(),now())).fetchone()
+            c.execute('DELETE FROM login_state WHERE state_hash=?',(hashlib.sha256(state.encode()).hexdigest(),)); c.commit()
+        finally: c.close()
+        if not valid: return self.redirect('/?login_error=expired')
+        try:
+            token=FeishuAdapter().exchange_login_code(code); open_id=FeishuAdapter().login_open_id(token['access_token'])
+        except Exception: return self.redirect('/?login_error=authorization_failed')
+        c=db()
+        try:
+            user=c.execute("SELECT id FROM user WHERE feishu_open_id=?",(open_id,)).fetchone()
+            if not user: return self.redirect('/?login_error=unbound')
+            session_id=secrets.token_urlsafe(48); expires=(datetime.now(timezone.utc)+timedelta(hours=8)).isoformat()
+            c.execute('DELETE FROM login_session WHERE expire_at<=?',(now(),)); c.execute('INSERT INTO login_session(session_id,user_id,expire_at,created_at,last_seen_at) VALUES(?,?,?,?,?)',(session_id,user['id'],expires,now(),now())); audit(c,'login',user['id'],'feishu_login',str(user['id']),after={'channel':'feishu'}); c.commit()
+        finally: c.close()
+        secure='; Secure' if feishu_redirect_uri().startswith('https://') else ''
+        self.redirect('/',f'wmt_session={session_id}; Path=/; Max-Age=28800; HttpOnly; SameSite=Lax{secure}')
+    def logout(self):
+        session_id=self.cookie('wmt_session'); c=db()
+        try:
+            if session_id: c.execute('DELETE FROM login_session WHERE session_id=?',(session_id,)); c.commit()
+        finally: c.close()
+        self.redirect('/', 'wmt_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
     def json(self, code, payload):
         data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def body(self):
         n=int(self.headers.get('Content-Length','0')); return json.loads(self.rfile.read(n) or '{}')
     def do_GET(self):
-        if not self.path.startswith('/wecom/callback') and not self.require_auth(): return
-        if self.path=='/' or self.path=='/index.html':
+        p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
+        if p.path=='/auth/feishu/start': return self.start_feishu_login()
+        if p.path=='/auth/feishu/callback': return self.finish_feishu_login(q)
+        if p.path=='/auth/logout': return self.logout()
+        if p.path=='/api/session': return self.json(200,self.session_payload())
+        if p.path=='/' or p.path=='/index.html':
+            if not feishu_login_enabled() and not self.require_auth(): return
             data=(ROOT/'static'/'index.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
-        if self.path.startswith('/wecom/callback'):
+        if p.path.startswith('/wecom/callback'):
             self.handle_wecom_get(); return
-        c=db(); p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
+        if not self.require_auth(): return
+        c=db()
         if p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
@@ -561,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path.startswith('/api/approvals/') and p.path.endswith('/confirm'):
                 aid=int(p.path.split('/')[3]); approval=c.execute('SELECT * FROM approval_record WHERE id=?',(aid,)).fetchone()
                 if not approval or approval['status']!='pending': return self.json(404,{'error':'pending approval not found'})
-                result=b.get('result'); operator=b.get('operator_id')
+                result=b.get('result'); operator=self.actor_id(b.get('operator_id'))
                 if result not in ('approved','rejected'): return self.json(400,{'error':'result must be approved or rejected'})
                 if approval['approver_id'] and operator and int(operator)!=approval['approver_id']: return self.json(403,{'error':'only assigned approver may confirm'})
                 c.execute('UPDATE approval_record SET status=?,result_reason=?,operated_by=?,operated_at=? WHERE id=?',(result,b.get('reason',''),operator,t,aid))
@@ -574,7 +671,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not task or task['approval_status']!='approved': return self.json(400,{'error':'only approved tasks may receive progress'})
                 percent=b.get('percent');
                 if not isinstance(percent,int) or percent<0 or percent>100 or not b.get('comment'): return self.json(400,{'error':'percent (0-100 integer) and comment are required'})
-                reporter=b.get('reporter_id',task['owner_id'])
+                reporter=self.actor_id(b.get('reporter_id',task['owner_id']))
                 if int(reporter)!=int(task['owner_id']): return self.json(403,{'error':'only task owner may report progress'})
                 rid,aid,_=submit_progress(c,tid,reporter,percent,b['comment'],b.get('blocked',False),b.get('block_reason',''),b.get('expected_finish'),b.get('source','web')); c.commit(); out={'id':rid,'approval_id':aid,'status':'pending'}
             elif p.path.startswith('/api/tasks/'):
@@ -582,12 +679,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not old: return self.json(404,{'error':'task not found'})
                 if p.path.endswith('/feedback'):
                     if not b.get('content'): return self.json(400,{'error':'content is required'})
-                    c.execute('INSERT INTO feedback(task_id,user_id,content,parsed_due_at,progress,risk,created_at) VALUES(?,?,?,?,?,?,?)',(tid,b.get('user_id'),b.get('content',''),parse_due(b.get('content','')),b.get('progress',''),b.get('risk',''),t)); c.execute("UPDATE task SET risk_status=?,updated_at=? WHERE id=?",('blocked' if b.get('risk') else old['risk_status'],t,tid)); action='feedback'
+                    feedback_user=self.actor_id(b.get('user_id'))
+                    if feedback_user and int(feedback_user)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may submit feedback'})
+                    c.execute('INSERT INTO feedback(task_id,user_id,content,parsed_due_at,progress,risk,created_at) VALUES(?,?,?,?,?,?,?)',(tid,feedback_user,b.get('content',''),parse_due(b.get('content','')),b.get('progress',''),b.get('risk',''),t)); c.execute("UPDATE task SET risk_status=?,updated_at=? WHERE id=?",('blocked' if b.get('risk') else old['risk_status'],t,tid)); action='feedback'
                 elif p.path.endswith('/accept'):
                     result=b.get('result');
                     if result not in ('passed','rejected'): return self.json(400,{'error':'result must be passed or rejected'})
                     if old['work_status']!='awaiting_acceptance': return self.json(400,{'error':'task is not awaiting acceptance'})
-                    acceptor_id=b.get('acceptor_id')
+                    acceptor_id=self.actor_id(b.get('acceptor_id'))
                     approver_id=old['approver_id'] or approver_for(c,old['owner_id'])
                     if not acceptor_id or int(acceptor_id)!=int(approver_id): return self.json(403,{'error':'only the task owner\'s approver may accept'})
                     c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,b.get('acceptor_id'),result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
@@ -595,7 +694,7 @@ class Handler(BaseHTTPRequestHandler):
                     allowed={'work_status','risk_status','due_at','priority','owner_id','deliverable'}; changes={k:v for k,v in b.items() if k in allowed};
                     if not changes: return self.json(400,{'error':'no editable fields'})
                     if 'work_status' in changes:
-                        operator_id=b.get('operator_id')
+                        operator_id=self.actor_id(b.get('operator_id'))
                         if not operator_id or int(operator_id)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may update task status'})
                         transition=(old['work_status'],changes['work_status'])
                         if transition not in {('assigned','in_progress'),('in_progress','awaiting_acceptance')}:

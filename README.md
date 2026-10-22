@@ -73,4 +73,23 @@ WMT_DB=/tmp/worktree-pilot.db python3 scripts/run-demo-pilot.py
 
 公网/临时隧道发布前必须设置 `WMT_PUBLIC_USER` 和 `WMT_PUBLIC_PASSWORD`，否则不要暴露端口。当前服务提供可选 HTTP Basic Auth；正式生产建议放在 HTTPS 反向代理和企业身份认证之后。
 
+### 飞书扫码登录
+
+系统支持把已绑定的飞书成员作为登录账号。启用前须为服务提供 HTTPS 公网地址，并在飞书自建应用中开启网页应用/扫码登录能力，将回调地址配置为：
+
+```text
+https://你的域名/auth/feishu/callback
+```
+
+服务环境变量：
+
+```bash
+WMT_AUTH_MODE=feishu
+WMT_PUBLIC_BASE_URL=https://你的域名
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+```
+
+启用后，页面仅展示飞书扫码登录入口；飞书授权返回的 `open_id` 必须已在“组织配置 → 飞书成员绑定”中绑定到系统成员，否则会拒绝登录。会话有效期为 8 小时，服务端通过 HttpOnly Cookie 保存会话标识。飞书网页扫码登录基于 OAuth 2.0 授权回调流程。 
+
 如使用 Cloudflare Quick Tunnel：先启动带认证的本地服务，再运行 `scripts/start-cloudflare-preview.sh`。Quick Tunnel 适合临时验证，无固定域名和 uptime 保证。
