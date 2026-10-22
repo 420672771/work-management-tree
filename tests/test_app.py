@@ -98,6 +98,19 @@ class WorkTreeTests(unittest.TestCase):
             c.execute('delete from delegate where id=?',(did,))
             self.assertEqual(app.approver_for(c,owner),manager)
         finally: c.close()
+    def test_explicit_task_number_progress_parsing_and_submission(self):
+        c=app.db()
+        try:
+            owner=c.execute("select id from user where role<>'manager' order by id limit 1").fetchone()[0]
+            approver=app.approver_for(c,owner)
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,approver_id,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('飞书进度测试',owner,'2030-01-01T00:00:00+00:00','测试记录','approved',approver,app.now(),app.now())).lastrowid
+            parsed=app.parse_progress_message(f'任务#{tid} 完成 60%，阻塞：等待接口')
+            self.assertEqual(parsed['task_id'],tid); self.assertEqual(parsed['percent'],60); self.assertTrue(parsed['blocked'])
+            rid,aid,_=app.submit_progress(c,tid,owner,parsed['percent'],parsed['comment'],parsed['blocked'],parsed['block_reason'],source='feishu')
+            self.assertGreater(rid,0); self.assertGreater(aid,0)
+            self.assertEqual(c.execute('select source from progress_record where id=?',(rid,)).fetchone()[0],'feishu')
+            self.assertEqual(app.parse_progress_message(f'任务#{tid} 已完成')['percent'],100)
+        finally: c.close()
     def test_expired_progress_is_auto_confirmed(self):
         c=app.db()
         try:

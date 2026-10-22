@@ -28,16 +28,31 @@ def receive(data):
             try: text=json.loads(message.get('content','{}')).get('text','')
             except Exception: text=message.get('content','')
         if text and sender:
-            slots,missing=app.draft_slots(text,user[0] if user else None)
-            expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-            state='collecting' if missing else 'preview'
-            c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                      (f'feishu:{sender}',user[0] if user else None,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),state,expire,app.now(),app.now()))
-            if user:
-                missing_text=app.friendly_slot_labels(missing)
-                reply='已识别任务草稿：'+slots['title']+('。请补充：'+missing_text if missing else '。已进入待确认草稿，请在工作管理树中确认生成。')
+            progress=app.parse_progress_message(text)
+            if progress:
+                if not user:
+                    reply='已识别为任务进度，但当前飞书账号尚未绑定系统成员，请先完成成员绑定。'
+                elif progress['percent'] is None:
+                    reply=f"已识别任务#{progress['task_id']}。请补充完成比例，例如：任务#{progress['task_id']} 完成 60%。"
+                else:
+                    try:
+                        _,_,task=app.submit_progress(c,progress['task_id'],user[0],progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
+                        reply=f"已提交《{task['title']}》进度 {progress['percent']}%，等待上级确认后生效。"
+                    except PermissionError:
+                        reply='该任务的进度只能由任务责任人提交。'
+                    except ValueError as exc:
+                        reply='进度提交未成功：'+str(exc)
             else:
-                reply='已识别任务草稿：'+slots['title']+'。当前飞书账号尚未绑定系统成员，请管理员在“组织配置 → 飞书成员绑定”中完成绑定；绑定后再次发送即可自动带入责任人。'
+                slots,missing=app.draft_slots(text,user[0] if user else None)
+                expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                state='collecting' if missing else 'preview'
+                c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                          (f'feishu:{sender}',user[0] if user else None,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),state,expire,app.now(),app.now()))
+                if user:
+                    missing_text=app.friendly_slot_labels(missing)
+                    reply='已识别任务草稿：'+slots['title']+('。请补充：'+missing_text if missing else '。已进入待确认草稿，请在工作管理树中确认生成。')
+                else:
+                    reply='已识别任务草稿：'+slots['title']+'。当前飞书账号尚未绑定系统成员，请管理员在“组织配置 → 飞书成员绑定”中完成绑定；绑定后再次发送即可自动带入责任人。'
             # Persist the event and draft before calling the remote send API. A transient
             # Feishu send failure must not cause the event receiver to fail or retry-create.
             c.commit()

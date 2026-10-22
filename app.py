@@ -165,6 +165,26 @@ def parse_due(text):
         return (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
     return None
 
+def parse_progress_message(text):
+    """Parse an explicit task-number progress message; never guesses a task."""
+    task_match=re.search(r'任务\s*#\s*(\d+)',text)
+    if not task_match: return None
+    percent_match=re.search(r'(\d{1,3})\s*[%％]',text)
+    percent=int(percent_match.group(1)) if percent_match else (100 if re.search(r'已完成|完成了|完成$',text.strip()) else None)
+    blocked_match=re.search(r'(?:阻塞|风险)(?:原因)?\s*[：:]?\s*(.+)',text)
+    return {'task_id':int(task_match.group(1)),'percent':percent,'comment':text.strip(),'blocked':bool(blocked_match),'block_reason':blocked_match.group(1).strip() if blocked_match else '','expected_finish':parse_due(text)}
+
+def submit_progress(c, task_id, reporter_id, percent, comment, blocked=False, block_reason='', expected_finish=None, source='web'):
+    task=c.execute('SELECT * FROM task WHERE id=?',(task_id,)).fetchone()
+    if not task: raise ValueError('任务不存在')
+    if task['approval_status']!='approved': raise ValueError('任务尚未确认生效')
+    if int(reporter_id)!=int(task['owner_id']): raise PermissionError('只有任务责任人可以提交进度')
+    if not isinstance(percent,int) or percent<0 or percent>100: raise ValueError('完成比例应为 0 至 100')
+    if not comment: raise ValueError('请补充进度说明')
+    t=now(); rid=c.execute("INSERT INTO progress_record(task_id,reported_percent,report_text,is_blocked,block_reason,expected_finish,reported_by,reported_at,source) VALUES(?,?,?,?,?,?,?,?,?)",(task_id,percent,comment,1 if blocked else 0,block_reason,expected_finish,reporter_id,t,source)).lastrowid
+    aid=create_approval(c,'progress_confirm',rid,task_id,task['approver_id']); c.execute("UPDATE task SET work_status='in_progress',updated_at=? WHERE id=?",(t,task_id)); audit(c,'progress',rid,'report_pending',str(reporter_id),after={'percent':percent,'comment':comment,'blocked':blocked,'source':source})
+    return rid,aid,task
+
 def ai_draft(text):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
     api_base, api_key, model = os.getenv('AI_API_BASE'), os.getenv('AI_API_KEY'), os.getenv('AI_MODEL')
@@ -413,8 +433,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not task or task['approval_status']!='approved': return self.json(400,{'error':'only approved tasks may receive progress'})
                 percent=b.get('percent');
                 if not isinstance(percent,int) or percent<0 or percent>100 or not b.get('comment'): return self.json(400,{'error':'percent (0-100 integer) and comment are required'})
-                reporter=b.get('reporter_id',task['owner_id']); rid=c.execute("INSERT INTO progress_record(task_id,reported_percent,report_text,is_blocked,block_reason,expected_finish,reported_by,reported_at,source) VALUES(?,?,?,?,?,?,?,?,?)",(tid,percent,b['comment'],1 if b.get('blocked') else 0,b.get('block_reason',''),b.get('expected_finish'),reporter,t,b.get('source','web'))).lastrowid
-                aid=create_approval(c,'progress_confirm',rid,tid,task['approver_id']); c.execute("UPDATE task SET work_status='in_progress',updated_at=? WHERE id=?",(t,tid)); audit(c,'progress',rid,'report_pending',str(reporter),after=b); c.commit(); out={'id':rid,'approval_id':aid,'status':'pending'}
+                reporter=b.get('reporter_id',task['owner_id'])
+                if int(reporter)!=int(task['owner_id']): return self.json(403,{'error':'only task owner may report progress'})
+                rid,aid,_=submit_progress(c,tid,reporter,percent,b['comment'],b.get('blocked',False),b.get('block_reason',''),b.get('expected_finish'),b.get('source','web')); c.commit(); out={'id':rid,'approval_id':aid,'status':'pending'}
             elif p.path.startswith('/api/tasks/'):
                 tid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone();
                 if not old: return self.json(404,{'error':'task not found'})
