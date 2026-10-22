@@ -52,6 +52,16 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(len(app.generate_routines(c,'2030-01-01')),0)
             self.assertEqual(c.execute("select count(*) from task where task_type='ROUTINE'").fetchone()[0],1)
         finally: c.close()
+    def test_responsibility_domain_bootstrap_assigns_five_domains_and_owners(self):
+        c=app.db()
+        try:
+            rows={row['domain_code']:row for row in c.execute("select domain_code,name,operating_line,owner_id from org_node where domain_code<>''")}
+            expected={'A1':('Agent 应用交付域','AI创新线','钱缘'),'A2':('AI 平台与技术能力域','AI创新线','闫兴赫'),'A3':('AI 推广与赋能运营域','AI创新线','覃俞淦'),'B1':('核心业务系统运营保障域','运营保障线','钱缘'),'B2':('IT 基础设施与终端运维域','运营保障线','封滘生')}
+            self.assertEqual(set(rows),set(expected))
+            for code,(name,line,owner) in expected.items():
+                self.assertEqual(rows[code]['name'],name); self.assertEqual(rows[code]['operating_line'],line)
+                self.assertEqual(c.execute('select name from user where id=?',(rows[code]['owner_id'],)).fetchone()[0],owner)
+        finally: c.close()
     def test_daily_jobs_mark_unreported_without_duplicate_failures(self):
         c=app.db()
         try:

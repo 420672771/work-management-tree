@@ -10,7 +10,7 @@ DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS org_node (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, node_type TEXT NOT NULL, name TEXT NOT NULL, boundary TEXT DEFAULT '', owner_id INTEGER, effective_at TEXT, inactive_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS org_node (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, node_type TEXT NOT NULL, name TEXT NOT NULL, boundary TEXT DEFAULT '', owner_id INTEGER, domain_code TEXT DEFAULT '', operating_line TEXT DEFAULT '', effective_at TEXT, inactive_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS user (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, department TEXT DEFAULT '', role TEXT DEFAULT 'owner', wecom_userid TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS task (id INTEGER PRIMARY KEY AUTOINCREMENT, org_node_id INTEGER, title TEXT NOT NULL, description TEXT DEFAULT '', owner_id INTEGER NOT NULL, due_at TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'P1', work_status TEXT NOT NULL DEFAULT 'assigned', risk_status TEXT NOT NULL DEFAULT 'normal', deliverable TEXT DEFAULT '', source TEXT DEFAULT 'manual', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, user_id INTEGER, content TEXT NOT NULL, parsed_due_at TEXT, progress TEXT DEFAULT '', risk TEXT DEFAULT '', created_at TEXT NOT NULL);
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS im_message_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
 def now(): return datetime.now(timezone.utc).isoformat()
 def db():
     c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA)
-    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
+    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
     return c
@@ -165,10 +165,40 @@ def seed(c):
         for row in c.execute("SELECT id FROM user WHERE id<>?",(manager[0],)):
             if not c.execute("SELECT 1 FROM reporting_line WHERE user_id=? AND effective_to IS NULL",(row[0],)).fetchone(): c.execute("INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,effective_from) VALUES(?,?,?,?)",(row[0],manager[0],manager[0],now()))
 
+RESPONSIBILITY_DOMAINS = (
+    ('A1','AI创新线','Agent 应用交付域','钱缘','负责业务场景 Agent 的方案、开发部署、应用支持与效果优化；不负责通用平台、传统系统功能和推广运营。','产品与项目管理'),
+    ('A2','AI创新线','AI 平台与技术能力域','闫兴赫','负责 AI 平台、通用组件、技术评测、AI 基础架构逻辑层及技术兜底；不负责具体场景交付和推广运营。','产品规划与需求管理'),
+    ('A3','AI创新线','AI 推广与赋能运营域','覃俞淦','负责 AI 工具推广、培训认证、覆盖率与活跃度运营；不负责应用开发和平台建设。','项目交付与质量管理'),
+    ('B1','运营保障线','核心业务系统运营保障域','钱缘','负责 ERP、供应链作业、财务结算、风控与供应链金融等传统系统的需求交付和应用运维；不负责基础设施与 AI 平台。','研发与技术平台'),
+    ('B2','运营保障线','IT 基础设施与终端运维域','封滘生','负责网络、桌面、设备、机房、账号资产及 AI 算力物理层；不负责业务应用与 AI 平台逻辑层。','数据运营与客户反馈'),
+)
+
+def initialize_responsibility_domains(c):
+    """Bootstrap the approved five-domain structure without deleting task history."""
+    root=c.execute("SELECT id FROM org_node WHERE node_type='department' ORDER BY id LIMIT 1").fetchone()
+    manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
+    if not root: return
+    if manager: c.execute('UPDATE org_node SET owner_id=? WHERE id=?',(manager['id'],root['id']))
+    for code,line,name,owner_name,boundary,legacy_name in RESPONSIBILITY_DOMAINS:
+        owner=c.execute('SELECT id FROM user WHERE name=? ORDER BY id LIMIT 1',(owner_name,)).fetchone()
+        if not owner:
+            owner_id=c.execute('INSERT INTO user(name,department,role) VALUES(?,?,?)',(owner_name,'科技产品中心','owner')).lastrowid
+        else: owner_id=owner['id']
+        active_line=c.execute("SELECT id,direct_leader_id,approver_id FROM reporting_line WHERE user_id=? AND effective_to IS NULL ORDER BY effective_from DESC LIMIT 1",(owner_id,)).fetchone()
+        if manager and (not active_line or active_line['direct_leader_id']!=manager['id'] or active_line['approver_id']!=manager['id']):
+            if active_line: c.execute('UPDATE reporting_line SET effective_to=? WHERE id=?',(now(),active_line['id']))
+            c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,effective_from) VALUES(?,?,?,?)',(owner_id,manager['id'],manager['id'],now()))
+        node=c.execute('SELECT id FROM org_node WHERE domain_code=? ORDER BY id LIMIT 1',(code,)).fetchone()
+        if not node: node=c.execute('SELECT id FROM org_node WHERE parent_id=? AND name=? ORDER BY id LIMIT 1',(root['id'],legacy_name)).fetchone()
+        if node:
+            c.execute('UPDATE org_node SET parent_id=?,node_type=?,name=?,boundary=?,owner_id=?,domain_code=?,operating_line=?,inactive_at=NULL WHERE id=?',(root['id'],'domain',name,boundary,owner_id,code,line,node['id']))
+        else:
+            c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,domain_code,operating_line,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(root['id'],'domain',name,boundary,owner_id,code,line,now(),now()))
+
 def initialize():
     c=db()
     try:
-        seed(c); c.commit()
+        seed(c); initialize_responsibility_domains(c); c.commit()
     finally:
         c.close()
 
