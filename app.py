@@ -45,9 +45,14 @@ def audit(c, typ, oid, action, actor, before=None, after=None):
     c.execute("INSERT INTO audit_log(object_type,object_id,action,actor,before_json,after_json,created_at) VALUES(?,?,?,?,?,?,?)", (typ, oid, action, actor, json.dumps(before, ensure_ascii=False) if before else None, json.dumps(after, ensure_ascii=False) if after else None, now()))
 def approver_for(c, user_id):
     line=c.execute("SELECT approver_id,direct_leader_id FROM reporting_line WHERE user_id=? AND (effective_to IS NULL OR effective_to>?) ORDER BY effective_from DESC LIMIT 1",(user_id,now())).fetchone()
-    if line and (line['approver_id'] or line['direct_leader_id']): return line['approver_id'] or line['direct_leader_id']
-    manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
-    return manager[0] if manager else None
+    approver=(line['approver_id'] or line['direct_leader_id']) if line and (line['approver_id'] or line['direct_leader_id']) else None
+    if not approver:
+        manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
+        approver=manager[0] if manager else None
+    if approver:
+        delegate=c.execute("SELECT delegate_user_id FROM delegate WHERE user_id=? AND scope IN ('approval','all') AND start_at<=? AND end_at>=? ORDER BY id DESC LIMIT 1",(approver,now(),now())).fetchone()
+        if delegate: return delegate[0]
+    return approver
 def create_approval(c, biz_type, biz_id, task_id, approver_id):
     return c.execute("INSERT INTO approval_record(biz_type,biz_id,task_id,approver_id,due_at,created_at) VALUES(?,?,?,?,?,?)",(biz_type,biz_id,task_id,approver_id,now(),now())).lastrowid
 def generate_routines(c, instance_date=None):
@@ -123,6 +128,8 @@ def seed(c):
         t=now(); c.execute("INSERT INTO org_node(node_type,name,boundary,effective_at,created_at) VALUES('department','科技产品中心','科技产品中心全部责任域',?,?)",(t,t))
         root=c.execute("INSERT INTO org_node(parent_id,node_type,name,boundary,effective_at,created_at) VALUES(?,?,?,?,?,?)",(c.execute("SELECT id FROM org_node ORDER BY id DESC LIMIT 1").fetchone()[0],'domain','产品与项目管理','负责产品规划、项目交付和跨部门推进',t,t)).lastrowid
     manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
+    if not c.execute("SELECT 1 FROM org_department LIMIT 1").fetchone():
+        c.execute("INSERT INTO org_department(name,owner_user_id,status,created_at) VALUES(?,?,?,?)",('科技产品中心',manager[0] if manager else None,'active',now()))
     if manager:
         for row in c.execute("SELECT id FROM user WHERE id<>?",(manager[0],)):
             if not c.execute("SELECT 1 FROM reporting_line WHERE user_id=? AND effective_to IS NULL",(row[0],)).fetchone(): c.execute("INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,effective_from) VALUES(?,?,?,?)",(row[0],manager[0],manager[0],now()))
@@ -264,6 +271,12 @@ class Handler(BaseHTTPRequestHandler):
             out=[rowdict(x) for x in c.execute("SELECT a.*,t.title,u.name AS approver_name,p.reported_percent,p.report_text,p.is_blocked,p.block_reason,p.expected_finish FROM approval_record a LEFT JOIN task t ON t.id=a.task_id LEFT JOIN user u ON u.id=a.approver_id LEFT JOIN progress_record p ON a.biz_type='progress_confirm' AND p.id=a.biz_id WHERE a.status=? ORDER BY a.created_at",(q.get('status',['pending'])[0],))]
         elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]
         elif p.path=='/api/org/departments': out=[rowdict(x) for x in c.execute('SELECT * FROM org_department WHERE status=? ORDER BY name',('active',))]
+        elif p.path=='/api/org/positions': out=[rowdict(x) for x in c.execute("SELECT p.*,d.name AS department_name FROM org_position p LEFT JOIN org_department d ON d.id=p.dept_id WHERE p.status='active' ORDER BY d.name,p.name")]
+        elif p.path=='/api/org/user-positions': out=[rowdict(x) for x in c.execute("SELECT up.*,u.name AS user_name,p.name AS position_name FROM user_position up JOIN user u ON u.id=up.user_id JOIN org_position p ON p.id=up.position_id WHERE up.valid_to IS NULL OR up.valid_to>? ORDER BY up.is_primary DESC,u.name",(now(),))]
+        elif p.path=='/api/delegates':
+            out=[]
+            for row in c.execute("SELECT d.*,u.name AS user_name,du.name AS delegate_name FROM delegate d JOIN user u ON u.id=d.user_id JOIN user du ON du.id=d.delegate_user_id ORDER BY d.end_at DESC"):
+                item=rowdict(row); item['is_active']=item['start_at']<=now()<=item['end_at']; out.append(item)
         elif p.path=='/api/progress': out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(q.get('task_id',[0])[0],))]
         elif p.path=='/api/routine/templates': out=[rowdict(x) for x in c.execute("SELECT tt.*,u.name AS owner_name,n.name AS node_name FROM task_template tt LEFT JOIN user u ON u.id=tt.owner_id LEFT JOIN org_node n ON n.id=tt.org_node_id WHERE tt.status='active' ORDER BY tt.id DESC")]
         elif p.path=='/api/feishu/unbound-identities':
@@ -331,6 +344,21 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path=='/api/org/departments':
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_department(name,parent_id,owner_user_id,status,created_at) VALUES(?,?,?,?,?)',(b['name'],b.get('parent_id'),b.get('owner_user_id'),'active',t)).lastrowid; audit(c,'org_department',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/org/positions':
+                if not b.get('name'): return self.json(400,{'error':'name is required'})
+                oid=c.execute('INSERT INTO org_position(name,dept_id,level,default_role,status) VALUES(?,?,?,?,?)',(b['name'],b.get('dept_id'),b.get('level',''),b.get('default_role','member'),'active')).lastrowid; audit(c,'org_position',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/org/user-positions':
+                if not b.get('user_id') or not b.get('position_id'): return self.json(400,{'error':'user and position are required'})
+                if not c.execute('SELECT 1 FROM user WHERE id=?',(b['user_id'],)).fetchone() or not c.execute('SELECT 1 FROM org_position WHERE id=? AND status=?',(b['position_id'],'active')).fetchone(): return self.json(400,{'error':'user or position not found'})
+                primary=1 if b.get('is_primary',True) else 0
+                if primary: c.execute('UPDATE user_position SET is_primary=0 WHERE user_id=? AND valid_to IS NULL',(b['user_id'],))
+                oid=c.execute('INSERT INTO user_position(user_id,position_id,is_primary,valid_from) VALUES(?,?,?,?)',(b['user_id'],b['position_id'],primary,t)); audit(c,'user_position',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/delegates':
+                required=['user_id','delegate_user_id','start_at','end_at']; missing=[x for x in required if not b.get(x)]
+                if missing: return self.json(400,{'error':'delegate details are required'})
+                if int(b['user_id'])==int(b['delegate_user_id']): return self.json(400,{'error':'delegate must be another user'})
+                if b['start_at']>=b['end_at']: return self.json(400,{'error':'delegate period is invalid'})
+                oid=c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(b['user_id'],b['delegate_user_id'],b.get('scope','approval'),b['start_at'],b['end_at'])).lastrowid; audit(c,'delegate',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/routine/templates':
                 required=['org_node_id','title','owner_id','deliverable','recurrence']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})

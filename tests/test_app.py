@@ -1,4 +1,5 @@
 import base64, os, struct, tempfile, unittest
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 os.environ['WMT_DB']=str(Path(tempfile.mkdtemp())/'test.db')
 import sys; sys.path.insert(0,str(Path(__file__).parents[1]))
@@ -84,6 +85,18 @@ class WorkTreeTests(unittest.TestCase):
             c.commit()
             self.assertEqual(c.execute('select status from conversation_draft where id=?',(did,)).fetchone()[0],'discarded')
             self.assertEqual(c.execute("select count(*) from audit_log where object_type='conversation_draft' and object_id=? and action='discard'",(did,)).fetchone()[0],1)
+        finally: c.close()
+    def test_active_approval_delegate_replaces_confirming_user_only(self):
+        c=app.db()
+        try:
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            owner=c.execute("select id from user where role<>'manager' order by id limit 1").fetchone()[0]
+            proxy=c.execute("select id from user where id not in (?,?) order by id limit 1",(manager,owner)).fetchone()[0]
+            start=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat(); end=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
+            did=c.execute("insert into delegate(user_id,delegate_user_id,scope,start_at,end_at) values(?,?,?,?,?)",(manager,proxy,'approval',start,end)).lastrowid
+            self.assertEqual(app.approver_for(c,owner),proxy)
+            c.execute('delete from delegate where id=?',(did,))
+            self.assertEqual(app.approver_for(c,owner),manager)
         finally: c.close()
     def test_expired_progress_is_auto_confirmed(self):
         c=app.db()
