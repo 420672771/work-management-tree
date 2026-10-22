@@ -143,6 +143,12 @@ class WorkTreeTests(unittest.TestCase):
         for key in ('FEISHU_APP_ID','FEISHU_APP_SECRET','FEISHU_VERIFICATION_TOKEN'): os.environ.pop(key,None)
         self.assertFalse(app.FeishuAdapter().configured())
         self.assertEqual(app.FeishuAdapter().send_text('ou_test','hello')['mode'],'dry-run')
+    def test_feishu_profile_cache_can_be_read_without_remote_lookup(self):
+        c=app.db()
+        try:
+            c.execute("insert or replace into feishu_profile(open_id,display_name,avatar_url,fetched_at) values(?,?,?,?)",('ou_profile_test','飞书测试成员','https://example.com/avatar.png',app.now())); c.commit()
+            self.assertEqual(app.feishu_profile_for(c,'ou_profile_test'),{'display_name':'飞书测试成员','avatar_url':'https://example.com/avatar.png'})
+        finally: c.close()
     def test_wecom_callback_decrypts_and_maps_feedback(self):
         from Crypto.Cipher import AES
         key=base64.b64encode(b'0123456789abcdef').decode().decode() if False else base64.b64encode(b'0123456789abcdef'*2).decode()[:43]

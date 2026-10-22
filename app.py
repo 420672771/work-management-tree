@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS job_run_log (id INTEGER PRIMARY KEY AUTOINCREMENT, jo
 CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, source_type TEXT NOT NULL DEFAULT 'text', raw_text TEXT NOT NULL, slots_json TEXT NOT NULL DEFAULT '{}', missing_slots TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'collecting', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS im_message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, external_msg_id TEXT NOT NULL, user_id INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(channel,external_msg_id));
 CREATE TABLE IF NOT EXISTS feishu_binding_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, action TEXT NOT NULL, old_open_id TEXT DEFAULT '', new_open_id TEXT DEFAULT '', operator TEXT DEFAULT 'local', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS feishu_profile (open_id TEXT PRIMARY KEY, display_name TEXT DEFAULT '', avatar_url TEXT DEFAULT '', fetched_at TEXT NOT NULL, fetch_error TEXT DEFAULT '');
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -49,6 +50,17 @@ def mask_external_id(value):
     return ('••••'+value[-4:]) if len(value)>4 else ('••••' if value else '')
 def record_feishu_binding(c, user_id, action, old_open_id='', new_open_id='', operator='local'):
     return c.execute('INSERT INTO feishu_binding_history(user_id,action,old_open_id,new_open_id,operator,created_at) VALUES(?,?,?,?,?,?)',(user_id,action,old_open_id or '',new_open_id or '',operator,now())).lastrowid
+def feishu_profile_for(c, open_id, refresh=False):
+    cached=c.execute('SELECT display_name,avatar_url FROM feishu_profile WHERE open_id=?',(open_id,)).fetchone()
+    if cached and not refresh: return rowdict(cached)
+    try:
+        profile=FeishuAdapter().get_user_profile(open_id)
+        value={'display_name':profile.get('name',''),'avatar_url':profile.get('avatar_url','')}
+        c.execute("INSERT INTO feishu_profile(open_id,display_name,avatar_url,fetched_at,fetch_error) VALUES(?,?,?,?,?) ON CONFLICT(open_id) DO UPDATE SET display_name=excluded.display_name,avatar_url=excluded.avatar_url,fetched_at=excluded.fetched_at,fetch_error=excluded.fetch_error",(open_id,value['display_name'],value['avatar_url'],now(),''))
+        return value
+    except Exception as exc:
+        c.execute("INSERT INTO feishu_profile(open_id,display_name,avatar_url,fetched_at,fetch_error) VALUES(?,?,?,?,?) ON CONFLICT(open_id) DO UPDATE SET fetched_at=excluded.fetched_at,fetch_error=excluded.fetch_error",(open_id,'','',now(),str(exc)[:200]))
+        return rowdict(cached) if cached else {'display_name':'','avatar_url':''}
 def ensure_feishu_binding_history(c):
     """Backfill one auditable baseline record for bindings that predate the ledger."""
     for user in c.execute("SELECT id,feishu_open_id FROM user WHERE feishu_open_id IS NOT NULL AND feishu_open_id<>''"):
@@ -321,6 +333,14 @@ class FeishuAdapter:
         url=f'https://open.feishu.cn/open-apis/im/v1/messages/{urllib.parse.quote(message_id)}/resources/{urllib.parse.quote(file_key)}?{query}'
         req=urllib.request.Request(url,headers={'Authorization':'Bearer '+self.token()})
         with urllib.request.urlopen(req,timeout=30) as f: return f.read()
+    def get_user_profile(self, open_id):
+        if not self.configured(): raise RuntimeError('Feishu integration is not configured')
+        url='https://open.feishu.cn/open-apis/contact/v3/users/'+urllib.parse.quote(open_id)+'?user_id_type=open_id'
+        req=urllib.request.Request(url,headers={'Authorization':'Bearer '+self.token()})
+        with urllib.request.urlopen(req,timeout=10) as f: out=json.load(f)
+        if out.get('code',0)!=0: raise RuntimeError(out.get('msg','Feishu contact lookup failed'))
+        user=(out.get('data') or {}).get('user') or {}; avatar=user.get('avatar') or {}
+        return {'name':user.get('name',''),'avatar_url':avatar.get('avatar_240') or avatar.get('avatar_72') or avatar.get('avatar_origin') or ''}
 
 class WeComCallback:
     """Enterprise WeChat secure callback codec and feedback mapper."""
@@ -397,7 +417,9 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     payload=json.loads(log['payload_json']); event=payload.get('event',payload); sender=((event.get('sender') or {}).get('sender_id') or {}).get('open_id'); content=json.loads((event.get('message') or {}).get('content','{}')).get('text','')
                     bound=c.execute('SELECT 1 FROM user WHERE feishu_open_id=?',(sender,)).fetchone() if sender else None
-                    if sender and not bound and not any(x['open_id']==sender for x in rows): rows.append({'open_id':sender,'last_text':content[:80],'last_seen_at':log['created_at']})
+                    if sender and not bound and not any(x['open_id']==sender for x in rows):
+                        profile=feishu_profile_for(c,sender,q.get('refresh',['0'])[0]=='1')
+                        rows.append({'open_id':sender,'open_id_masked':mask_external_id(sender),'display_name':profile['display_name'],'avatar_url':profile['avatar_url'],'last_text':content[:80],'last_seen_at':log['created_at']})
                 except Exception: pass
             out=rows
         elif p.path=='/api/feishu/bindings':
@@ -421,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/dashboard':
             tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; today=datetime.now(timezone.utc).date().isoformat(); out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]}
         else: self.json(404,{'error':'not found'}); c.close(); return
-        self.json(200,out); c.close()
+        c.commit(); self.json(200,out); c.close()
     def handle_wecom_get(self):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query); codec=WeComCallback()
         if not codec.configured(): return self.json(503,{'error':'WECOM_TOKEN and WECOM_AES_KEY are required'})
