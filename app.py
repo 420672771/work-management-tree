@@ -248,8 +248,7 @@ def initialize_responsibility_domains(c):
             owner_id=c.execute('INSERT INTO user(name,department,role) VALUES(?,?,?)',(owner_name,'科技产品中心','member')).lastrowid
         else: owner_id=owner['id']
         active_line=c.execute("SELECT id,direct_leader_id,approver_id FROM reporting_line WHERE user_id=? AND effective_to IS NULL ORDER BY effective_from DESC LIMIT 1",(owner_id,)).fetchone()
-        if manager and (not active_line or active_line['direct_leader_id']!=manager['id'] or active_line['approver_id']!=manager['id']):
-            if active_line: c.execute('UPDATE reporting_line SET effective_to=? WHERE id=?',(now(),active_line['id']))
+        if manager and not active_line:
             c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,effective_from) VALUES(?,?,?,?)',(owner_id,manager['id'],manager['id'],now()))
         node=c.execute('SELECT id FROM org_node WHERE domain_code=? ORDER BY id LIMIT 1',(code,)).fetchone()
         if not node: node=c.execute('SELECT id FROM org_node WHERE parent_id=? AND name=? ORDER BY id LIMIT 1',(root['id'],legacy_name)).fetchone()
