@@ -613,6 +613,21 @@ class Handler(BaseHTTPRequestHandler):
                     except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
                     audit(c,'user',uid,'update','local',before=rowdict(old),after=b); c.commit(); out={'id':uid,'status':'updated'}
                 else: return self.json(400,{'error':'unsupported manage action'})
+            elif p.path.startswith('/api/users/') and p.path.endswith('/reporting-line'):
+                uid=int(p.path.split('/')[3]); user=c.execute('SELECT id FROM user WHERE id=?',(uid,)).fetchone()
+                if not user: return self.json(404,{'error':'user not found'})
+                leader_id=b.get('direct_leader_id')
+                old=c.execute('SELECT * FROM reporting_line WHERE user_id=? AND effective_to IS NULL ORDER BY effective_from DESC LIMIT 1',(uid,)).fetchone()
+                if leader_id in (None,''):
+                    if old: c.execute('UPDATE reporting_line SET effective_to=? WHERE id=?',(t,old['id']))
+                    audit(c,'reporting_line',old['id'] if old else uid,'clear_from_member','local',before=rowdict(old) if old else None,after={'user_id':uid,'direct_leader_id':None}); c.commit(); out={'id':uid,'status':'cleared'}
+                else:
+                    leader_id=int(leader_id)
+                    if leader_id==uid: return self.json(400,{'error':'a user cannot report to self'})
+                    if not c.execute('SELECT id FROM user WHERE id=?',(leader_id,)).fetchone(): return self.json(404,{'error':'direct leader not found'})
+                    if old: c.execute('UPDATE reporting_line SET effective_to=? WHERE id=?',(t,old['id']))
+                    oid=c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,dotted_leader_id,effective_from) VALUES(?,?,?,?,?)',(uid,leader_id,leader_id,None,t)).lastrowid
+                    audit(c,'reporting_line',oid,'set_from_member','local',before=rowdict(old) if old else None,after={'user_id':uid,'direct_leader_id':leader_id}); c.commit(); out={'id':oid,'status':'updated'}
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id/unbind'):
                 uid=int(p.path.split('/')[3])
                 user=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(uid,)).fetchone()
