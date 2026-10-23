@@ -11,7 +11,7 @@ DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS org_node (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, node_type TEXT NOT NULL, name TEXT NOT NULL, boundary TEXT DEFAULT '', owner_id INTEGER, domain_code TEXT DEFAULT '', operating_line TEXT DEFAULT '', effective_at TEXT, inactive_at TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS user (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, department TEXT DEFAULT '', role TEXT DEFAULT 'owner', wecom_userid TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS user (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, department TEXT DEFAULT '', role TEXT DEFAULT 'member', wecom_userid TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS task (id INTEGER PRIMARY KEY AUTOINCREMENT, org_node_id INTEGER, title TEXT NOT NULL, description TEXT DEFAULT '', owner_id INTEGER NOT NULL, due_at TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'P1', work_status TEXT NOT NULL DEFAULT 'assigned', risk_status TEXT NOT NULL DEFAULT 'normal', deliverable TEXT DEFAULT '', source TEXT DEFAULT 'manual', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, user_id INTEGER, content TEXT NOT NULL, parsed_due_at TEXT, progress TEXT DEFAULT '', risk TEXT DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS acceptance (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, acceptor_id INTEGER, result TEXT NOT NULL, reason TEXT DEFAULT '', created_at TEXT NOT NULL);
@@ -190,7 +190,7 @@ def seed(c):
     if c.execute("SELECT COUNT(*) FROM user").fetchone()[0] == 0:
         c.execute("INSERT INTO user(name,department,role) VALUES('科技产品中心负责人','科技产品中心','manager')")
         c.execute("INSERT INTO user(name,department,role) VALUES('部门管理PM','科技产品中心','pm')")
-        c.execute("INSERT INTO user(name,department,role) VALUES('待分配责任人','科技产品中心','owner')")
+        c.execute("INSERT INTO user(name,department,role) VALUES('待分配成员','科技产品中心','member')")
     if c.execute("SELECT COUNT(*) FROM org_node").fetchone()[0] == 0:
         t=now(); c.execute("INSERT INTO org_node(node_type,name,boundary,effective_at,created_at) VALUES('department','科技产品中心','科技产品中心全部责任域',?,?)",(t,t))
         root=c.execute("INSERT INTO org_node(parent_id,node_type,name,boundary,effective_at,created_at) VALUES(?,?,?,?,?,?)",(c.execute("SELECT id FROM org_node ORDER BY id DESC LIMIT 1").fetchone()[0],'domain','产品与项目管理','负责产品规划、项目交付和跨部门推进',t,t)).lastrowid
@@ -243,7 +243,7 @@ def initialize_responsibility_domains(c):
     for code,line,name,owner_name,boundary,legacy_name in RESPONSIBILITY_DOMAINS:
         owner=c.execute('SELECT id FROM user WHERE name=? ORDER BY id LIMIT 1',(owner_name,)).fetchone()
         if not owner:
-            owner_id=c.execute('INSERT INTO user(name,department,role) VALUES(?,?,?)',(owner_name,'科技产品中心','owner')).lastrowid
+            owner_id=c.execute('INSERT INTO user(name,department,role) VALUES(?,?,?)',(owner_name,'科技产品中心','member')).lastrowid
         else: owner_id=owner['id']
         active_line=c.execute("SELECT id,direct_leader_id,approver_id FROM reporting_line WHERE user_id=? AND effective_to IS NULL ORDER BY effective_from DESC LIMIT 1",(owner_id,)).fetchone()
         if manager and (not active_line or active_line['direct_leader_id']!=manager['id'] or active_line['approver_id']!=manager['id']):
@@ -259,7 +259,7 @@ def initialize_responsibility_domains(c):
 def initialize():
     c=db()
     try:
-        seed(c); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); c.commit()
+        seed(c); c.execute("UPDATE user SET role='member' WHERE role='owner'"); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); c.commit()
     finally:
         c.close()
 
@@ -593,8 +593,9 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path=='/api/users':
                 required=['name']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
+                if b.get('role','member') not in ('manager','pm','member'): return self.json(400,{'error':'invalid role'})
                 try:
-                    oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','owner'),b.get('wecom_userid') or None)).lastrowid
+                    oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','member'),b.get('wecom_userid') or None)).lastrowid
                 except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
                 audit(c,'user',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path.startswith('/api/users/') and p.path.endswith('/manage'):
@@ -606,7 +607,8 @@ class Handler(BaseHTTPRequestHandler):
                     c.execute('DELETE FROM reporting_line WHERE user_id=? OR direct_leader_id=? OR approver_id=?',(uid,uid,uid)); c.execute('DELETE FROM user_position WHERE user_id=?',(uid,)); c.execute('DELETE FROM delegate WHERE user_id=? OR delegate_user_id=?',(uid,uid)); c.execute('DELETE FROM user WHERE id=?',(uid,)); audit(c,'user',uid,'delete','local',before=rowdict(old)); c.commit(); out={'id':uid,'status':'deleted'}
                 elif action=='update':
                     if not b.get('name'): return self.json(400,{'error':'name is required'})
-                    try: c.execute('UPDATE user SET name=?,department=?,role=?,wecom_userid=? WHERE id=?',(b['name'].strip(),b.get('department','').strip(),b.get('role','owner'),b.get('wecom_userid') or None,uid))
+                    if b.get('role','member') not in ('manager','pm','member'): return self.json(400,{'error':'invalid role'})
+                    try: c.execute('UPDATE user SET name=?,department=?,role=?,wecom_userid=? WHERE id=?',(b['name'].strip(),b.get('department','').strip(),b.get('role','member'),b.get('wecom_userid') or None,uid))
                     except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
                     audit(c,'user',uid,'update','local',before=rowdict(old),after=b); c.commit(); out={'id':uid,'status':'updated'}
                 else: return self.json(400,{'error':'unsupported manage action'})
