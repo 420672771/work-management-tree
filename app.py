@@ -236,6 +236,8 @@ def detect_responsibility_domain(c, text):
 
 def initialize_responsibility_domains(c):
     """Bootstrap the approved five-domain structure without deleting task history."""
+    # A department may explicitly maintain its own team-based responsibility tree.
+    if c.execute("SELECT 1 FROM org_node WHERE domain_code IN ('BLD','TRN','OPS') LIMIT 1").fetchone(): return
     root=c.execute("SELECT id FROM org_node WHERE node_type='department' ORDER BY id LIMIT 1").fetchone()
     manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
     if not root: return
