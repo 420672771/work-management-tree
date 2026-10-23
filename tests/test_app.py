@@ -226,6 +226,11 @@ class WorkTreeTests(unittest.TestCase):
 
             reporting=call('/api/reporting-lines',{'user_id':owner['id'],'direct_leader_id':manager['id']})
             self.assertGreater(reporting['id'],0)
+            reporting_updated=call(f"/api/reporting-lines/{reporting['id']}",{'action':'update','user_id':owner['id'],'direct_leader_id':manager['id']})
+            self.assertEqual(reporting_updated['status'],'updated')
+            self.assertEqual(call(f"/api/reporting-lines/{reporting_updated['id']}",{'action':'delete'})['status'],'deleted')
+            reporting=call('/api/reporting-lines',{'user_id':owner['id'],'direct_leader_id':manager['id']})
+            self.assertGreater(reporting['id'],0)
             delegate=call('/api/delegates',{'user_id':manager['id'],'delegate_user_id':owner['id'],'scope':'approval','start_at':'2000-01-01T00:00:00+00:00','end_at':'2000-01-02T00:00:00+00:00'})
             self.assertGreater(delegate['id'],0)
             self.assertTrue(any(row['id']==delegate['id'] for row in call('/api/delegates')))

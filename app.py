@@ -645,6 +645,21 @@ class Handler(BaseHTTPRequestHandler):
                 if int(b['user_id'])==int(b['direct_leader_id']): return self.json(400,{'error':'a user cannot report to self'})
                 c.execute('UPDATE reporting_line SET effective_to=? WHERE user_id=? AND effective_to IS NULL',(t,b['user_id']))
                 oid=c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,dotted_leader_id,effective_from) VALUES(?,?,?,?,?)',(b['user_id'],b['direct_leader_id'],b.get('approver_id') or b['direct_leader_id'],b.get('dotted_leader_id'),t)).lastrowid; audit(c,'reporting_line',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path.startswith('/api/reporting-lines/'):
+                lid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM reporting_line WHERE id=?',(lid,)).fetchone()
+                if not old: return self.json(404,{'error':'reporting line not found'})
+                if old['effective_to'] is not None: return self.json(409,{'error':'reporting line is no longer active'})
+                action=b.get('action')
+                if action=='delete':
+                    c.execute('UPDATE reporting_line SET effective_to=? WHERE id=?',(t,lid)); audit(c,'reporting_line',lid,'delete','local',before=rowdict(old)); c.commit(); out={'id':lid,'status':'deleted'}
+                elif action=='update':
+                    required=['user_id','direct_leader_id']; missing=[x for x in required if not b.get(x)]
+                    if missing: return self.json(400,{'error':'missing fields','fields':missing})
+                    if int(b['user_id'])==int(b['direct_leader_id']): return self.json(400,{'error':'a user cannot report to self'})
+                    c.execute('UPDATE reporting_line SET effective_to=? WHERE id=?',(t,lid))
+                    oid=c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,dotted_leader_id,effective_from) VALUES(?,?,?,?,?)',(b['user_id'],b['direct_leader_id'],b.get('approver_id') or b['direct_leader_id'],b.get('dotted_leader_id'),t)).lastrowid
+                    audit(c,'reporting_line',lid,'update','local',before=rowdict(old),after=b); c.commit(); out={'id':oid,'status':'updated'}
+                else: return self.json(400,{'error':'unsupported manage action'})
             elif p.path=='/api/org/departments':
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_department(name,parent_id,owner_user_id,status,created_at) VALUES(?,?,?,?,?)',(b['name'],b.get('parent_id'),b.get('owner_user_id'),'active',t)).lastrowid; audit(c,'org_department',oid,'create','local',after=b); c.commit(); out={'id':oid}
