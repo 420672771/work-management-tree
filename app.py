@@ -161,10 +161,15 @@ def run_daily_jobs(c, report_date=None, kind='all'):
             delivery=send_feishu_once(c,approval['task_id'],approval['approver_id'],'approval_reminder',day,'【待确认提醒】\n《'+title+'》等待您的'+('任务确认' if approval['biz_type']=='task_confirm' else '进度确认')+'，请在工作管理树确认中心处理。'); count_delivery(delivery)
     c.execute("INSERT OR REPLACE INTO job_run_log(job_name,run_key,result_json,created_at) VALUES(?,?,?,?)",('daily_'+kind,day,json.dumps(out,ensure_ascii=False),now()))
     return out
-def draft_slots(text, owner_id=None):
-    draft=ai_draft(text); slots={'title':draft['title'],'due_at':draft['due_at'],'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':None,'task_type':'PROJECT'}
-    missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
-    return slots,missing
+def draft_slots(text, owner_id=None, c=None):
+    draft=ai_draft(text); own_connection=c is None; c=c or db()
+    try:
+        domain=detect_responsibility_domain(c,text)
+        slots={'title':draft['title'],'due_at':draft['due_at'],'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
+        missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
+        return slots,missing
+    finally:
+        if own_connection: c.close()
 
 # Internal storage keys must never be exposed in conversational or UI prompts.
 SLOT_LABELS={
@@ -203,6 +208,31 @@ RESPONSIBILITY_DOMAINS = (
     ('B1','运营保障线','核心业务系统运营保障域','钱缘','负责 ERP、供应链作业、财务结算、风控与供应链金融等传统系统的需求交付和应用运维；不负责基础设施与 AI 平台。','研发与技术平台'),
     ('B2','运营保障线','IT 基础设施与终端运维域','封滘生','负责网络、桌面、设备、机房、账号资产及 AI 算力物理层；不负责业务应用与 AI 平台逻辑层。','数据运营与客户反馈'),
 )
+
+DOMAIN_KEYWORDS={
+    'A1':('agent','智能体','应用交付','应用开发','场景交付','应用部署','应用支持'),
+    'A2':('ai平台','人工智能平台','大模型','模型评测','技术评测','rag','知识库','通用组件','技术架构','基础架构'),
+    'A3':('培训','认证','推广','赋能','覆盖率','活跃度','宣导'),
+    'B1':('erp','供应链','财务','结算','风控','订单','业务系统','传统系统'),
+    'B2':('网络','终端','桌面','设备','机房','账号资产','服务器','基础设施','算力'),
+}
+
+def detect_responsibility_domain(c, text):
+    """Return a domain only when task wording has a clear, auditable match."""
+    content=str(text or '').lower()
+    rows=[rowdict(row) for row in c.execute("SELECT id,name,domain_code,boundary FROM org_node WHERE node_type='domain' AND inactive_at IS NULL ORDER BY id")]
+    scored=[]
+    for row in rows:
+        code=(row.get('domain_code') or '').upper(); score=0
+        if code and re.search(r'(?<![A-Z0-9])'+re.escape(code.lower())+r'(?![A-Z0-9])',content): score+=10
+        if row['name'].lower() in content: score+=10
+        for keyword in DOMAIN_KEYWORDS.get(code,()):
+            if keyword.lower() in content: score+=3
+        if score: scored.append((score,row))
+    if not scored: return None
+    scored.sort(key=lambda item:(-item[0],item[1]['id']))
+    if len(scored)>1 and scored[0][0]-scored[1][0]<2: return None
+    return scored[0][1]
 
 def initialize_responsibility_domains(c):
     """Bootstrap the approved five-domain structure without deleting task history."""
@@ -630,7 +660,7 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path=='/api/task/draft/parse':
                 if not b.get('text'): return self.json(400,{'error':'text is required'})
                 from datetime import timedelta
-                slots,missing=draft_slots(b['text'],b.get('user_id')); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                slots,missing=draft_slots(b['text'],b.get('user_id'),c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
                 oid=c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(b.get('session_id') or f"web:{b.get('user_id','anonymous')}",b.get('user_id'),b.get('source_type','text'),b['text'],json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,t,t)).lastrowid; c.commit(); out={'id':oid,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','expire_at':expire}
             elif p.path.startswith('/api/task/draft/') and p.path.endswith('/complete'):
                 did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
@@ -723,8 +753,11 @@ class Handler(BaseHTTPRequestHandler):
                 try: text=json.loads(content).get('text','')
                 except Exception: text=content
             if text:
-                slots,missing=draft_slots(text,user[0] if user else None)
-                reply='已识别任务草稿：'+slots['title']+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+                slots,missing=draft_slots(text,user[0] if user else None,c)
+                expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(f'feishu:{sender or "anonymous"}',user[0] if user else None,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
+                domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+                reply='已识别任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
                 if sender: adapter.send_text(sender,reply)
             c.commit(); c.close(); self.json(200,{'code':0})
         except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})

@@ -79,6 +79,17 @@ class WorkTreeTests(unittest.TestCase):
         slots,missing=app.draft_slots('请在2030-01-01完成会议纪要',2)
         self.assertFalse(missing)
         self.assertEqual(slots['due_at'][:10],'2030-01-01')
+    def test_draft_slots_detect_responsibility_domain_or_leaves_ambiguous_unset(self):
+        c=app.db()
+        try:
+            slots,_=app.draft_slots('请在2030-01-01前完成 ERP 供应链结算异常处理方案',2,c)
+            self.assertEqual(c.execute('select domain_code from org_node where id=?',(slots['org_node_id'],)).fetchone()[0],'B1')
+            slots,_=app.draft_slots('请在2030-01-01前完成网络设备巡检和机房整改',2,c)
+            self.assertEqual(c.execute('select domain_code from org_node where id=?',(slots['org_node_id'],)).fetchone()[0],'B2')
+            slots,_=app.draft_slots('请在2030-01-01前完成会议事项跟进',2,c)
+            self.assertIsNone(slots['org_node_id'])
+            self.assertEqual(slots['domain_name'],'')
+        finally: c.close()
     def test_parse_due_understands_chinese_weekday(self):
         from datetime import datetime
         due=app.parse_due('本周四之前完成部门总结报告')
