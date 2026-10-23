@@ -210,7 +210,10 @@ class WorkTreeTests(unittest.TestCase):
                     with urlopen(request,timeout=5) as response: return response.status
                 except HTTPError as error: return error.code
 
-            users=call('/api/users'); tree=call('/api/tree')
+            initial=call('/api/bootstrap')
+            self.assertEqual(set(initial),{'dashboard','users','tree','tasks'})
+            self.assertIn('active',initial['dashboard'])
+            users=initial['users']; tree=initial['tree']
             self.assertGreaterEqual(len(users),2); self.assertTrue(tree)
             manager=next(user for user in users if user['role']=='manager')
             owner=next(user for user in users if user['id']!=manager['id'])

@@ -524,7 +524,11 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_wecom_get(); return
         if not self.require_auth(): return
         c=db()
-        if p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
+        if p.path=='/api/bootstrap':
+            task_rows=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
+            approved=[x for x in task_rows if x['approval_status']=='approved']; today=datetime.now(timezone.utc).date().isoformat()
+            out={'dashboard':{'total':len(approved),'active':sum(x['work_status']!='completed' for x in approved),'completed':sum(x['work_status']=='completed' for x in approved),'overdue':sum(x['time_status']=='overdue' for x in approved),'risk':sum(x['risk_status']!='normal' for x in approved),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]},'users':[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')],'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
+        elif p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
         elif p.path=='/api/approvals':
