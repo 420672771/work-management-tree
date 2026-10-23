@@ -591,12 +591,25 @@ class Handler(BaseHTTPRequestHandler):
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,effective_at,created_at) VALUES(?,?,?,?,?,?,?)',(b.get('parent_id'),b.get('node_type','domain'),b['name'],b.get('boundary',''),b.get('owner_id'),t,t)).lastrowid; audit(c,'org_node',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/users':
-                required=['name','wecom_userid']; missing=[x for x in required if not b.get(x)]
+                required=['name']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
                 try:
-                    oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','owner'),b['wecom_userid'])).lastrowid
+                    oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','owner'),b.get('wecom_userid') or None)).lastrowid
                 except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
                 audit(c,'user',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path.startswith('/api/users/') and p.path.endswith('/manage'):
+                uid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM user WHERE id=?',(uid,)).fetchone()
+                if not old: return self.json(404,{'error':'user not found'})
+                action=b.get('action')
+                if action=='delete':
+                    if c.execute('SELECT 1 FROM task WHERE owner_id=? LIMIT 1',(uid,)).fetchone(): return self.json(409,{'error':'该成员仍有关联任务，暂不能删除'})
+                    c.execute('DELETE FROM reporting_line WHERE user_id=? OR direct_leader_id=? OR approver_id=?',(uid,uid,uid)); c.execute('DELETE FROM user_position WHERE user_id=?',(uid,)); c.execute('DELETE FROM delegate WHERE user_id=? OR delegate_user_id=?',(uid,uid)); c.execute('DELETE FROM user WHERE id=?',(uid,)); audit(c,'user',uid,'delete','local',before=rowdict(old)); c.commit(); out={'id':uid,'status':'deleted'}
+                elif action=='update':
+                    if not b.get('name'): return self.json(400,{'error':'name is required'})
+                    try: c.execute('UPDATE user SET name=?,department=?,role=?,wecom_userid=? WHERE id=?',(b['name'].strip(),b.get('department','').strip(),b.get('role','owner'),b.get('wecom_userid') or None,uid))
+                    except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
+                    audit(c,'user',uid,'update','local',before=rowdict(old),after=b); c.commit(); out={'id':uid,'status':'updated'}
+                else: return self.json(400,{'error':'unsupported manage action'})
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id/unbind'):
                 uid=int(p.path.split('/')[3])
                 user=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(uid,)).fetchone()
@@ -635,6 +648,16 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path=='/api/org/positions':
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_position(name,dept_id,level,default_role,status) VALUES(?,?,?,?,?)',(b['name'],b.get('dept_id'),b.get('level',''),b.get('default_role','member'),'active')).lastrowid; audit(c,'org_position',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path.startswith('/api/org/positions/'):
+                pid=int(p.path.split('/')[4]); old=c.execute('SELECT * FROM org_position WHERE id=? AND status=?',(pid,'active')).fetchone()
+                if not old: return self.json(404,{'error':'position not found'})
+                action=b.get('action')
+                if action=='delete':
+                    c.execute("UPDATE user_position SET valid_to=? WHERE position_id=? AND valid_to IS NULL",(t,pid)); c.execute("UPDATE org_position SET status='inactive' WHERE id=?",(pid,)); audit(c,'org_position',pid,'delete','local',before=rowdict(old)); c.commit(); out={'id':pid,'status':'deleted'}
+                elif action=='update':
+                    if not b.get('name'): return self.json(400,{'error':'name is required'})
+                    c.execute('UPDATE org_position SET name=?,dept_id=?,level=? WHERE id=?',(b['name'].strip(),b.get('dept_id'),b.get('level','').strip(),pid)); audit(c,'org_position',pid,'update','local',before=rowdict(old),after=b); c.commit(); out={'id':pid,'status':'updated'}
+                else: return self.json(400,{'error':'unsupported manage action'})
             elif p.path=='/api/org/user-positions':
                 if not b.get('user_id') or not b.get('position_id'): return self.json(400,{'error':'user and position are required'})
                 if not c.execute('SELECT 1 FROM user WHERE id=?',(b['user_id'],)).fetchone() or not c.execute('SELECT 1 FROM org_position WHERE id=? AND status=?',(b['position_id'],'active')).fetchone(): return self.json(400,{'error':'user or position not found'})
