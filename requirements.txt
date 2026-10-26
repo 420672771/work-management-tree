@@ -1,2 +1,3 @@
 pycryptodome>=3.20,<4
 lark-oapi>=1.7.5
+pypdf>=5,<7

@@ -356,11 +356,15 @@ def extract_uploaded_text(data, filename, mime_type=''):
     if suffix in {'.txt','.md','.csv','.log','.docx'}:
         text=extract_document_text(data,filename)
     elif suffix=='.pdf':
-        with tempfile.NamedTemporaryFile(suffix='.pdf') as file:
-            file.write(data); file.flush()
-            try: text=subprocess.check_output(['pdftotext',file.name,'-'],stderr=subprocess.DEVNULL,timeout=20).decode('utf-8',errors='replace').strip()
-            except (FileNotFoundError,subprocess.CalledProcessError,subprocess.TimeoutExpired): text=''
-        if not text: raise ValueError('当前服务器未配置 PDF 文本解析能力，请上传 Word、图片或粘贴文字')
+        try:
+            from pypdf import PdfReader
+            text='\n'.join((page.extract_text() or '') for page in PdfReader(io.BytesIO(data)).pages).strip()
+        except Exception:
+            with tempfile.NamedTemporaryFile(suffix='.pdf') as file:
+                file.write(data); file.flush()
+                try: text=subprocess.check_output(['pdftotext',file.name,'-'],stderr=subprocess.DEVNULL,timeout=20).decode('utf-8',errors='replace').strip()
+                except (FileNotFoundError,subprocess.CalledProcessError,subprocess.TimeoutExpired): text=''
+        if not text: raise ValueError('未能从 PDF 提取文字；扫描件请作为图片上传后识别')
     elif suffix in {'.png','.jpg','.jpeg','.webp','.bmp'} or mime_type.startswith('image/'):
         text=ai_vision_extract(data,mime_type)
     elif suffix in {'.mp3','.wav','.m4a','.aac','.ogg','.mp4'} or mime_type.startswith('audio/'):
