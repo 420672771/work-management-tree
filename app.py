@@ -640,9 +640,11 @@ class Handler(BaseHTTPRequestHandler):
             if not marker: continue
             if payload.endswith(b'\r\n'): payload=payload[:-2]
             header_text=headers.decode('utf-8',errors='replace')
-            disposition=re.search(r'Content-Disposition:\s*form-data;[^\r\n]*name="([^"]+)"(?:;\s*filename="([^"]*)")?',header_text,re.I)
-            if not disposition: continue
-            name,filename=disposition.group(1),disposition.group(2)
+            if not re.search(r'Content-Disposition:\s*form-data',header_text,re.I): continue
+            name_match=re.search(r'(?:^|;)\s*name="([^"]+)"',header_text,re.I)
+            filename_match=re.search(r'(?:^|;)\s*filename="([^"]*)"',header_text,re.I)
+            if not name_match: continue
+            name,filename=name_match.group(1),filename_match.group(1) if filename_match else None
             type_match=re.search(r'Content-Type:\s*([^\r\n;]+)',header_text,re.I)
             if filename is None:
                 fields[name]=payload.decode('utf-8',errors='replace')
