@@ -101,6 +101,15 @@ class WorkTreeTests(unittest.TestCase):
         slots,missing=app.draft_slots(text,2)
         self.assertEqual(slots['due_at'],'2026-10-30T17:00:00+08:00')
         self.assertNotIn('due_at',missing)
+    def test_ai_draft_splits_concise_title_from_meeting_note_detail(self):
+        text='【科技产品中心周例会纪要】业务部门提出，希望在采购审批场景上线智能问答助手。请钱缘负责完成采购审批 Agent 的方案评审、测试环境部署及业务试用支持，并于 2026 年 10 月 30 日前提交上线验证记录和业务反馈汇总。'
+        draft=app.ai_draft(text)
+        self.assertEqual(draft['title'],'采购审批 Agent 的方案评审、测试环境部署及业务试用支持')
+        self.assertEqual(draft['description'],text)
+        self.assertLess(len(draft['title']),len(text))
+        slots,_=app.draft_slots(text,2)
+        self.assertEqual(slots['title'],draft['title'])
+        self.assertEqual(slots['description'],text)
     def test_friendly_slot_labels_never_returns_internal_names(self):
         labels=app.friendly_slot_labels(['owner_id','due_at','unexpected_key'])
         self.assertEqual(labels,'任务责任人、截止日期、必要信息')

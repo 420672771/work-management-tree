@@ -167,7 +167,7 @@ def draft_slots(text, owner_id=None, c=None):
         domain=detect_responsibility_domain(c,text)
         # Rule parsing is the stable fallback for an explicit date in meeting notes.
         # It also covers dates that a model may omit because of formatting whitespace.
-        slots={'title':draft['title'],'due_at':draft['due_at'] or parse_due(text),'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
+        slots={'title':draft['title'],'description':draft.get('description') or text.strip(),'due_at':draft['due_at'] or parse_due(text),'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
         missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
         return slots,missing
     finally:
@@ -175,7 +175,7 @@ def draft_slots(text, owner_id=None, c=None):
 
 # Internal storage keys must never be exposed in conversational or UI prompts.
 SLOT_LABELS={
-    'title':'任务内容', 'owner_id':'任务责任人', 'due_at':'截止日期',
+    'title':'任务标题', 'description':'任务详情', 'owner_id':'任务责任人', 'due_at':'截止日期',
     'deliverable':'交付物或验收标准', 'org_node_id':'责任域',
     'priority':'优先级', 'task_type':'任务类型',
 }
@@ -262,7 +262,7 @@ def initialize_responsibility_domains(c):
 def initialize():
     c=db()
     try:
-        seed(c); c.execute("UPDATE user SET role='member' WHERE role='owner'"); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); c.commit()
+        seed(c); c.execute("UPDATE user SET role='member' WHERE role='owner'"); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); normalize_legacy_conversation_tasks(c); c.commit()
     finally:
         c.close()
 
@@ -328,11 +328,31 @@ def submit_progress(c, task_id, reporter_id, percent, comment, blocked=False, bl
     aid=create_approval(c,'progress_confirm',rid,task_id,task['approver_id']); c.execute("UPDATE task SET work_status='in_progress',updated_at=? WHERE id=?",(t,task_id)); audit(c,'progress',rid,'report_pending',str(reporter_id),after={'percent':percent,'comment':comment,'blocked':blocked,'source':source})
     return rid,aid,task
 
+def concise_task_title(text):
+    """Extract a manageable task title from a meeting note without losing the source note."""
+    source=re.sub(r'【[^】]*】','',str(text or '')).strip()
+    source=re.sub(r'\s+',' ',source)
+    # The action after “请某人负责完成” is normally the task itself.
+    action=re.search(r'(?:请[^，。；]{1,20}?负责)?(?:完成|推进|落实|组织|开展|协同)([^。；]+)',source)
+    candidate=action.group(1).strip() if action else source
+    candidate=re.split(r'[，,](?:并)?于\s*\d{4}\s*年|[，,](?:请)?于\s*\d{4}[-/]',candidate)[0].strip(' ，,。；;')
+    candidate=re.sub(r'(?:并)?于\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',candidate).strip(' ，,。；;')
+    if not candidate: candidate='待明确工作事项'
+    return candidate[:40]
+
+def normalize_legacy_conversation_tasks(c):
+    """One-time-safe cleanup for drafts created before title/detail separation."""
+    rows=c.execute("SELECT id,title,description FROM task WHERE source='conversation' AND length(title)>40").fetchall()
+    for row in rows:
+        detail=row['description'] or row['title']
+        c.execute('UPDATE task SET title=?,description=?,updated_at=? WHERE id=?',(concise_task_title(row['title']),detail,now(),row['id']))
+
 def ai_draft(text):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
     api_base, api_key, model = os.getenv('AI_API_BASE'), os.getenv('AI_API_KEY'), os.getenv('AI_MODEL')
     if api_base and api_key and model:
-        prompt = ('将以下会议事项提取为 JSON，只输出 JSON。字段为 title,due_at,priority,deliverable,owner_id,confidence。'
+        prompt = ('将以下会议事项提取为 JSON，只输出 JSON。字段为 title,description,due_at,priority,deliverable,owner_id,confidence。'
+                  'title 必须是简洁任务标题（不超过40字，不得直接复制会议纪要）；description 保留完整任务事项；'
                   'owner_id 必须为 null；无法确定的截止时间为 null；不得编造验收标准。事项：' + text)
         payload=json.dumps({'model':model,'messages':[{'role':'user','content':prompt}],'temperature':0.1}).encode()
         req=urllib.request.Request(api_base.rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+api_key,'Content-Type':'application/json'})
@@ -340,12 +360,15 @@ def ai_draft(text):
             with urllib.request.urlopen(req,timeout=20) as f:
                 content=json.load(f)['choices'][0]['message']['content']
             draft=json.loads(content.removeprefix('```json').removesuffix('```').strip())
-            return {'title':draft.get('title') or text.strip()[:120], 'due_at':draft.get('due_at'), 'priority':draft.get('priority','P1'), 'deliverable':draft.get('deliverable') or '待补充验收标准', 'owner_id':None, 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
+            title=(draft.get('title') or '').strip()
+            if not title or len(title)>40 or title in text:
+                title=concise_task_title(text)
+            return {'title':title, 'description':draft.get('description') or text.strip(), 'due_at':draft.get('due_at'), 'priority':draft.get('priority','P1'), 'deliverable':draft.get('deliverable') or '待补充验收标准', 'owner_id':None, 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
         except Exception:
             # Safe fallback: a model outage must never block a human-created task.
             pass
     due=parse_due(text)
-    return {'title': text.strip()[:120], 'due_at': due, 'priority':'P1', 'deliverable':'待补充验收标准', 'owner_id':None, 'confidence':0.35 if not due else 0.65, 'requires_human_confirmation':True, 'mode':'rule'}
+    return {'title':concise_task_title(text), 'description':text.strip(), 'due_at': due, 'priority':'P1', 'deliverable':'待补充验收标准', 'owner_id':None, 'confidence':0.35 if not due else 0.65, 'requires_human_confirmation':True, 'mode':'rule'}
 
 class WeComAdapter:
     def __init__(self): self.configured=all(os.getenv(k) for k in ('WECOM_CORP_ID','WECOM_AGENT_ID','WECOM_SECRET'))
