@@ -669,12 +669,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth(): return
         c=db()
         if p.path=='/api/bootstrap':
-            task_rows=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
-            approved=[x for x in task_rows if x['approval_status']=='approved']; today=datetime.now(timezone.utc).date().isoformat()
-            out={'dashboard':{'total':len(approved),'active':sum(x['work_status']!='completed' for x in approved),'completed':sum(x['work_status']=='completed' for x in approved),'overdue':sum(x['time_status']=='overdue' for x in approved),'risk':sum(x['risk_status']!='normal' for x in approved),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]},'users':[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')],'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
+            task_rows=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
+            today=datetime.now(timezone.utc).date().isoformat()
+            out={'dashboard':{'total':len(task_rows),'active':sum(x['work_status']!='completed' for x in task_rows),'completed':sum(x['work_status']=='completed' for x in task_rows),'overdue':sum(x['time_status']=='overdue' for x in task_rows),'risk':sum(x['risk_status']!='normal' for x in task_rows),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]},'users':[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')],'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
         elif p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
-        elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute('SELECT * FROM task ORDER BY due_at')]
+        elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
         elif p.path=='/api/approvals':
             out=[rowdict(x) for x in c.execute("SELECT a.*,t.title,u.name AS approver_name,p.reported_percent,p.report_text,p.is_blocked,p.block_reason,p.expected_finish FROM approval_record a LEFT JOIN task t ON t.id=a.task_id LEFT JOIN user u ON u.id=a.approver_id LEFT JOIN progress_record p ON a.biz_type='progress_confirm' AND p.id=a.biz_id WHERE a.status=? ORDER BY a.created_at",(q.get('status',['pending'])[0],))]
         elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]

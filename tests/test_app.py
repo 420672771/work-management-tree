@@ -281,6 +281,8 @@ class WorkTreeTests(unittest.TestCase):
 
             manual=call('/api/tasks',{'org_node_id':child['id'],'title':'接口测试手工任务','owner_id':owner['id'],'due_at':'2031-01-02T17:00:00+08:00','deliverable':'手工任务验收记录'})
             self.assertEqual(manual['approval_status'],'pending')
+            self.assertFalse(any(row['id']==manual['id'] for row in call('/api/tasks')))
+            self.assertFalse(any(row['id']==manual['id'] for row in call('/api/bootstrap')['tasks']))
             self.assertEqual(call(f"/api/approvals/{manual['approval_id']}/confirm",{'result':'approved','operator_id':manager['id']})['status'],'approved')
             self.assertEqual(call_status(f"/api/tasks/{manual['id']}",{'work_status':'in_progress','operator_id':manager['id']}),403)
             self.assertEqual(call(f"/api/tasks/{manual['id']}",{'work_status':'in_progress','operator_id':owner['id']})['status'],'ok')
