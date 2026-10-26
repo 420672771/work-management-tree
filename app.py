@@ -1,4 +1,4 @@
-import base64, hashlib, io, json, os, re, secrets, sqlite3, struct, urllib.request, urllib.parse, zipfile
+import base64, hashlib, io, json, mimetypes, os, re, secrets, sqlite3, struct, subprocess, tempfile, urllib.request, urllib.parse, zipfile
 from base64 import b64decode
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -320,6 +320,56 @@ def extract_document_text(data, filename=''):
             return ''
     return ''
 
+def ai_configured():
+    return all(os.getenv(key) for key in ('AI_API_BASE','AI_API_KEY','AI_MODEL'))
+
+def ai_vision_extract(data, mime_type):
+    """Extract task-bearing text from an image through the configured vision model."""
+    if not ai_configured():
+        raise ValueError('图片识别需要先配置 AI 视觉模型')
+    encoded=base64.b64encode(data).decode()
+    prompt='请识别图片中的中文文字，只输出与待办任务、责任人、截止日期、交付物有关的原文，不要解释。若没有任务信息则输出空字符串。'
+    payload={'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':[{'type':'text','text':prompt},{'type':'image_url','image_url':{'url':f'data:{mime_type};base64,{encoded}'}}]}],'temperature':0}
+    req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',json.dumps(payload).encode(),{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
+    with urllib.request.urlopen(req,timeout=45) as response:
+        return json.load(response)['choices'][0]['message']['content'].strip()
+
+def ai_audio_transcribe(data, filename, mime_type):
+    """Transcribe an uploaded recording via an OpenAI-compatible transcription endpoint."""
+    if not ai_configured():
+        raise ValueError('录音识别需要先配置 AI 语音转写模型')
+    boundary='----wmt'+secrets.token_hex(12)
+    def part(name,value,extra=''):
+        return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"{extra}\r\n\r\n'.encode()+value+b'\r\n'
+    model=os.getenv('AI_TRANSCRIBE_MODEL') or os.getenv('AI_MODEL')
+    body=part('model',model.encode())+part('file',data,f'; filename="{filename}"\r\nContent-Type: {mime_type}')+f'--{boundary}--\r\n'.encode()
+    req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/audio/transcriptions',body,{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':f'multipart/form-data; boundary={boundary}'})
+    with urllib.request.urlopen(req,timeout=90) as response:
+        return str(json.load(response).get('text','')).strip()
+
+def extract_uploaded_text(data, filename, mime_type=''):
+    """Return text from an uploaded meeting artifact; never create a task from raw binary."""
+    if not data: raise ValueError('文件内容为空')
+    if len(data)>20*1024*1024: raise ValueError('单个文件不能超过 20MB')
+    suffix=Path(filename or '').suffix.lower()
+    mime_type=mime_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    if suffix in {'.txt','.md','.csv','.log','.docx'}:
+        text=extract_document_text(data,filename)
+    elif suffix=='.pdf':
+        with tempfile.NamedTemporaryFile(suffix='.pdf') as file:
+            file.write(data); file.flush()
+            try: text=subprocess.check_output(['pdftotext',file.name,'-'],stderr=subprocess.DEVNULL,timeout=20).decode('utf-8',errors='replace').strip()
+            except (FileNotFoundError,subprocess.CalledProcessError,subprocess.TimeoutExpired): text=''
+        if not text: raise ValueError('当前服务器未配置 PDF 文本解析能力，请上传 Word、图片或粘贴文字')
+    elif suffix in {'.png','.jpg','.jpeg','.webp','.bmp'} or mime_type.startswith('image/'):
+        text=ai_vision_extract(data,mime_type)
+    elif suffix in {'.mp3','.wav','.m4a','.aac','.ogg','.mp4'} or mime_type.startswith('audio/'):
+        text=ai_audio_transcribe(data,filename,mime_type)
+    else:
+        raise ValueError('仅支持图片、Word、PDF、文本和常见录音文件')
+    if not text: raise ValueError('未从文件中识别到可用于建单的文字')
+    return text
+
 def submit_progress(c, task_id, reporter_id, percent, comment, blocked=False, block_reason='', expected_finish=None, source='web'):
     task=c.execute('SELECT * FROM task WHERE id=?',(task_id,)).fetchone()
     if not task: raise ValueError('任务不存在')
@@ -338,8 +388,8 @@ def concise_task_title(text):
     # The action after “请某人负责完成” is normally the task itself.
     action=re.search(r'(?:请[^，。；]{1,20}?负责)?(?:完成|推进|落实|组织|开展|协同)([^。；]+)',source)
     candidate=action.group(1).strip() if action else source
-    candidate=re.split(r'[，,](?:并)?于\s*\d{4}\s*年|[，,](?:请)?于\s*\d{4}[-/]',candidate)[0].strip(' ，,。；;')
-    candidate=re.sub(r'(?:并)?于\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',candidate).strip(' ，,。；;')
+    candidate=re.split(r'[，,](?:并)?(?:于|在)\s*\d{4}\s*年|[，,](?:请)?(?:于|在)\s*\d{4}[-/]',candidate)[0].strip(' ，,。；;')
+    candidate=re.sub(r'(?:并)?(?:于|在)\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',candidate).strip(' ，,。；;')
     if not candidate: candidate='待明确工作事项'
     return candidate[:40]
 
@@ -349,8 +399,8 @@ def task_detail(text):
     source=re.sub(r'\s+',' ',source)
     action=re.search(r'(?:请[^，。；]{1,20}?负责)?(?:完成|推进|落实|组织|开展|协同)([^。；]+)',source)
     detail=(action.group(1).strip() if action else concise_task_title(source))
-    detail=re.split(r'[，,](?:并)?于\s*\d{4}\s*年|[，,](?:请)?于\s*\d{4}[-/]',detail)[0]
-    detail=re.sub(r'(?:并)?于\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',detail).strip(' ，,。；;')
+    detail=re.split(r'[，,](?:并)?(?:于|在)\s*\d{4}\s*年|[，,](?:请)?(?:于|在)\s*\d{4}[-/]',detail)[0]
+    detail=re.sub(r'(?:并)?(?:于|在)\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',detail).strip(' ，,。；;')
     return detail or '待补充任务范围'
 
 def detect_task_owner(c, text):
@@ -383,9 +433,10 @@ def ai_draft(text):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
     api_base, api_key, model = os.getenv('AI_API_BASE'), os.getenv('AI_API_KEY'), os.getenv('AI_MODEL')
     if api_base and api_key and model:
-        prompt = ('将以下会议事项提取为 JSON，只输出 JSON。字段为 title,description,due_at,priority,deliverable,owner_id,confidence。'
-                  'title 必须是简洁任务标题（不超过40字，不得直接复制会议纪要）；description 保留完整任务事项；'
-                  'owner_id 必须为 null；无法确定的截止时间为 null；不得编造验收标准。事项：' + text)
+        prompt = ('从以下材料中仅提炼明确待办，输出 JSON，不要输出解释。字段为 title,description,due_at,priority,deliverable,owner_id,confidence。'
+                  '忽略会议标题、参会信息、背景数据、讨论过程、已完成事项和与待办无关的内容。title 为简洁工作标题（不超过40字）；'
+                  'description 只保留工作范围、关键动作和交付要求，不能重复标题，不能重复责任人和截止日期；'
+                  'owner_id 必须为 null；无法确定的截止时间为 null；不得编造验收标准。材料：' + text)
         payload=json.dumps({'model':model,'messages':[{'role':'user','content':prompt}],'temperature':0.1}).encode()
         req=urllib.request.Request(api_base.rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+api_key,'Content-Type':'application/json'})
         try:
@@ -572,6 +623,32 @@ class Handler(BaseHTTPRequestHandler):
         data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def body(self):
         n=int(self.headers.get('Content-Length','0')); return json.loads(self.rfile.read(n) or '{}')
+    def multipart(self):
+        """Small multipart reader for task-source uploads; other APIs stay JSON-only."""
+        content_type=self.headers.get('Content-Type','')
+        match=re.search(r'boundary=(?:"([^"]+)"|([^;\s]+))',content_type)
+        if not match: raise ValueError('缺少上传边界')
+        boundary=(match.group(1) or match.group(2)).encode()
+        size=int(self.headers.get('Content-Length','0'))
+        if size<=0: raise ValueError('未收到上传文件')
+        if size>21*1024*1024: raise ValueError('上传内容不能超过 20MB')
+        raw=self.rfile.read(size); files=[]; fields={}
+        for item in raw.split(b'--'+boundary):
+            item=item.lstrip(b'\r\n')
+            if not item or item.startswith(b'--'): continue
+            headers, marker, payload=item.partition(b'\r\n\r\n')
+            if not marker: continue
+            if payload.endswith(b'\r\n'): payload=payload[:-2]
+            header_text=headers.decode('utf-8',errors='replace')
+            disposition=re.search(r'Content-Disposition:\s*form-data;[^\r\n]*name="([^"]+)"(?:;\s*filename="([^"]*)")?',header_text,re.I)
+            if not disposition: continue
+            name,filename=disposition.group(1),disposition.group(2)
+            type_match=re.search(r'Content-Type:\s*([^\r\n;]+)',header_text,re.I)
+            if filename is None:
+                fields[name]=payload.decode('utf-8',errors='replace')
+            else:
+                files.append({'name':name,'filename':Path(filename).name or '未命名文件','content_type':type_match.group(1) if type_match else '', 'data':payload})
+        return fields,files
     def do_GET(self):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
         if p.path=='/auth/feishu/start': return self.start_feishu_login()
@@ -651,9 +728,25 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith('/im/callback/feishu'):
             self.handle_feishu_post(); return
         if not self.require_auth(): return
-        c=db(); p=urllib.parse.urlparse(self.path); b=self.body(); t=now()
+        c=db(); p=urllib.parse.urlparse(self.path)
         try:
-            if p.path=='/api/tree':
+            fields,files=self.multipart() if p.path=='/api/task/input/extract' else ({},[])
+            b=fields if p.path=='/api/task/input/extract' else self.body()
+        except (ValueError,json.JSONDecodeError) as exc:
+            c.close(); return self.json(400,{'error':str(exc) or '请求格式不正确'})
+        t=now()
+        try:
+            if p.path=='/api/task/input/extract':
+                if not files: return self.json(400,{'error':'请选择要识别的文件'})
+                upload=files[0]
+                try:
+                    extracted=extract_uploaded_text(upload['data'],upload['filename'],upload['content_type'])
+                except ValueError as exc:
+                    return self.json(400,{'error':str(exc)})
+                suffix=Path(upload['filename']).suffix.lower()
+                kind='图片' if upload['content_type'].startswith('image/') else ('录音' if upload['content_type'].startswith('audio/') or suffix in {'.mp3','.wav','.m4a','.aac','.ogg','.mp4'} else '文档')
+                out={'filename':upload['filename'],'kind':kind,'text':extracted}
+            elif p.path=='/api/tree':
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,effective_at,created_at) VALUES(?,?,?,?,?,?,?)',(b.get('parent_id'),b.get('node_type','domain'),b['name'],b.get('boundary',''),b.get('owner_id'),t,t)).lastrowid; audit(c,'org_node',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/users':

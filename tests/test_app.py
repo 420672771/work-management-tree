@@ -114,6 +114,14 @@ class WorkTreeTests(unittest.TestCase):
         self.assertEqual(slots['title'],draft['title'])
         self.assertEqual(slots['description'],draft['description'])
         self.assertEqual(slots['owner_id'],money)
+    def test_ai_draft_filters_irrelevant_meeting_background(self):
+        text='本周会议先通报前三季度经营数据、客户投诉和行业政策变化，以上内容仅供知悉。请闫兴赫负责完成知识库检索能力评估，并于2026年11月5日前提交评估结论。其他议题下周继续讨论。'
+        draft=app.ai_draft(text)
+        self.assertEqual(draft['title'],'知识库检索能力评估')
+        self.assertEqual(draft['description'],'知识库检索能力评估')
+        self.assertNotIn('经营数据',draft['title']+draft['description'])
+        self.assertNotIn('闫兴赫',draft['description'])
+        self.assertNotIn('2026',draft['description'])
     def test_friendly_slot_labels_never_returns_internal_names(self):
         labels=app.friendly_slot_labels(['owner_id','due_at','unexpected_key'])
         self.assertEqual(labels,'任务责任人、截止日期、必要信息')
@@ -161,6 +169,9 @@ class WorkTreeTests(unittest.TestCase):
         with zipfile.ZipFile(stream,'w') as doc: doc.writestr('word/document.xml',body)
         self.assertEqual(app.extract_document_text(stream.getvalue(),'minutes.docx'),'完成评审')
         self.assertEqual(app.extract_document_text(b'not-a-pdf','minutes.pdf'),'')
+        self.assertEqual(app.extract_uploaded_text('请完成试点验收'.encode(),'minutes.txt'),'请完成试点验收')
+        with self.assertRaisesRegex(ValueError,'仅支持'):
+            app.extract_uploaded_text(b'not a supported file','minutes.exe')
     def test_expired_progress_is_auto_confirmed(self):
         c=app.db()
         try:
