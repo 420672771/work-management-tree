@@ -367,8 +367,17 @@ def normalize_legacy_conversation_tasks(c):
     rows=c.execute("SELECT id,title,description FROM task WHERE source='conversation'").fetchall()
     for row in rows:
         source=row['description'] or row['title']
+        # Older records may already have had their detail trimmed. Recover the
+        # original note from the generated draft when available for owner repair.
+        if not re.search(r'(?:请|由)\s*.+?(?:负责|牵头|完成|推进|落实|组织|开展|协同)',source):
+            raw=c.execute("SELECT raw_text FROM conversation_draft WHERE status='generated' AND raw_text LIKE ? ORDER BY updated_at DESC LIMIT 1",('%'+row['title']+'%',)).fetchone()
+            if raw: source=raw['raw_text']
         title=concise_task_title(source) if len(row['title'])>40 else row['title']
-        c.execute('UPDATE task SET title=?,description=?,updated_at=? WHERE id=?',(title,task_detail(source),now(),row['id']))
+        owner=detect_task_owner(c,source)
+        if owner:
+            c.execute('UPDATE task SET title=?,description=?,owner_id=?,approver_id=?,updated_at=? WHERE id=?',(title,task_detail(source),owner,approver_for(c,owner),now(),row['id']))
+        else:
+            c.execute('UPDATE task SET title=?,description=?,updated_at=? WHERE id=?',(title,task_detail(source),now(),row['id']))
 
 def ai_draft(text):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
