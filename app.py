@@ -165,9 +165,12 @@ def draft_slots(text, owner_id=None, c=None):
     draft=ai_draft(text); own_connection=c is None; c=c or db()
     try:
         domain=detect_responsibility_domain(c,text)
+        # An explicitly named owner in the meeting item always takes precedence
+        # over the sender/current web user used only as a fallback.
+        detected_owner=detect_task_owner(c,text) or owner_id
         # Rule parsing is the stable fallback for an explicit date in meeting notes.
         # It also covers dates that a model may omit because of formatting whitespace.
-        slots={'title':draft['title'],'description':draft.get('description') or text.strip(),'due_at':draft['due_at'] or parse_due(text),'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
+        slots={'title':draft['title'],'description':draft.get('description') or task_detail(text),'due_at':draft['due_at'] or parse_due(text),'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':detected_owner,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
         missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
         return slots,missing
     finally:
@@ -340,12 +343,32 @@ def concise_task_title(text):
     if not candidate: candidate='待明确工作事项'
     return candidate[:40]
 
+def task_detail(text):
+    """Keep the work scope, but omit meeting headers and fields already structured."""
+    source=re.sub(r'【[^】]*】','',str(text or '')).strip()
+    source=re.sub(r'\s+',' ',source)
+    action=re.search(r'(?:请[^，。；]{1,20}?负责)?(?:完成|推进|落实|组织|开展|协同)([^。；]+)',source)
+    detail=(action.group(1).strip() if action else concise_task_title(source))
+    detail=re.split(r'[，,](?:并)?于\s*\d{4}\s*年|[，,](?:请)?于\s*\d{4}[-/]',detail)[0]
+    detail=re.sub(r'(?:并)?于\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',detail).strip(' ，,。；;')
+    return detail or '待补充任务范围'
+
+def detect_task_owner(c, text):
+    """Recognize only explicit task assignments, never mere mentions in meeting notes."""
+    source=str(text or '')
+    for user in c.execute('SELECT id,name FROM user ORDER BY length(name) DESC'):
+        name=re.escape(user['name'])
+        if re.search(rf'(?:请|由)\s*{name}\s*(?:负责|牵头|完成|推进|落实|组织|开展|协同)',source):
+            return user['id']
+    return None
+
 def normalize_legacy_conversation_tasks(c):
     """One-time-safe cleanup for drafts created before title/detail separation."""
-    rows=c.execute("SELECT id,title,description FROM task WHERE source='conversation' AND length(title)>40").fetchall()
+    rows=c.execute("SELECT id,title,description FROM task WHERE source='conversation'").fetchall()
     for row in rows:
-        detail=row['description'] or row['title']
-        c.execute('UPDATE task SET title=?,description=?,updated_at=? WHERE id=?',(concise_task_title(row['title']),detail,now(),row['id']))
+        source=row['description'] or row['title']
+        title=concise_task_title(source) if len(row['title'])>40 else row['title']
+        c.execute('UPDATE task SET title=?,description=?,updated_at=? WHERE id=?',(title,task_detail(source),now(),row['id']))
 
 def ai_draft(text):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
@@ -363,12 +386,12 @@ def ai_draft(text):
             title=(draft.get('title') or '').strip()
             if not title or len(title)>40 or title in text:
                 title=concise_task_title(text)
-            return {'title':title, 'description':draft.get('description') or text.strip(), 'due_at':draft.get('due_at'), 'priority':draft.get('priority','P1'), 'deliverable':draft.get('deliverable') or '待补充验收标准', 'owner_id':None, 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
+            return {'title':title, 'description':task_detail(draft.get('description') or text), 'due_at':draft.get('due_at'), 'priority':draft.get('priority','P1'), 'deliverable':draft.get('deliverable') or '待补充验收标准', 'owner_id':None, 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
         except Exception:
             # Safe fallback: a model outage must never block a human-created task.
             pass
     due=parse_due(text)
-    return {'title':concise_task_title(text), 'description':text.strip(), 'due_at': due, 'priority':'P1', 'deliverable':'待补充验收标准', 'owner_id':None, 'confidence':0.35 if not due else 0.65, 'requires_human_confirmation':True, 'mode':'rule'}
+    return {'title':concise_task_title(text), 'description':task_detail(text), 'due_at': due, 'priority':'P1', 'deliverable':'待补充验收标准', 'owner_id':None, 'confidence':0.35 if not due else 0.65, 'requires_human_confirmation':True, 'mode':'rule'}
 
 class WeComAdapter:
     def __init__(self): self.configured=all(os.getenv(k) for k in ('WECOM_CORP_ID','WECOM_AGENT_ID','WECOM_SECRET'))
