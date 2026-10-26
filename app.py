@@ -165,7 +165,9 @@ def draft_slots(text, owner_id=None, c=None):
     draft=ai_draft(text); own_connection=c is None; c=c or db()
     try:
         domain=detect_responsibility_domain(c,text)
-        slots={'title':draft['title'],'due_at':draft['due_at'],'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
+        # Rule parsing is the stable fallback for an explicit date in meeting notes.
+        # It also covers dates that a model may omit because of formatting whitespace.
+        slots={'title':draft['title'],'due_at':draft['due_at'] or parse_due(text),'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':owner_id,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
         missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
         return slots,missing
     finally:
@@ -274,16 +276,20 @@ def task_view(c, r):
     return d
 
 def parse_due(text):
-    m=re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})',text)
+    # Meeting minutes commonly write dates as “2026 年 10 月 30 日前”.
+    # Remove formatting whitespace first, while keeping the original text intact
+    # for title and delivery extraction elsewhere.
+    normalized=re.sub(r'\s+','',str(text or ''))
+    m=re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})',normalized)
     if m: return f'{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}T17:00:00+08:00'
-    weekday=re.search(r'(本周|这周|下周)?(?:星期|周)([一二三四五六日天])',text)
+    weekday=re.search(r'(本周|这周|下周)?(?:星期|周)([一二三四五六日天])',normalized)
     if weekday:
         from datetime import timedelta
         target_index={'一':0,'二':1,'三':2,'四':3,'五':4,'六':5,'日':6,'天':6}[weekday.group(2)]
         today=datetime.now(timezone.utc).date(); target=today-timedelta(days=today.weekday())+timedelta(days=target_index)
         if weekday.group(1)=='下周' or (not weekday.group(1) and target<today): target+=timedelta(days=7)
         return target.isoformat()+'T17:00:00+08:00'
-    if '明天' in text:
+    if '明天' in normalized:
         from datetime import timedelta
         return (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
     return None

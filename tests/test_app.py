@@ -95,6 +95,12 @@ class WorkTreeTests(unittest.TestCase):
         due=app.parse_due('本周四之前完成部门总结报告')
         self.assertIsNotNone(due)
         self.assertEqual(datetime.fromisoformat(due).weekday(),3)
+    def test_parse_due_understands_spaced_chinese_date_in_meeting_notes(self):
+        text='请钱缘负责完成采购审批 Agent 的方案评审，并于 2026 年 10 月 30 日前提交上线验证记录。'
+        self.assertEqual(app.parse_due(text),'2026-10-30T17:00:00+08:00')
+        slots,missing=app.draft_slots(text,2)
+        self.assertEqual(slots['due_at'],'2026-10-30T17:00:00+08:00')
+        self.assertNotIn('due_at',missing)
     def test_friendly_slot_labels_never_returns_internal_names(self):
         labels=app.friendly_slot_labels(['owner_id','due_at','unexpected_key'])
         self.assertEqual(labels,'任务责任人、截止日期、必要信息')
