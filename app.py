@@ -407,6 +407,19 @@ def task_detail(text):
     detail=re.sub(r'(?:并)?(?:于|在)\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',detail).strip(' ，,。；;')
     return detail or '待补充任务范围'
 
+def similar_tasks(c, title, limit=5):
+    """Find likely duplicate tasks without treating a fuzzy match as a hard block."""
+    source=re.sub(r'\s|[，,。；;：:、（）()【】\[\]·—-]','',str(title or '')).lower()
+    if len(source)<2: return []
+    source_chars=set(source)
+    candidates=[]
+    for task in c.execute("SELECT id,title,owner_id,due_at,approval_status,work_status FROM task WHERE approval_status<>'rejected' ORDER BY updated_at DESC"):
+        target=re.sub(r'\s|[，,。；;：:、（）()【】\[\]·—-]','',task['title']).lower()
+        if not target: continue
+        score=1.0 if source in target or target in source else len(source_chars & set(target))/max(1,len(source_chars | set(target)))
+        if score>=0.42: candidates.append((score,task))
+    return [dict(rowdict(task),similarity=round(score,2)) for score,task in sorted(candidates,key=lambda item:item[0],reverse=True)[:limit]]
+
 def detect_task_owner(c, text):
     """Recognize only explicit task assignments, never mere mentions in meeting notes."""
     source=str(text or '')
@@ -675,6 +688,8 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
+        elif p.path=='/api/tasks/similar':
+            out=similar_tasks(c,q.get('title',[''])[0])
         elif p.path=='/api/approvals':
             out=[rowdict(x) for x in c.execute("SELECT a.*,t.title,u.name AS approver_name,p.reported_percent,p.report_text,p.is_blocked,p.block_reason,p.expected_finish FROM approval_record a LEFT JOIN task t ON t.id=a.task_id LEFT JOIN user u ON u.id=a.approver_id LEFT JOIN progress_record p ON a.biz_type='progress_confirm' AND p.id=a.biz_id WHERE a.status=? ORDER BY a.created_at",(q.get('status',['pending'])[0],))]
         elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]
@@ -927,7 +942,13 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path.startswith('/api/tasks/'):
                 tid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone();
                 if not old: return self.json(404,{'error':'task not found'})
-                if p.path.endswith('/feedback'):
+                actor=self.actor_id(b.get('operator_id'))
+                actor_row=c.execute('SELECT role FROM user WHERE id=?',(actor,)).fetchone() if actor else None
+                can_manage=not actor or int(actor)==int(old['owner_id']) or (actor_row and actor_row['role'] in ('manager','pm'))
+                if b.get('action')=='delete':
+                    if not can_manage: return self.json(403,{'error':'only the task owner or manager may delete a task'})
+                    c.execute('DELETE FROM approval_record WHERE task_id=?',(tid,)); c.execute('DELETE FROM progress_record WHERE task_id=?',(tid,)); c.execute('DELETE FROM feedback WHERE task_id=?',(tid,)); c.execute('DELETE FROM acceptance WHERE task_id=?',(tid,)); c.execute('DELETE FROM task WHERE id=?',(tid,)); action='delete'
+                elif p.path.endswith('/feedback'):
                     if not b.get('content'): return self.json(400,{'error':'content is required'})
                     feedback_user=self.actor_id(b.get('user_id'))
                     if feedback_user and int(feedback_user)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may submit feedback'})
@@ -941,14 +962,19 @@ class Handler(BaseHTTPRequestHandler):
                     if not acceptor_id or int(acceptor_id)!=int(approver_id): return self.json(403,{'error':'only the task owner\'s approver may accept'})
                     c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,b.get('acceptor_id'),result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
                 else:
-                    allowed={'work_status','risk_status','due_at','priority','owner_id','deliverable'}; changes={k:v for k,v in b.items() if k in allowed};
+                    allowed={'title','description','org_node_id','task_type','work_status','risk_status','due_at','priority','owner_id','deliverable'}; changes={k:v for k,v in b.items() if k in allowed};
                     if not changes: return self.json(400,{'error':'no editable fields'})
                     if 'work_status' in changes:
-                        operator_id=self.actor_id(b.get('operator_id'))
+                        operator_id=actor
                         if not operator_id or int(operator_id)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may update task status'})
                         transition=(old['work_status'],changes['work_status'])
                         if transition not in {('assigned','in_progress'),('in_progress','awaiting_acceptance')}:
                             return self.json(400,{'error':'invalid task status transition'})
+                    elif not can_manage: return self.json(403,{'error':'only the task owner or manager may edit a task'})
+                    if 'title' in changes and not str(changes['title']).strip(): return self.json(400,{'error':'task title is required'})
+                    if 'owner_id' in changes:
+                        if not c.execute('SELECT id FROM user WHERE id=?',(changes['owner_id'],)).fetchone(): return self.json(400,{'error':'owner does not exist'})
+                        changes['approver_id']=approver_for(c,changes['owner_id'])
                     changes['updated_at']=t; c.execute('UPDATE task SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',(*changes.values(),tid)); action='update'
                 audit(c,'task',tid,action,'local',before=rowdict(old),after=b); c.commit(); out={'id':tid,'status':'ok'}
             elif p.path=='/api/notify': out=WeComAdapter().send(b.get('userid',''),b.get('text',''))

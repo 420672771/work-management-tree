@@ -281,6 +281,8 @@ class WorkTreeTests(unittest.TestCase):
 
             manual=call('/api/tasks',{'org_node_id':child['id'],'title':'接口测试手工任务','owner_id':owner['id'],'due_at':'2031-01-02T17:00:00+08:00','deliverable':'手工任务验收记录'})
             self.assertEqual(manual['approval_status'],'pending')
+            from urllib.parse import quote
+            self.assertTrue(any(row['id']==manual['id'] for row in call('/api/tasks/similar?title='+quote('接口测试手工任务'))))
             self.assertFalse(any(row['id']==manual['id'] for row in call('/api/tasks')))
             self.assertFalse(any(row['id']==manual['id'] for row in call('/api/bootstrap')['tasks']))
             self.assertEqual(call(f"/api/approvals/{manual['approval_id']}/confirm",{'result':'approved','operator_id':manager['id']})['status'],'approved')
@@ -291,6 +293,8 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(call(f"/api/tasks/{manual['id']}/accept",{'result':'passed','acceptor_id':manager['id']})['status'],'ok')
             manual_done=next(row for row in call('/api/tasks') if row['id']==manual['id'])
             self.assertEqual(manual_done['work_status'],'completed')
+            self.assertEqual(call(f"/api/tasks/{manual['id']}",{'action':'delete','operator_id':owner['id']})['status'],'ok')
+            self.assertFalse(any(row['id']==manual['id'] for row in call('/api/tasks')))
 
             draft=call('/api/task/draft/parse',{'text':'完成接口端到端验收','user_id':owner['id'],'session_id':'e2e'})
             self.assertIn('due_at',draft['missing_slots'])
