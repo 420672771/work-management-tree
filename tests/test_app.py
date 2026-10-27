@@ -84,6 +84,15 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(action['due_at'][:10],'2026-10-28')
             self.assertIn('回复“确认”',reply)
         finally: c.close()
+    def test_management_bot_can_summarize_department_progress(self):
+        c=app.db()
+        try:
+            pm=c.execute("select id from user where role='pm' limit 1").fetchone()[0]
+            self.assertTrue(app.is_department_progress_query('总结汇报一下部门所有任务的进展情况'))
+            summary=app.feishu_department_progress(c,pm)
+            self.assertIn('部门任务进展',summary)
+            self.assertIn('共 ',summary)
+        finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()
         try:

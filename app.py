@@ -381,6 +381,44 @@ def feishu_task_list(c, user_id, session_id=None):
     save_bot_task_context(c,session_id,user_id,rows[0]['id'])
     return '【我的待办】\n'+'\n'.join(f"{idx}. #{row['id']} {row['title']}（截止 {str(row['due_at'])[:10]}，{ {'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收'}.get(row['work_status'],row['work_status'])}）" for idx,row in enumerate(rows,1))
 
+def is_department_progress_query(text):
+    """Recognise management questions such as “汇总一下部门所有任务进展”。"""
+    source=re.sub(r'\s+','',str(text or ''))
+    scope=bool(re.search(r'(?:部门|团队|全体|所有|全部|整体|全局)',source))
+    topic=bool(re.search(r'(?:任务|事项|工作)',source))
+    progress=bool(re.search(r'(?:进展|进度|汇总|概况|情况|报表|总结)',source))
+    return scope and topic and progress
+
+def feishu_department_progress(c, user_id):
+    """Return an auditable management summary; never expose drafts."""
+    if not user_id:
+        return '你的飞书账号尚未绑定系统成员，暂不能查询部门任务。'
+    actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone()
+    if not actor or actor['role'] not in ('manager','pm'):
+        return '部门任务汇总仅对管理PM和部门负责人开放；你可以查询“我有哪些任务”。'
+    rows=c.execute("""SELECT t.id,t.title,t.due_at,t.work_status,t.effective_percent,t.progress_percent,
+                    t.risk_status,u.name AS owner_name,COALESCE(o.name,'未挂载责任域') AS domain_name
+                    FROM task t JOIN user u ON u.id=t.owner_id LEFT JOIN org_node o ON o.id=t.org_node_id
+                    WHERE t.approval_status='approved' ORDER BY CASE WHEN t.work_status IN ('completed','cancelled') THEN 1 ELSE 0 END,t.due_at,t.id""").fetchall()
+    if not rows: return '当前没有已生效的部门任务。'
+    status_names={'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收','completed':'已完成','cancelled':'已取消'}
+    status_counts={key:0 for key in status_names}
+    today=datetime.now(timezone.utc)
+    overdue=0
+    for row in rows:
+        status_counts[row['work_status']]=status_counts.get(row['work_status'],0)+1
+        try:
+            if row['work_status'] not in ('completed','cancelled') and datetime.fromisoformat(row['due_at'].replace('Z','+00:00'))<today: overdue+=1
+        except (TypeError,ValueError): pass
+    headline=f"共 {len(rows)} 项：待开始 {status_counts['assigned']}、进行中 {status_counts['in_progress']}、待验收 {status_counts['awaiting_acceptance']}、已完成 {status_counts['completed']}"
+    if overdue: headline+=f'；逾期 {overdue} 项'
+    items=[]
+    for row in rows[:15]:
+        progress=int(row['effective_percent'] or row['progress_percent'] or 0)
+        items.append(f"#{row['id']}《{row['title']}》｜{row['domain_name']}｜{row['owner_name']}｜{status_names.get(row['work_status'],row['work_status'])} {progress}%｜截止 {str(row['due_at'])[:10]}")
+    tail='\n其余任务请在网页任务列表查看。' if len(rows)>15 else ''
+    return '【部门任务进展】\n'+headline+'\n'+'\n'.join(items)+tail
+
 def save_bot_task_context(c, session_id, user_id, task_id):
     """Remember the task just shown/referred to for short follow-up phrases.
 
@@ -1392,7 +1430,8 @@ class Handler(BaseHTTPRequestHandler):
                     elif error: reply=error
                     else:
                         intent=classify_bot_intent(text)
-                        if intent=='task_query': reply=feishu_task_list(c,uid,session_id)
+                        if is_department_progress_query(text): reply=feishu_department_progress(c,uid)
+                        elif intent=='task_query': reply=feishu_task_list(c,uid,session_id)
                         elif intent=='task_creation':
                             slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
                             c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))

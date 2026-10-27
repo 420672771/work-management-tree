@@ -86,7 +86,8 @@ def receive(data):
                     elif error: reply=error
                     else:
                         intent=app.classify_bot_intent(text)
-                        if intent=='task_query': reply=app.feishu_task_list(c,uid,session_id)
+                        if app.is_department_progress_query(text): reply=app.feishu_department_progress(c,uid)
+                        elif intent=='task_query': reply=app.feishu_task_list(c,uid,session_id)
                         elif intent=='task_creation':
                             slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
                             domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
