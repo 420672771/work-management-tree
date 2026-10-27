@@ -492,21 +492,25 @@ def model_action_to_command(data):
         return f'任务#{task_id} 完成{data["percent"]}%'
     return None
 
-def model_bot_operation_command(c, text, user_id):
+def model_bot_operation_command(c, text, user_id, session_id=None):
     """Ask the model to extract an operation, constrained to known tasks and people."""
     if not user_id or not ai_configured(): return None
     actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone(); can_manage=bool(actor and actor['role'] in ('manager','pm'))
     rows=c.execute("SELECT task.id,task.title,task.owner_id,user.name AS owner_name,substr(task.due_at,1,10) AS due_date,task.work_status FROM task JOIN user ON user.id=task.owner_id WHERE task.approval_status='approved' AND task.work_status NOT IN ('completed','cancelled') AND (task.owner_id=? OR ?) ORDER BY task.due_at,task.id LIMIT 30",(user_id,1 if can_manage else 0)).fetchall()
     tasks=[rowdict(row) for row in rows]
     people=[rowdict(row) for row in c.execute('SELECT id,name FROM user ORDER BY id LIMIT 60')]
+    referenced_id=referenced_task_id(c,session_id,user_id,text) if session_id else None
+    referenced=next((task for task in tasks if task['id']==referenced_id),None)
     prompt=(
         '你是工作管理助手的安全参数提取器。只返回 JSON，不要解释。今天是'+datetime.now(timezone.utc).date().isoformat()+
         '。从用户输入识别 operation，允许：change_due、change_owner、delete_task、start_task、submit_acceptance、accept_task、edit_task、set_delegate、progress_update、unknown。'
         '仅能使用给定任务中的 id 和给定成员姓名；无法唯一确定时 operation=unknown。'
+        '若用户说“该任务/这项任务/此任务”，优先使用“当前会话任务”；若没有当前会话任务且可操作任务只有一条，使用那一条。'
         'change_due 需 due_date 为 YYYY-MM-DD；change_owner 需 owner_name；accept_task 的 result 为 passed/rejected；'
         'edit_task 的 field 仅为 title/description/deliverable 且带 value；progress_update 带整数 percent；'
         'set_delegate 带 principal_name 和 delegate_name。用户输入：'+str(text or '')+
         '。可操作任务：'+json.dumps(tasks,ensure_ascii=False,separators=(',',':'))+
+        '。当前会话任务：'+json.dumps(referenced,ensure_ascii=False,separators=(',',':'))+
         '。系统成员：'+json.dumps(people,ensure_ascii=False,separators=(',',':'))
     )
     try:
@@ -624,7 +628,7 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         action={'type':'set_delegate','user_id':principal['id'],'delegate_user_id':proxy['id'],'start_at':start,'end_at':end}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟设置{principal["name"]}的确认代理为{proxy["name"]}（{start[:10]} 至 {end[:10]}）。回复“确认”执行，回复“取消”放弃。'
     if allow_model:
-        command=model_bot_operation_command(c,source,user_id)
+        command=model_bot_operation_command(c,source,user_id,session_id)
         if command and command!=source:
             return plan_bot_action(c,command,user_id,session_id,allow_model=False)
     return None,fallback_reply
