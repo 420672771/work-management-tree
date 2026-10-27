@@ -87,6 +87,7 @@ def receive(data):
                     else:
                         intent=app.classify_bot_intent(text)
                         if app.is_department_progress_query(text): reply=app.feishu_department_progress(c,uid)
+                        elif app.is_team_progress_query(text): reply=app.feishu_team_progress(c,uid)
                         elif intent=='task_query': reply=app.feishu_task_list(c,uid,session_id)
                         elif intent=='task_creation':
                             slots,missing=save_draft(c,sender,user,text,'feishu',event_id)

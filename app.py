@@ -384,10 +384,44 @@ def feishu_task_list(c, user_id, session_id=None):
 def is_department_progress_query(text):
     """Recognise management questions such as “汇总一下部门所有任务进展”。"""
     source=re.sub(r'\s+','',str(text or ''))
-    scope=bool(re.search(r'(?:部门|团队|全体|所有|全部|整体|全局)',source))
+    scope=bool(re.search(r'(?:部门|全体|所有|全部|整体|全局)',source))
     topic=bool(re.search(r'(?:任务|事项|工作)',source))
     progress=bool(re.search(r'(?:进展|进度|汇总|概况|情况|报表|总结)',source))
     return scope and topic and progress
+
+def is_team_progress_query(text):
+    source=re.sub(r'\s+','',str(text or ''))
+    return bool(re.search(r'(?:团队|下属|组员|直属).{0,10}(?:任务|事项|工作).{0,10}(?:进展|进度|汇总|概况|情况|报表|总结)|(?:任务|事项|工作).{0,10}(?:进展|进度|汇总|概况|情况|报表|总结).{0,10}(?:团队|下属|组员|直属)',source))
+
+def managed_user_ids(c, user_id):
+    """Return the full active reporting subtree below a user, never peers."""
+    found=[]; frontier=[int(user_id)]
+    while frontier:
+        marks=','.join('?' for _ in frontier)
+        rows=c.execute(f"SELECT user_id FROM reporting_line WHERE direct_leader_id IN ({marks}) AND (effective_to IS NULL OR effective_to='')",frontier).fetchall()
+        next_ids=[int(row['user_id']) for row in rows if int(row['user_id']) not in found and int(row['user_id'])!=int(user_id)]
+        found.extend(next_ids); frontier=next_ids
+    return found
+
+def feishu_team_progress(c, user_id):
+    """Give Team leaders a safe view of their reporting subtree only."""
+    if not user_id:
+        return '你的飞书账号尚未绑定系统成员，暂不能查询团队任务。'
+    people=managed_user_ids(c,user_id)
+    if not people:
+        return '当前没有配置在你名下的直属成员，因此暂无可汇总的团队任务。'
+    marks=','.join('?' for _ in people)
+    rows=c.execute(f"""SELECT t.id,t.title,t.due_at,t.work_status,t.effective_percent,t.progress_percent,u.name AS owner_name
+                       FROM task t JOIN user u ON u.id=t.owner_id
+                       WHERE t.approval_status='approved' AND t.owner_id IN ({marks})
+                       ORDER BY CASE WHEN t.work_status IN ('completed','cancelled') THEN 1 ELSE 0 END,t.due_at,t.id""",people).fetchall()
+    if not rows: return '你的团队当前没有已生效任务。'
+    labels={'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收','completed':'已完成','cancelled':'已取消'}
+    counts={key:0 for key in labels}
+    for row in rows: counts[row['work_status']]=counts.get(row['work_status'],0)+1
+    lines=[f"#{row['id']}《{row['title']}》｜{row['owner_name']}｜{labels.get(row['work_status'],row['work_status'])} {int(row['effective_percent'] or row['progress_percent'] or 0)}%｜截止 {str(row['due_at'])[:10]}" for row in rows[:15]]
+    headline=f"共 {len(rows)} 项：待开始 {counts['assigned']}、进行中 {counts['in_progress']}、待验收 {counts['awaiting_acceptance']}、已完成 {counts['completed']}"
+    return '【团队任务进展】\n'+headline+'\n'+'\n'.join(lines)+('\n其余任务请在网页任务列表查看。' if len(rows)>15 else '')
 
 def feishu_department_progress(c, user_id):
     """Return an auditable management summary; never expose drafts."""
@@ -534,7 +568,10 @@ def model_bot_operation_command(c, text, user_id, session_id=None):
     """Ask the model to extract an operation, constrained to known tasks and people."""
     if not user_id or not ai_configured(): return None
     actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone(); can_manage=bool(actor and actor['role'] in ('manager','pm'))
-    rows=c.execute("SELECT task.id,task.title,task.owner_id,user.name AS owner_name,substr(task.due_at,1,10) AS due_date,task.work_status FROM task JOIN user ON user.id=task.owner_id WHERE task.approval_status='approved' AND task.work_status NOT IN ('completed','cancelled') AND (task.owner_id=? OR ?) ORDER BY task.due_at,task.id LIMIT 30",(user_id,1 if can_manage else 0)).fetchall()
+    # A Team leader may not edit a subordinate's task, but must be able to find
+    # it by title when they are its designated approver.  The planner still
+    # verifies the exact operation's permission before any action is saved.
+    rows=c.execute("SELECT task.id,task.title,task.owner_id,task.approver_id,user.name AS owner_name,substr(task.due_at,1,10) AS due_date,task.work_status FROM task JOIN user ON user.id=task.owner_id WHERE task.approval_status='approved' AND task.work_status NOT IN ('completed','cancelled') AND (task.owner_id=? OR task.approver_id=? OR ?) ORDER BY task.due_at,task.id LIMIT 30",(user_id,user_id,1 if can_manage else 0)).fetchall()
     tasks=[rowdict(row) for row in rows]
     people=[rowdict(row) for row in c.execute('SELECT id,name FROM user ORDER BY id LIMIT 60')]
     referenced_id=referenced_task_id(c,session_id,user_id,text) if session_id else None
@@ -1431,6 +1468,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         intent=classify_bot_intent(text)
                         if is_department_progress_query(text): reply=feishu_department_progress(c,uid)
+                        elif is_team_progress_query(text): reply=feishu_team_progress(c,uid)
                         elif intent=='task_query': reply=feishu_task_list(c,uid,session_id)
                         elif intent=='task_creation':
                             slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()

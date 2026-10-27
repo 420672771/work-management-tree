@@ -88,10 +88,16 @@ class WorkTreeTests(unittest.TestCase):
         c=app.db()
         try:
             pm=c.execute("select id from user where role='pm' limit 1").fetchone()[0]
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            member=c.execute("select id from user where role='member' limit 1").fetchone()[0]
             self.assertTrue(app.is_department_progress_query('总结汇报一下部门所有任务的进展情况'))
+            self.assertTrue(app.is_team_progress_query('汇总一下团队任务进度'))
             summary=app.feishu_department_progress(c,pm)
             self.assertIn('部门任务进展',summary)
             self.assertIn('共 ',summary)
+            self.assertIn('部门任务进展',app.feishu_department_progress(c,manager))
+            self.assertIn('仅对管理PM和部门负责人开放',app.feishu_department_progress(c,member))
+            self.assertIn('直属成员',app.feishu_team_progress(c,member))
         finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()
