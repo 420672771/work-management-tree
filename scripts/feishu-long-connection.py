@@ -83,7 +83,7 @@ def receive(data):
                             reply=f"已记录《{task['title']}》进度 {progress['percent']}%，已提交上级确认。"
                         except (ValueError,PermissionError) as exc: reply='进度提交未成功：'+str(exc)
                     elif error: reply=error
-                    elif app.re.search(r'(?:我的|今天|今日).{0,4}(?:任务|待办)|(?:任务|待办).{0,4}(?:清单|查询)',text): reply=app.feishu_task_list(c,uid)
+                    elif app.is_task_query_request(text): reply=app.feishu_task_list(c,uid)
                     elif app.is_task_creation_request(text):
                         slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
                         domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'

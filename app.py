@@ -363,6 +363,15 @@ def feishu_task_list(c, user_id):
     if not rows: return '你当前没有待完成任务。'
     return '【我的待办】\n'+'\n'.join(f"{idx}. #{row['id']} {row['title']}（截止 {str(row['due_at'])[:10]}，{ {'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收'}.get(row['work_status'],row['work_status'])}）" for idx,row in enumerate(rows,1))
 
+def is_task_query_request(text):
+    """Recognise natural-language requests for the sender's task list."""
+    source=re.sub(r'\s+','',str(text or ''))
+    return bool(
+        re.search(r'(?:我的|我都|本人|今天|今日).{0,8}(?:任务|待办)',source)
+        or re.search(r'(?:我|本人).{0,8}(?:有哪些|有什么|什么).{0,8}(?:任务|待办)',source)
+        or re.search(r'(?:任务|待办).{0,8}(?:清单|查询|有哪些|有什么|什么)',source)
+    )
+
 def task_number(text):
     match=re.search(r'(?:任务|task)\s*[#编号：:\-]?\s*(\d+)',str(text or ''),re.I)
     return int(match.group(1)) if match else None
@@ -1216,7 +1225,7 @@ class Handler(BaseHTTPRequestHandler):
                             reply=f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
                         except (ValueError,PermissionError) as exc: reply=str(exc)
                     elif error: reply=error
-                    elif re.search(r'(?:我的|今天|今日).{0,4}(?:任务|待办)|(?:任务|待办).{0,4}(?:清单|查询)',text): reply=feishu_task_list(c,uid)
+                    elif is_task_query_request(text): reply=feishu_task_list(c,uid)
                     elif is_task_creation_request(text):
                         slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
                         c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
