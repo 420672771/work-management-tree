@@ -434,6 +434,57 @@ def classify_bot_intent(text):
     intent=rule_bot_intent(text)
     return intent if intent!='unknown' else model_bot_intent(text)
 
+def model_action_to_command(data):
+    """Convert a model proposal to a restricted command understood by the planner."""
+    if not isinstance(data,dict): return None
+    operation=str(data.get('operation') or '')
+    try: task_id=int(data.get('task_id')) if data.get('task_id') is not None else None
+    except (TypeError,ValueError): task_id=None
+    if operation=='change_due' and task_id and re.fullmatch(r'\d{4}-\d{2}-\d{2}',str(data.get('due_date') or '')):
+        return f'任务#{task_id} 截止日期改为{data["due_date"]}'
+    if operation=='change_owner' and task_id and str(data.get('owner_name') or '').strip():
+        return f'任务#{task_id} 责任人改为{str(data["owner_name"]).strip()}'
+    if operation=='delete_task' and task_id: return f'删除任务#{task_id}'
+    if operation=='start_task' and task_id: return f'开始任务#{task_id}'
+    if operation=='submit_acceptance' and task_id: return f'任务#{task_id} 完成并提交'
+    if operation=='accept_task' and task_id:
+        return f'验收任务#{task_id} {"驳回" if data.get("result")=="rejected" else "通过"}'
+    if operation=='edit_task' and task_id:
+        field={'title':'任务标题','description':'任务详情','deliverable':'交付物'}.get(str(data.get('field') or ''))
+        value=str(data.get('value') or '').strip()
+        if field and value: return f'任务#{task_id} {field}改为{value}'
+    if operation=='set_delegate' and str(data.get('principal_name') or '').strip() and str(data.get('delegate_name') or '').strip():
+        return f'{str(data["principal_name"]).strip()}代理{str(data["delegate_name"]).strip()}'
+    if operation=='progress_update' and task_id and isinstance(data.get('percent'),int) and 0<=data['percent']<=100:
+        return f'任务#{task_id} 完成{data["percent"]}%'
+    return None
+
+def model_bot_operation_command(c, text, user_id):
+    """Ask the model to extract an operation, constrained to known tasks and people."""
+    if not user_id or not ai_configured(): return None
+    actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone(); can_manage=bool(actor and actor['role'] in ('manager','pm'))
+    rows=c.execute("SELECT task.id,task.title,task.owner_id,user.name AS owner_name,substr(task.due_at,1,10) AS due_date,task.work_status FROM task JOIN user ON user.id=task.owner_id WHERE task.approval_status='approved' AND task.work_status NOT IN ('completed','cancelled') AND (task.owner_id=? OR ?) ORDER BY task.due_at,task.id LIMIT 30",(user_id,1 if can_manage else 0)).fetchall()
+    tasks=[rowdict(row) for row in rows]
+    people=[rowdict(row) for row in c.execute('SELECT id,name FROM user ORDER BY id LIMIT 60')]
+    prompt=(
+        '你是工作管理助手的安全参数提取器。只返回 JSON，不要解释。今天是'+datetime.now(timezone.utc).date().isoformat()+
+        '。从用户输入识别 operation，允许：change_due、change_owner、delete_task、start_task、submit_acceptance、accept_task、edit_task、set_delegate、progress_update、unknown。'
+        '仅能使用给定任务中的 id 和给定成员姓名；无法唯一确定时 operation=unknown。'
+        'change_due 需 due_date 为 YYYY-MM-DD；change_owner 需 owner_name；accept_task 的 result 为 passed/rejected；'
+        'edit_task 的 field 仅为 title/description/deliverable 且带 value；progress_update 带整数 percent；'
+        'set_delegate 带 principal_name 和 delegate_name。用户输入：'+str(text or '')+
+        '。可操作任务：'+json.dumps(tasks,ensure_ascii=False,separators=(',',':'))+
+        '。系统成员：'+json.dumps(people,ensure_ascii=False,separators=(',',':'))
+    )
+    try:
+        payload=json.dumps({'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':prompt}],'temperature':0,'max_tokens':400}).encode()
+        req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
+        with urllib.request.urlopen(req,timeout=15) as response: content=json.load(response)['choices'][0]['message']['content']
+        match=re.search(r'\{.*\}',str(content),re.S)
+        return model_action_to_command(json.loads(match.group(0))) if match else None
+    except Exception:
+        return None
+
 def task_number(text):
     match=re.search(r'(?:任务|task)\s*[#编号：:\-]?\s*(\d+)',str(text or ''),re.I)
     return int(match.group(1)) if match else None
@@ -451,9 +502,9 @@ def save_bot_action(c, session_id, user_id, action):
     c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND status='pending'",(session_id,))
     return c.execute('INSERT INTO bot_pending_action(session_id,user_id,action_json,expire_at,created_at) VALUES(?,?,?,?,?)',(session_id,user_id,json.dumps(action,ensure_ascii=False),expiry,now())).lastrowid
 
-def plan_bot_action(c, text, user_id, session_id):
+def plan_bot_action(c, text, user_id, session_id, allow_model=True):
     """Create an explicit, reviewable plan for non-creation work actions."""
-    source=str(text or '').strip(); tid=task_number(source)
+    source=str(text or '').strip(); tid=task_number(source); fallback_reply=None
     if not user_id: return None,'你的飞书账号尚未绑定系统成员，暂不能执行管理操作。'
     if tid and re.search(r'(?:开始|启动).*(?:任务|#)|(?:任务|#).*?(?:开始|启动)',source):
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
@@ -521,12 +572,13 @@ def plan_bot_action(c, text, user_id, session_id):
                 return None,'你当前没有可修改截止日期的未完成任务。'
             else:
                 options='、'.join(f"#{row['id']} {row['title']}" for row in active[:5])
-                return None,'你有多条未完成任务，请说明任务编号，例如：任务#15 截止日期改到10月28号。可选：'+options
-        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
-        if not task: return None,f'未找到任务#{tid}。'
-        if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以变更截止日期。'
-        action={'type':'change_due','task_id':tid,'due_at':due}; save_bot_action(c,session_id,user_id,action)
-        return action,f'拟将任务#{tid}《{task["title"]}》截止日期调整为{due[:10]}。回复“确认”执行，回复“取消”放弃。'
+                fallback_reply='你有多条未完成任务，请说明任务编号，例如：任务#15 截止日期改到10月28号。可选：'+options
+        if tid:
+            task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+            if not task: return None,f'未找到任务#{tid}。'
+            if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以变更截止日期。'
+            action={'type':'change_due','task_id':tid,'due_at':due}; save_bot_action(c,session_id,user_id,action)
+            return action,f'拟将任务#{tid}《{task["title"]}》截止日期调整为{due[:10]}。回复“确认”执行，回复“取消”放弃。'
     delegate=re.search(r'([\u4e00-\u9fffA-Za-z·]{2,20})\s*(?:代理|代为确认)\s*([\u4e00-\u9fffA-Za-z·]{2,20})',source)
     if delegate:
         principal=user_by_name(c,delegate.group(1)); proxy=user_by_name(c,delegate.group(2))
@@ -538,7 +590,11 @@ def plan_bot_action(c, text, user_id, session_id):
         end=parse_due(dates[1]) if len(dates)>1 else (datetime.now(timezone.utc)+timedelta(days=7)).date().isoformat()+'T23:59:59+08:00'
         action={'type':'set_delegate','user_id':principal['id'],'delegate_user_id':proxy['id'],'start_at':start,'end_at':end}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟设置{principal["name"]}的确认代理为{proxy["name"]}（{start[:10]} 至 {end[:10]}）。回复“确认”执行，回复“取消”放弃。'
-    return None,None
+    if allow_model:
+        command=model_bot_operation_command(c,source,user_id)
+        if command and command!=source:
+            return plan_bot_action(c,command,user_id,session_id,allow_model=False)
+    return None,fallback_reply
 
 def execute_bot_action(c, action, user_id):
     typ=action['type']; t=now()
@@ -1288,8 +1344,9 @@ class Handler(BaseHTTPRequestHandler):
                     c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status='pending'",(now(),session_id,uid)); reply='已取消待执行操作。'
                 else:
                     action,action_reply=plan_bot_action(c,text,uid,session_id)
-                    progress,error=resolve_progress_message(c,text,uid) if not action else (None,None)
+                    progress,error=resolve_progress_message(c,text,uid) if not action and not action_reply else (None,None)
                     if action: reply=action_reply
+                    elif action_reply: reply=action_reply
                     elif progress:
                         try:
                             rid,aid,task=submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')

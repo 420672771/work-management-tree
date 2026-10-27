@@ -65,6 +65,9 @@ class WorkTreeTests(unittest.TestCase):
             action,reply=app.plan_bot_action(c,f'修改任务{tid}的截止日期到10月28号',pm,'feishu:test-due')
             self.assertEqual(action['type'],'change_due'); self.assertEqual(action['due_at'][:10],'2026-10-28')
             self.assertIn('回复“确认”',reply)
+            self.assertEqual(app.model_action_to_command({'operation':'change_due','task_id':tid,'due_date':'2030-02-03'}),f'任务#{tid} 截止日期改为2030-02-03')
+            self.assertEqual(app.model_action_to_command({'operation':'edit_task','task_id':tid,'field':'title','value':'更新标题'}),f'任务#{tid} 任务标题改为更新标题')
+            self.assertEqual(app.plan_bot_action(c,'修改任务截止日期到10月28号',pm,'feishu:ambiguous')[0],None)
         finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()

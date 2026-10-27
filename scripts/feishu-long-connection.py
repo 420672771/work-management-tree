@@ -74,9 +74,10 @@ def receive(data):
                 elif text.strip() in ('取消','取消操作','不确认','否'):
                     c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status='pending'",(app.now(),session_id,uid)); reply='已取消待执行操作。'
                 else:
-                    action,reply=app.plan_bot_action(c,text,uid,session_id)
-                    progress,error=app.resolve_progress_message(c,text,uid) if not action else (None,None)
-                    if action: pass
+                    action,planned_reply=app.plan_bot_action(c,text,uid,session_id)
+                    progress,error=app.resolve_progress_message(c,text,uid) if not action and not planned_reply else (None,None)
+                    if action: reply=planned_reply
+                    elif planned_reply: reply=planned_reply
                     elif progress:
                         try:
                             _,_,task=app.submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
