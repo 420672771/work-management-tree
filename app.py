@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS feishu_binding_history (id INTEGER PRIMARY KEY AUTOIN
 CREATE TABLE IF NOT EXISTS feishu_profile (open_id TEXT PRIMARY KEY, display_name TEXT DEFAULT '', avatar_url TEXT DEFAULT '', fetched_at TEXT NOT NULL, fetch_error TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS bot_pending_action (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, action_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, confirmed_at TEXT);
 CREATE TABLE IF NOT EXISTS bot_task_context (session_id TEXT PRIMARY KEY, user_id INTEGER, task_id INTEGER NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scheduled_report (id INTEGER PRIMARY KEY AUTOINCREMENT, created_by INTEGER NOT NULL, receiver_id INTEGER NOT NULL, scope TEXT NOT NULL DEFAULT 'self', frequency TEXT NOT NULL DEFAULT 'daily', schedule_time TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scheduled_report_run (id INTEGER PRIMARY KEY AUTOINCREMENT, schedule_id INTEGER NOT NULL, run_date TEXT NOT NULL, sent_at TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}', UNIQUE(schedule_id,run_date));
 CREATE TABLE IF NOT EXISTS login_state (state_hash TEXT PRIMARY KEY, expire_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_session (session_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expire_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
 """
@@ -423,6 +425,49 @@ def feishu_team_progress(c, user_id):
     headline=f"共 {len(rows)} 项：待开始 {counts['assigned']}、进行中 {counts['in_progress']}、待验收 {counts['awaiting_acceptance']}、已完成 {counts['completed']}"
     return '【团队任务进展】\n'+headline+'\n'+'\n'.join(lines)+('\n其余任务请在网页任务列表查看。' if len(rows)>15 else '')
 
+def parse_report_schedule(c, text, user_id):
+    """Extract a safe daily task-progress report schedule from natural language."""
+    source=re.sub(r'\s+','',str(text or ''))
+    if not (re.search(r'(?:每天|每日|每日|每个工作日|定时)',source) and re.search(r'(?:任务|工作|事项).{0,10}(?:汇总|汇报|进展|进度)|(?:汇总|汇报|进展|进度).{0,10}(?:任务|工作|事项)',source)):
+        return None
+    clock=re.search(r'(?<!\d)([01]?\d|2[0-3])(?:点|:|：)([0-5]?\d)?(?:分)?',source)
+    if not clock:
+        return {'missing':'发送时间'}
+    hour=int(clock.group(1)); minute=int(clock.group(2) or 0)
+    actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone()
+    if re.search(r'(?:部门|全体|所有|全部|整体)',source): scope='department'
+    elif re.search(r'(?:团队|下属|组员|直属)',source): scope='team'
+    elif re.search(r'(?:我的|本人|个人)',source): scope='self'
+    elif actor and actor['role'] in ('manager','pm'): scope='department'
+    elif managed_user_ids(c,user_id): scope='team'
+    else: scope='self'
+    return {'scope':scope,'frequency':'daily','schedule_time':f'{hour:02d}:{minute:02d}','receiver_id':user_id}
+
+def scheduled_report_text(c, schedule):
+    if schedule['scope']=='department': return feishu_department_progress(c,schedule['created_by'])
+    if schedule['scope']=='team': return feishu_team_progress(c,schedule['created_by'])
+    return feishu_task_list(c,schedule['created_by'])
+
+def run_scheduled_reports(c, local_now=None):
+    """Dispatch due user-configured reports once per local calendar day."""
+    local_now=local_now or datetime.now(timezone(timedelta(hours=8)))
+    day=local_now.date().isoformat(); clock=local_now.strftime('%H:%M'); out={'due':0,'sent':0,'skipped':0,'failed':0}
+    rows=c.execute("SELECT * FROM scheduled_report WHERE enabled=1 AND frequency='daily' AND schedule_time<=?",(clock,)).fetchall()
+    for schedule in rows:
+        if c.execute('SELECT 1 FROM scheduled_report_run WHERE schedule_id=? AND run_date=?',(schedule['id'],day)).fetchone(): continue
+        out['due']+=1
+        receiver=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(schedule['receiver_id'],)).fetchone()
+        try:
+            if not receiver or not receiver['feishu_open_id']:
+                result={'status':'skipped_no_binding'}; out['skipped']+=1
+            else:
+                response=FeishuAdapter().send_text(receiver['feishu_open_id'],scheduled_report_text(c,schedule))
+                result=response; out['sent' if response.get('sent') else 'skipped']+=1
+        except Exception as exc:
+            result={'status':'failed','reason':str(exc)}; out['failed']+=1
+        c.execute('INSERT INTO scheduled_report_run(schedule_id,run_date,sent_at,result_json) VALUES(?,?,?,?)',(schedule['id'],day,now(),json.dumps(result,ensure_ascii=False)))
+    return out
+
 def feishu_department_progress(c, user_id):
     """Return an auditable management summary; never expose drafts."""
     if not user_id:
@@ -618,6 +663,18 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
     """Create an explicit, reviewable plan for non-creation work actions."""
     source=str(text or '').strip(); tid=task_number(source) or referenced_task_id(c,session_id,user_id,source); fallback_reply=None
     if not user_id: return None,'你的飞书账号尚未绑定系统成员，暂不能执行管理操作。'
+    report_schedule=parse_report_schedule(c,source,user_id)
+    if report_schedule:
+        if report_schedule.get('missing'):
+            return None,'可以配置定时任务进度汇总。请补充'+report_schedule['missing']+'，例如“每天18点汇总部门任务进展”。'
+        actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone()
+        if report_schedule['scope']=='department' and (not actor or actor['role'] not in ('manager','pm')):
+            return None,'部门任务汇总仅可由管理PM或部门负责人配置；你可以配置个人或团队任务汇总。'
+        if report_schedule['scope']=='team' and not (managed_user_ids(c,user_id) or (actor and actor['role'] in ('manager','pm'))):
+            return None,'当前没有配置在你名下的直属成员，不能创建团队任务汇总。'
+        action={'type':'create_scheduled_report',**report_schedule}; save_bot_action(c,session_id,user_id,action)
+        labels={'department':'部门','team':'团队','self':'个人'}
+        return action,f'拟设置每日 {report_schedule["schedule_time"]} 向你发送{labels[report_schedule["scope"]]}任务进展汇总。回复“确认”生效，回复“取消”放弃。'
     if tid and re.search(r'(?:开始|启动).*(?:任务|#)|(?:任务|#).*?(?:开始|启动)',source):
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         if not task: return None,f'未找到任务#{tid}。'
@@ -745,6 +802,16 @@ def execute_bot_action(c, action, user_id):
         audit(c,'approval',approval['id'],action['result'],str(user_id),after=action); return '确认已通过。' if action['result']=='approved' else '已驳回。'
     if typ=='set_delegate':
         c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(action['user_id'],action['delegate_user_id'],'approval',action['start_at'],action['end_at'])); audit(c,'delegate',action['user_id'],'create',str(user_id),after=action); return '确认代理已设置。'
+    if typ=='create_scheduled_report':
+        if int(action.get('receiver_id') or 0)!=int(user_id): raise PermissionError('当前只支持为自己配置定时汇总')
+        actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone(); scope=action.get('scope')
+        if scope not in ('self','team','department') or not re.fullmatch(r'[0-2]\d:[0-5]\d',str(action.get('schedule_time') or '')): raise ValueError('定时汇总配置无效')
+        if scope=='department' and (not actor or actor['role'] not in ('manager','pm')): raise PermissionError('无权配置部门任务汇总')
+        if scope=='team' and not (managed_user_ids(c,user_id) or (actor and actor['role'] in ('manager','pm'))): raise PermissionError('当前没有可汇总的团队')
+        existing=c.execute("SELECT id FROM scheduled_report WHERE created_by=? AND receiver_id=? AND scope=? AND frequency='daily' AND schedule_time=? AND enabled=1",(user_id,user_id,scope,action['schedule_time'])).fetchone()
+        if existing: return '相同的定时汇总已存在，无需重复创建。'
+        sid=c.execute("INSERT INTO scheduled_report(created_by,receiver_id,scope,frequency,schedule_time,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(user_id,user_id,scope,'daily',action['schedule_time'],1,t,t)).lastrowid
+        audit(c,'scheduled_report',sid,'create',str(user_id),after=action); return '定时任务已生效。'
     raise ValueError('不支持的机器人操作')
 
 def extract_document_text(data, filename=''):

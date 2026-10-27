@@ -1,0 +1,10 @@
+[Unit]
+Description=Dispatch Work Management Tree user scheduled reports
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+Unit=worktree-scheduled-reports.service
+
+[Install]
+WantedBy=timers.target

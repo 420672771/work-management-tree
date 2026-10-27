@@ -99,6 +99,21 @@ class WorkTreeTests(unittest.TestCase):
             self.assertIn('仅对管理PM和部门负责人开放',app.feishu_department_progress(c,member))
             self.assertIn('直属成员',app.feishu_team_progress(c,member))
         finally: c.close()
+    def test_bot_can_plan_and_save_daily_progress_summary(self):
+        c=app.db()
+        try:
+            pm=c.execute("select id from user where role='pm' limit 1").fetchone()[0]
+            action,reply=app.plan_bot_action(c,'每天18点汇总部门所有任务进展并发给我',pm,'feishu:schedule-test')
+            self.assertEqual(action['type'],'create_scheduled_report')
+            self.assertEqual(action['scope'],'department')
+            self.assertEqual(action['schedule_time'],'18:00')
+            self.assertIn('回复“确认”',reply)
+            self.assertEqual(app.execute_bot_action(c,action,pm),'定时任务已生效。')
+            self.assertEqual(c.execute('select count(*) from scheduled_report where created_by=?',(pm,)).fetchone()[0],1)
+            member=c.execute("select id from user where role='member' limit 1").fetchone()[0]
+            self.assertIn('仅可由管理PM或部门负责人配置',app.plan_bot_action(c,'每天18点汇总部门任务进展',member,'feishu:schedule-member')[1])
+            self.assertIn('请补充发送时间',app.plan_bot_action(c,'每天汇总任务进展',pm,'feishu:schedule-time')[1])
+        finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()
         try:

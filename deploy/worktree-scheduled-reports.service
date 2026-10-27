@@ -1,0 +1,7 @@
+[Unit]
+Description=Work Management Tree user scheduled reports
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/admin/work-management-tree
+ExecStart=/usr/bin/python3 /home/admin/work-management-tree/scripts/run-scheduled-reports.py
