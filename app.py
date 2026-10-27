@@ -408,7 +408,9 @@ def model_bot_intent(text):
         '不确定返回 unknown。不要执行操作，不要解释。用户输入：'+str(text or '')
     )
     try:
-        payload=json.dumps({'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':prompt}],'temperature':0,'max_tokens':32}).encode()
+        # Reasoning-capable providers may consume part of the budget before emitting
+        # the strict JSON response, so leave enough room for both phases.
+        payload=json.dumps({'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':prompt}],'temperature':0,'max_tokens':256}).encode()
         req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=12) as response:
             content=json.load(response)['choices'][0]['message']['content']

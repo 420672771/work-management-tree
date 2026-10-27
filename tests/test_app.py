@@ -46,6 +46,7 @@ class WorkTreeTests(unittest.TestCase):
             self.assertFalse(app.is_task_query_request('任务#15 完成80%'))
             self.assertEqual(app.classify_bot_intent('我今天要做什么'),'task_query')
             self.assertEqual(app.classify_bot_intent('你能做什么？'),'help')
+            self.assertEqual(app.rule_bot_intent('我现在有什么安排'),'task_query')
         finally: c.close()
     def test_bot_sensitive_actions_require_a_plan_before_execution(self):
         c=app.db()
