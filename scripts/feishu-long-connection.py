@@ -83,13 +83,15 @@ def receive(data):
                             reply=f"已记录《{task['title']}》进度 {progress['percent']}%，已提交上级确认。"
                         except (ValueError,PermissionError) as exc: reply='进度提交未成功：'+str(exc)
                     elif error: reply=error
-                    elif app.is_task_query_request(text): reply=app.feishu_task_list(c,uid)
-                    elif app.is_task_creation_request(text):
-                        slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
-                        domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-                        reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+app.friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
                     else:
-                        reply='我可以协助你：查询待办、填报进度、新建/修改/删除任务、验收、变更责任人和设置确认代理。涉及变更操作时，我会先回显，回复“确认”后执行。'
+                        intent=app.classify_bot_intent(text)
+                        if intent=='task_query': reply=app.feishu_task_list(c,uid)
+                        elif intent=='task_creation':
+                            slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
+                            domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+                            reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+app.friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+                        elif intent=='help': reply='我可以查询你的待办、填报进度、新建或修改任务、提交/执行验收、变更责任人和设置确认代理。涉及变更、删除和验收时，我会先回显，回复“确认”后才执行。'
+                        else: reply='我暂未理解这句话。你可以直接说“我今天要做什么”“查看我负责的事项”，或说明具体任务编号，例如“任务#15 完成80%”。'
             # Persist the event and draft before calling the remote send API. A transient
             # Feishu send failure must not cause the event receiver to fail or retry-create.
             c.commit()

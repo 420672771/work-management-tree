@@ -375,14 +375,52 @@ def is_task_query_request(text):
     if not source or re.search(r'(?:任务|事项)?#?\d+.*(?:完成|开始|删除|验收|改为|变更)|(?:完成|开始|删除|验收|改为|变更).*(?:任务|事项)?#?\d+',source):
         return False
     # Direct list expressions are always a query, with or without an explicit “我”.
-    if re.search(r'(?:任务|待办|事项).{0,10}(?:清单|列表|查询|有哪些|有什么|多少|几条|全部|未完成|待处理)|(?:有哪些|有什么|多少|几条|全部).{0,10}(?:任务|待办|事项)',source):
+    if re.search(r'(?:任务|待办|事项|工作).{0,10}(?:清单|列表|查询|有哪些|有什么|多少|几条|全部|未完成|待处理|安排)|(?:有哪些|有什么|多少|几条|全部|未完成|待处理).{0,10}(?:任务|待办|事项|工作)',source):
         return True
     # First-person phrasing often omits “任务”, e.g. “我今天要做什么”.
-    if re.search(r'(?:我|本人|手上|当前).{0,12}(?:任务|待办|事项|要做什么|该做什么|需要做什么|负责什么|忙什么)',source):
+    if re.search(r'(?:我|本人|手上|当前).{0,12}(?:任务|待办|事项|要做什么|该做什么|需要做什么|负责什么|忙什么|有什么安排|有哪些安排)',source):
         return True
     if re.search(r'(?:查|看|列|告诉).{0,8}(?:我|本人|手上|当前).{0,8}(?:任务|待办|事项|工作)',source):
         return True
     return bool(re.search(r'^(?:待办|任务|事项|工作)(?:清单|列表|查询)?$',source))
+
+def rule_bot_intent(text):
+    """Fast, explainable intent recognition for the common assistant commands."""
+    source=re.sub(r'\s+','',str(text or ''))
+    if is_task_query_request(source): return 'task_query'
+    if is_task_creation_request(source): return 'task_creation'
+    if re.search(r'^(?:帮助|帮忙|你能做什么|你会什么|怎么用|功能说明)[？?！!。]*$',source): return 'help'
+    return 'unknown'
+
+def model_bot_intent(text):
+    """Use a configured OpenAI-compatible model only for otherwise unknown wording.
+
+    The model selects an intent; it never executes an operation or bypasses the
+    downstream identity, permission and explicit-confirmation checks.
+    """
+    if not ai_configured(): return 'unknown'
+    prompt=(
+        '你是企业工作管理助手的意图分类器。只返回 JSON：{"intent":"..."}。'
+        'intent 只能是 task_query、task_creation、progress_update、task_operation、help、unknown。'
+        'task_query 表示查询本人待办、任务清单、当前安排或未完成工作；'
+        'task_creation 表示明确新建/安排待办；progress_update 表示汇报任务进展；'
+        'task_operation 表示开始、修改、删除、验收、变更责任人或设置代理；'
+        '不确定返回 unknown。不要执行操作，不要解释。用户输入：'+str(text or '')
+    )
+    try:
+        payload=json.dumps({'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':prompt}],'temperature':0,'max_tokens':32}).encode()
+        req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
+        with urllib.request.urlopen(req,timeout=12) as response:
+            content=json.load(response)['choices'][0]['message']['content']
+        parsed=json.loads(str(content).removeprefix('```json').removesuffix('```').strip())
+        return parsed.get('intent') if parsed.get('intent') in {'task_query','task_creation','progress_update','task_operation','help','unknown'} else 'unknown'
+    except Exception:
+        return 'unknown'
+
+def classify_bot_intent(text):
+    """Rule-first classifier with model fallback when an AI provider is configured."""
+    intent=rule_bot_intent(text)
+    return intent if intent!='unknown' else model_bot_intent(text)
 
 def task_number(text):
     match=re.search(r'(?:任务|task)\s*[#编号：:\-]?\s*(\d+)',str(text or ''),re.I)
@@ -1237,13 +1275,16 @@ class Handler(BaseHTTPRequestHandler):
                             reply=f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
                         except (ValueError,PermissionError) as exc: reply=str(exc)
                     elif error: reply=error
-                    elif is_task_query_request(text): reply=feishu_task_list(c,uid)
-                    elif is_task_creation_request(text):
-                        slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-                        c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
-                        domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-                        reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
-                    else: reply='我可以协助你：\n• 填报进度：任务#15 完成 80%\n• 查询待办：我的任务\n• 新建任务：请张三于本周五前完成需求评审\n• 修改任务：任务#15 截止日期改为2026年11月3日\n• 变更责任人：任务#15 责任人改为钱缘\n• 删除任务：删除任务#15\n• 验收任务：验收任务#15 通过\n• 设置代理：钱缘代理刘明\n涉及变更、删除和验收时，我会先回显，回复“确认”后才执行。'
+                    else:
+                        intent=classify_bot_intent(text)
+                        if intent=='task_query': reply=feishu_task_list(c,uid)
+                        elif intent=='task_creation':
+                            slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                            c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
+                            domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+                            reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+                        elif intent=='help': reply='我可以查询你的待办、填报进度、新建或修改任务、提交/执行验收、变更责任人和设置确认代理。涉及变更、删除和验收时，我会先回显，回复“确认”后才执行。'
+                        else: reply='我暂未理解这句话。你可以直接说“我今天要做什么”“查看我负责的事项”，或说明具体任务编号，例如“任务#15 完成80%”。'
             if sender and reply: adapter.send_text(sender,reply)
             c.commit(); c.close(); self.json(200,{'code':0})
         except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})
