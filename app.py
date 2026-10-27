@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS im_message_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE TABLE IF NOT EXISTS feishu_binding_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, action TEXT NOT NULL, old_open_id TEXT DEFAULT '', new_open_id TEXT DEFAULT '', operator TEXT DEFAULT 'local', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feishu_profile (open_id TEXT PRIMARY KEY, display_name TEXT DEFAULT '', avatar_url TEXT DEFAULT '', fetched_at TEXT NOT NULL, fetch_error TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS bot_pending_action (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, action_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, confirmed_at TEXT);
+CREATE TABLE IF NOT EXISTS bot_task_context (session_id TEXT PRIMARY KEY, user_id INTEGER, task_id INTEGER NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_state (state_hash TEXT PRIMARY KEY, expire_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_session (session_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expire_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
 """
@@ -288,6 +289,10 @@ def parse_due(text):
     if m: return f'{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}T17:00:00+08:00'
     # Conversational task changes commonly omit the year: “改到10月28号”。
     month_day=re.search(r'(?<!\d)(\d{1,2})月(\d{1,2})(?:日|号)?',normalized)
+    # Chat users often write dates as “10.28” or “10/28”.  Keep this below the
+    # full-year pattern so e.g. 2026-10-28 never loses its year.
+    if not month_day:
+        month_day=re.search(r'(?<!\d)(\d{1,2})[./](\d{1,2})(?!\d)',normalized)
     if month_day:
         today=datetime.now(timezone.utc).date(); month,day=map(int,month_day.groups()); year=today.year
         try:
@@ -366,12 +371,40 @@ def is_task_creation_request(text):
         return True
     return bool(re.search(r'请.{1,24}(?:负责|完成|推进|落实|开展|组织)',source))
 
-def feishu_task_list(c, user_id):
+def feishu_task_list(c, user_id, session_id=None):
     if not user_id:
         return '你的飞书账号尚未绑定系统成员，暂不能查询任务。'
     rows=c.execute("SELECT id,title,due_at,work_status FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id LIMIT 8",(user_id,)).fetchall()
     if not rows: return '你当前没有待完成任务。'
+    # The first item is the most urgent task and becomes the safe referent for
+    # immediate follow-ups such as “该任务截止日期改为 10.28”.
+    save_bot_task_context(c,session_id,user_id,rows[0]['id'])
     return '【我的待办】\n'+'\n'.join(f"{idx}. #{row['id']} {row['title']}（截止 {str(row['due_at'])[:10]}，{ {'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收'}.get(row['work_status'],row['work_status'])}）" for idx,row in enumerate(rows,1))
+
+def save_bot_task_context(c, session_id, user_id, task_id):
+    """Remember the task just shown/referred to for short follow-up phrases.
+
+    This is deliberately a per-session, short-lived conversational convenience;
+    the subsequent action still runs through normal ownership and confirmation
+    checks, so an ambiguous reference cannot bypass permission controls.
+    """
+    if session_id and user_id and task_id:
+        c.execute('INSERT INTO bot_task_context(session_id,user_id,task_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET user_id=excluded.user_id,task_id=excluded.task_id,updated_at=excluded.updated_at',(session_id,user_id,task_id,now()))
+
+def referenced_task_id(c, session_id, user_id, text):
+    if not re.search(r'(?:该|这|此|上面|刚才|上一条)(?:个)?任务',str(text or '')):
+        return None
+    row=c.execute("SELECT task_id,updated_at FROM bot_task_context WHERE session_id=? AND user_id=?",(session_id,user_id)).fetchone()
+    if row:
+        try:
+            if datetime.fromisoformat(row['updated_at']) >= datetime.now(timezone.utc)-timedelta(minutes=30):
+                return int(row['task_id'])
+        except (TypeError,ValueError):
+            pass
+    # If there is exactly one active task, pronouns are still unambiguous even
+    # without a prior saved context (e.g. after a service restart).
+    rows=c.execute("SELECT id FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id LIMIT 2",(user_id,)).fetchall()
+    return int(rows[0]['id']) if len(rows)==1 else None
 
 def is_task_query_request(text):
     """Recognise task-list questions in common conversational Chinese.
@@ -504,7 +537,7 @@ def save_bot_action(c, session_id, user_id, action):
 
 def plan_bot_action(c, text, user_id, session_id, allow_model=True):
     """Create an explicit, reviewable plan for non-creation work actions."""
-    source=str(text or '').strip(); tid=task_number(source); fallback_reply=None
+    source=str(text or '').strip(); tid=task_number(source) or referenced_task_id(c,session_id,user_id,source); fallback_reply=None
     if not user_id: return None,'你的飞书账号尚未绑定系统成员，暂不能执行管理操作。'
     if tid and re.search(r'(?:开始|启动).*(?:任务|#)|(?:任务|#).*?(?:开始|启动)',source):
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
@@ -1355,7 +1388,7 @@ class Handler(BaseHTTPRequestHandler):
                     elif error: reply=error
                     else:
                         intent=classify_bot_intent(text)
-                        if intent=='task_query': reply=feishu_task_list(c,uid)
+                        if intent=='task_query': reply=feishu_task_list(c,uid,session_id)
                         elif intent=='task_creation':
                             slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
                             c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))

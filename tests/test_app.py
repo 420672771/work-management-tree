@@ -69,6 +69,21 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(app.model_action_to_command({'operation':'edit_task','task_id':tid,'field':'title','value':'更新标题'}),f'任务#{tid} 任务标题改为更新标题')
             self.assertEqual(app.plan_bot_action(c,'修改任务截止日期到10月28号',pm,'feishu:ambiguous')[0],None)
         finally: c.close()
+    def test_bot_follow_up_understands_referenced_task_and_dot_date(self):
+        c=app.db()
+        try:
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            owner=c.execute("insert into user(name,department,role) values(?,?,?)",('会话指代测试员','测试','member')).lastrowid
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,approver_id,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('会话内唯一任务',owner,'2030-01-01T17:00:00+08:00','验收记录','approved',manager,app.now(),app.now())).lastrowid
+            c.commit()
+            reply=app.feishu_task_list(c,owner,'feishu:context-test')
+            self.assertIn(f'#{tid}',reply)
+            action,reply=app.plan_bot_action(c,'该任务截止日期修改为10.28',owner,'feishu:context-test')
+            self.assertEqual(action['type'],'change_due')
+            self.assertEqual(action['task_id'],tid)
+            self.assertEqual(action['due_at'][:10],'2026-10-28')
+            self.assertIn('回复“确认”',reply)
+        finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()
         try:
