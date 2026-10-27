@@ -364,13 +364,25 @@ def feishu_task_list(c, user_id):
     return '【我的待办】\n'+'\n'.join(f"{idx}. #{row['id']} {row['title']}（截止 {str(row['due_at'])[:10]}，{ {'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收'}.get(row['work_status'],row['work_status'])}）" for idx,row in enumerate(rows,1))
 
 def is_task_query_request(text):
-    """Recognise natural-language requests for the sender's task list."""
-    source=re.sub(r'\s+','',str(text or ''))
-    return bool(
-        re.search(r'(?:我的|我都|本人|今天|今日).{0,8}(?:任务|待办)',source)
-        or re.search(r'(?:我|本人).{0,8}(?:有哪些|有什么|什么).{0,8}(?:任务|待办)',source)
-        or re.search(r'(?:任务|待办).{0,8}(?:清单|查询|有哪些|有什么|什么)',source)
-    )
+    """Recognise task-list questions in common conversational Chinese.
+
+    This deliberately uses intent signals rather than a single fixed sentence: people
+    naturally say “我今天要做什么”, “查下我手上的事” or “有哪些未完成”.
+    Explicit progress reports and task mutations are excluded so they still flow to
+    their dedicated, permission-checked handlers.
+    """
+    source=re.sub(r'\s+','',str(text or '')).lower()
+    if not source or re.search(r'(?:任务|事项)?#?\d+.*(?:完成|开始|删除|验收|改为|变更)|(?:完成|开始|删除|验收|改为|变更).*(?:任务|事项)?#?\d+',source):
+        return False
+    # Direct list expressions are always a query, with or without an explicit “我”.
+    if re.search(r'(?:任务|待办|事项).{0,10}(?:清单|列表|查询|有哪些|有什么|多少|几条|全部|未完成|待处理)|(?:有哪些|有什么|多少|几条|全部).{0,10}(?:任务|待办|事项)',source):
+        return True
+    # First-person phrasing often omits “任务”, e.g. “我今天要做什么”.
+    if re.search(r'(?:我|本人|手上|当前).{0,12}(?:任务|待办|事项|要做什么|该做什么|需要做什么|负责什么|忙什么)',source):
+        return True
+    if re.search(r'(?:查|看|列|告诉).{0,8}(?:我|本人|手上|当前).{0,8}(?:任务|待办|事项|工作)',source):
+        return True
+    return bool(re.search(r'^(?:待办|任务|事项|工作)(?:清单|列表|查询)?$',source))
 
 def task_number(text):
     match=re.search(r'(?:任务|task)\s*[#编号：:\-]?\s*(\d+)',str(text or ''),re.I)
