@@ -51,6 +51,9 @@ def receive(data):
                         extracted=app.ai_audio_transcribe(blob,material['name'] or 'feishu-audio.ogg','audio/ogg') if material['type']=='audio' else app.extract_uploaded_text(blob,material['name'])
                     except Exception as exc:
                         print(f'Feishu material fetch failed: {exc}', file=sys.stderr)
+                if material['type']=='audio' and extracted:
+                    text=extracted; material=None
+            if material:
                 slots,missing=save_draft(c,sender,user,extracted or title,source_type,event_id)
                 if not user:
                     reply='已收取'+kind+'，但当前飞书账号尚未绑定系统成员，请先完成成员绑定后再确认任务。'
@@ -58,7 +61,7 @@ def receive(data):
                     reply='已提取文件内容并生成任务草稿，请在工作管理树的确认中心补全并确认。'
                 else:
                     reply='已收取'+kind+'并生成待解析草稿。请在工作管理树的确认中心补充任务内容和截止日期后确认。'
-            else:
+            if not material:
                 uid=user[0] if user else None; session_id=f'feishu:{sender}'
                 if text.strip() in ('确认','确认执行','好的确认','好的，确认','是'):
                     pending=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='pending' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,uid,app.now())).fetchone()
