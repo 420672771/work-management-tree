@@ -286,6 +286,16 @@ def parse_due(text):
     normalized=re.sub(r'\s+','',str(text or ''))
     m=re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})',normalized)
     if m: return f'{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}T17:00:00+08:00'
+    # Conversational task changes commonly omit the year: “改到10月28号”。
+    month_day=re.search(r'(?<!\d)(\d{1,2})月(\d{1,2})(?:日|号)?',normalized)
+    if month_day:
+        today=datetime.now(timezone.utc).date(); month,day=map(int,month_day.groups()); year=today.year
+        try:
+            target=datetime(year,month,day).date()
+            if target<today: target=datetime(year+1,month,day).date()
+            return target.isoformat()+'T17:00:00+08:00'
+        except ValueError:
+            return None
     weekday=re.search(r'(本周|这周|下周)?(?:星期|周)([一二三四五六日天])',normalized)
     if weekday:
         from datetime import timedelta
@@ -502,7 +512,16 @@ def plan_bot_action(c, text, user_id, session_id):
         action={'type':'edit_field','task_id':tid,'field':field,'value':value[:2000]}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟修改任务#{tid}《{task["title"]}》的{ {"title":"标题","description":"详情","deliverable":"交付物/验收标准"}[field] }。回复“确认”执行，回复“取消”放弃。'
     due=parse_due(source)
-    if tid and due and re.search(r'(?:截止|延期|日期|时间).*(?:改|调|变|为)|(?:改|调|变).*(?:截止|日期|时间)',source):
+    if due and re.search(r'(?:截止|延期|日期|时间).*(?:改|调|变|到|为)|(?:改|调|变).*(?:截止|日期|时间)',source):
+        if not tid:
+            active=c.execute("SELECT * FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id",(user_id,)).fetchall()
+            if len(active)==1:
+                tid=active[0]['id']
+            elif not active:
+                return None,'你当前没有可修改截止日期的未完成任务。'
+            else:
+                options='、'.join(f"#{row['id']} {row['title']}" for row in active[:5])
+                return None,'你有多条未完成任务，请说明任务编号，例如：任务#15 截止日期改到10月28号。可选：'+options
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         if not task: return None,f'未找到任务#{tid}。'
         if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以变更截止日期。'

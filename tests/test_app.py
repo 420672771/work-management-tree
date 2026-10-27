@@ -61,6 +61,10 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(c.execute("select status from bot_pending_action where session_id='feishu:test'").fetchone()[0],'pending')
             self.assertEqual(app.execute_bot_action(c,action,pm),'任务责任人已变更。')
             self.assertEqual(c.execute('select owner_id from task where id=?',(tid,)).fetchone()[0],target['id'])
+            self.assertEqual(app.parse_due('修改任务截止日期到10月28号')[:10],'2026-10-28')
+            action,reply=app.plan_bot_action(c,f'修改任务{tid}的截止日期到10月28号',pm,'feishu:test-due')
+            self.assertEqual(action['type'],'change_due'); self.assertEqual(action['due_at'][:10],'2026-10-28')
+            self.assertIn('回复“确认”',reply)
         finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()
