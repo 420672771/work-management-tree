@@ -18,12 +18,25 @@ class WorkTreeTests(unittest.TestCase):
             with self.assertRaises(Exception): c.execute('insert into task(title,owner_id,due_at) values(?,?,?)',('x',1,'2026-10-20'))
         finally: c.close()
     def test_time_status(self):
-        c=app.db(); c.execute("insert into task(title,owner_id,due_at,deliverable,created_at,updated_at) values(?,?,?,?,?,?)",('late',1,'2020-01-01T00:00:00+00:00','x',app.now(),app.now())); c.commit(); x=app.task_view(c,c.execute('select * from task').fetchone()); self.assertEqual(x['time_status'],'overdue'); c.close()
+        c=app.db(); c.execute("insert into task(title,owner_id,due_at,deliverable,created_at,updated_at) values(?,?,?,?,?,?)",('late',1,'2020-01-01T00:00:00+00:00','x',app.now(),app.now())); c.commit(); x=app.task_view(c,c.execute("select * from task where title='late' order by id desc").fetchone()); self.assertEqual(x['time_status'],'overdue'); c.close()
     def test_wecom_is_safe_without_credentials(self):
         for key in ('WECOM_CORP_ID','WECOM_AGENT_ID','WECOM_SECRET'): os.environ.pop(key, None)
         result=app.WeComAdapter().send('tester','test message')
         self.assertEqual(result['mode'],'dry-run')
         self.assertFalse(result['sent'])
+    def test_conversational_progress_resolves_only_a_single_active_task(self):
+        c=app.db()
+        try:
+            owner=c.execute("select id from user where role<>'manager' limit 1").fetchone()[0]
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,approver_id,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('唯一待办',owner,'2030-01-01T17:00:00+08:00','验收记录','approved',manager,app.now(),app.now())).lastrowid
+            c.commit()
+            progress,error=app.resolve_progress_message(c,'此任务已完成80%',owner)
+            self.assertIsNone(error); self.assertEqual(progress['task_id'],tid); self.assertEqual(progress['percent'],80)
+            self.assertFalse(app.is_task_creation_request('此任务已完成80%'))
+            self.assertTrue(app.is_task_creation_request('请张晨负责于2030年1月2日前完成需求评审'))
+            self.assertIn('我的待办',app.feishu_task_list(c,owner))
+        finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()
         try:

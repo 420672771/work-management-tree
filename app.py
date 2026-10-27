@@ -306,6 +306,62 @@ def parse_progress_message(text):
     blocked_match=re.search(r'(?:阻塞|风险)(?:原因)?\s*[：:]?\s*(.+)',text)
     return {'task_id':int(task_match.group(1)),'percent':percent,'comment':text.strip(),'blocked':bool(blocked_match),'block_reason':blocked_match.group(1).strip() if blocked_match else '','expected_finish':parse_due(text)}
 
+def resolve_progress_message(c, text, user_id):
+    """Resolve a progress update safely, including a single-task conversational context.
+
+    A vague phrase such as “此任务完成 80%” is only mapped automatically when the
+    sender has exactly one active task.  We prefer one clarification over updating
+    the wrong task.
+    """
+    parsed=parse_progress_message(text)
+    if parsed is None:
+        percent_match=re.search(r'(\d{1,3})\s*[%％]',text or '')
+        parsed={'task_id':None,'percent':int(percent_match.group(1)) if percent_match else (100 if re.search(r'已完成|完成了|完成$',str(text or '').strip()) else None),'comment':str(text or '').strip(),'blocked':False,'block_reason':'','expected_finish':parse_due(text)}
+    progress_words=bool(re.search(r'进度|完成\s*\d{1,3}\s*[%％]|已完成|完成了|阻塞|风险',text or ''))
+    if not progress_words:
+        return None, None
+    if not user_id:
+        return None, '你的飞书账号尚未绑定系统成员，暂不能提交进度。'
+    if parsed['percent'] is None:
+        return None, '我理解你是在反馈进度，请补充完成比例，例如：任务#15 完成 80%。'
+    task_id=parsed['task_id']
+    if not task_id and re.search(r'(此|这|当前|本)任务',text or ''):
+        rows=c.execute("SELECT id,title FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id",(user_id,)).fetchall()
+        if len(rows)==1:
+            task_id=rows[0]['id']
+        elif not rows:
+            return None, '未找到你当前可填报进度的任务。'
+        else:
+            choices='、'.join(f"#{row['id']} {row['title']}" for row in rows[:5])
+            return None, '你有多条进行中的任务，请注明任务编号，例如：任务#15 完成 80%。可选：'+choices
+    if not task_id:
+        return None, '请注明任务编号，例如：任务#15 完成 80%。'
+    task=c.execute('SELECT id,title,owner_id,approval_status FROM task WHERE id=?',(task_id,)).fetchone()
+    if not task:
+        return None, f'未找到任务#{task_id}，请确认编号。'
+    if int(task['owner_id'])!=int(user_id):
+        return None, f'任务#{task_id}《{task["title"]}》不是你的责任任务，不能代为填报。'
+    if task['approval_status']!='approved':
+        return None, f'任务#{task_id}尚未确认生效，暂不能填报进度。'
+    parsed['task_id']=task_id
+    return parsed, None
+
+def is_task_creation_request(text):
+    """Only create a draft for an explicit assignment, never for ordinary dialogue."""
+    source=str(text or '').strip()
+    if not source or re.search(r'进度|完成\s*\d{1,3}\s*[%％]|已完成|完成了|阻塞|风险|不是在新建',source):
+        return False
+    if re.search(r'^(?:新建|创建|新增|安排).{0,8}(?:任务|事项)',source):
+        return True
+    return bool(re.search(r'请.{1,24}(?:负责|完成|推进|落实|开展|组织)',source))
+
+def feishu_task_list(c, user_id):
+    if not user_id:
+        return '你的飞书账号尚未绑定系统成员，暂不能查询任务。'
+    rows=c.execute("SELECT id,title,due_at,work_status FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id LIMIT 8",(user_id,)).fetchall()
+    if not rows: return '你当前没有待完成任务。'
+    return '【我的待办】\n'+'\n'.join(f"{idx}. #{row['id']} {row['title']}（截止 {str(row['due_at'])[:10]}，{ {'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收'}.get(row['work_status'],row['work_status'])}）" for idx,row in enumerate(rows,1))
+
 def extract_document_text(data, filename=''):
     """Best-effort local extraction for common text documents; never invents content."""
     name=(filename or '').lower()
@@ -999,11 +1055,26 @@ class Handler(BaseHTTPRequestHandler):
                 try: text=json.loads(content).get('text','')
                 except Exception: text=content
             if text:
-                slots,missing=draft_slots(text,user[0] if user else None,c)
-                expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-                c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(f'feishu:{sender or "anonymous"}',user[0] if user else None,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
-                domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-                reply='已识别任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+                uid=user[0] if user else None
+                progress,error=resolve_progress_message(c,text,uid)
+                if progress:
+                    try:
+                        rid,aid,task=submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
+                        reply=f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
+                    except (ValueError,PermissionError) as exc:
+                        reply=str(exc)
+                elif error:
+                    reply=error
+                elif re.search(r'(?:我的|今天|今日).{0,4}(?:任务|待办)|(?:任务|待办).{0,4}(?:清单|查询)',text):
+                    reply=feishu_task_list(c,uid)
+                elif is_task_creation_request(text):
+                    slots,missing=draft_slots(text,uid,c)
+                    expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                    c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(f'feishu:{sender or "anonymous"}',uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
+                    domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+                    reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+                else:
+                    reply='我可以协助你：\n1. 填报进度：任务#15 完成 80%；\n2. 查询待办：我的任务；\n3. 新建任务：请张三于本周五前完成需求评审。\n如需更新当前任务，请带上任务编号，避免误操作。'
                 if sender: adapter.send_text(sender,reply)
             c.commit(); c.close(); self.json(200,{'code':0})
         except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})
