@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY AUTOINCREM
 CREATE TABLE IF NOT EXISTS im_message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, external_msg_id TEXT NOT NULL, user_id INTEGER, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(channel,external_msg_id));
 CREATE TABLE IF NOT EXISTS feishu_binding_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, action TEXT NOT NULL, old_open_id TEXT DEFAULT '', new_open_id TEXT DEFAULT '', operator TEXT DEFAULT 'local', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS feishu_profile (open_id TEXT PRIMARY KEY, display_name TEXT DEFAULT '', avatar_url TEXT DEFAULT '', fetched_at TEXT NOT NULL, fetch_error TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS bot_pending_action (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, action_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, confirmed_at TEXT);
 CREATE TABLE IF NOT EXISTS login_state (state_hash TEXT PRIMARY KEY, expire_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_session (session_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expire_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
 """
@@ -361,6 +362,142 @@ def feishu_task_list(c, user_id):
     rows=c.execute("SELECT id,title,due_at,work_status FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id LIMIT 8",(user_id,)).fetchall()
     if not rows: return '你当前没有待完成任务。'
     return '【我的待办】\n'+'\n'.join(f"{idx}. #{row['id']} {row['title']}（截止 {str(row['due_at'])[:10]}，{ {'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收'}.get(row['work_status'],row['work_status'])}）" for idx,row in enumerate(rows,1))
+
+def task_number(text):
+    match=re.search(r'(?:任务|task)\s*[#编号：:\-]?\s*(\d+)',str(text or ''),re.I)
+    return int(match.group(1)) if match else None
+
+def user_by_name(c, name):
+    return c.execute('SELECT * FROM user WHERE name=? ORDER BY id LIMIT 1',(name,)).fetchone()
+
+def bot_can_manage_task(c, user_id, task):
+    if not user_id or not task: return False
+    role=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone()
+    return int(user_id)==int(task['owner_id']) or bool(role and role['role'] in ('manager','pm'))
+
+def save_bot_action(c, session_id, user_id, action):
+    expiry=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat()
+    c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND status='pending'",(session_id,))
+    return c.execute('INSERT INTO bot_pending_action(session_id,user_id,action_json,expire_at,created_at) VALUES(?,?,?,?,?)',(session_id,user_id,json.dumps(action,ensure_ascii=False),expiry,now())).lastrowid
+
+def plan_bot_action(c, text, user_id, session_id):
+    """Create an explicit, reviewable plan for non-creation work actions."""
+    source=str(text or '').strip(); tid=task_number(source)
+    if not user_id: return None,'你的飞书账号尚未绑定系统成员，暂不能执行管理操作。'
+    if tid and re.search(r'(?:开始|启动).*(?:任务|#)|(?:任务|#).*?(?:开始|启动)',source):
+        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        if not task: return None,f'未找到任务#{tid}。'
+        if int(task['owner_id'])!=int(user_id): return None,'只有任务责任人可以开始任务。'
+        if task['work_status']!='assigned': return None,f'任务#{tid}当前不是待开始状态。'
+        action={'type':'start_task','task_id':tid}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟开始任务#{tid}《{task["title"]}》。回复“确认”执行，回复“取消”放弃。'
+    if tid and re.search(r'(?:提交验收|完成并提交|完成任务).*(?:任务|#)|(?:任务|#).*?(?:提交验收|完成并提交|完成任务)',source):
+        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        if not task: return None,f'未找到任务#{tid}。'
+        if int(task['owner_id'])!=int(user_id): return None,'只有任务责任人可以提交验收。'
+        if task['work_status']!='in_progress': return None,f'任务#{tid}当前不是进行中状态。'
+        action={'type':'submit_acceptance','task_id':tid}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟提交任务#{tid}《{task["title"]}》等待上级验收。回复“确认”执行，回复“取消”放弃。'
+    if re.search(r'(?:删除|移除|作废).*(?:任务|#)',source):
+        if not tid: return None,'请注明要删除的任务编号，例如：删除任务#15。'
+        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        if not task: return None,f'未找到任务#{tid}。'
+        if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以删除任务。'
+        action={'type':'delete_task','task_id':tid}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟删除任务#{tid}《{task["title"]}》及其确认、进度、验收记录。回复“确认”执行，回复“取消”放弃。'
+    if '验收' in source and re.search(r'(?:验收|通过|驳回).*(?:任务|#)|(?:任务|#).*?(?:验收|通过|驳回)',source):
+        if not tid: return None,'请注明要验收的任务编号，例如：验收任务#15 通过。'
+        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        if not task: return None,f'未找到任务#{tid}。'
+        if task['work_status']!='awaiting_acceptance': return None,f'任务#{tid}当前不是待验收状态。'
+        approver=task['approver_id'] or approver_for(c,task['owner_id'])
+        if int(approver or 0)!=int(user_id): return None,'只有该任务责任人的上级确认人可以验收。'
+        result='rejected' if '驳回' in source else 'passed'
+        action={'type':'accept_task','task_id':tid,'result':result}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟{("驳回" if result=="rejected" else "验收通过")}任务#{tid}《{task["title"]}》。回复“确认”执行，回复“取消”放弃。'
+    if tid and re.search(r'(?:确认任务|任务确认|确认进度|进度确认).*(?:通过|驳回)|(?:通过|驳回).*(?:确认任务|任务确认|确认进度|进度确认)',source):
+        kind='progress_confirm' if '进度' in source else 'task_confirm'; result='rejected' if '驳回' in source else 'approved'
+        approval=c.execute("SELECT * FROM approval_record WHERE task_id=? AND biz_type=? AND status='pending' ORDER BY id DESC LIMIT 1",(tid,kind)).fetchone()
+        if not approval: return None,f'任务#{tid}没有待处理的{("进度" if kind=="progress_confirm" else "任务")}确认。'
+        if int(approval['approver_id'] or 0)!=int(user_id): return None,'只有指定确认人可以执行该确认。'
+        action={'type':'confirm_approval','approval_id':approval['id'],'result':result}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟{("驳回" if result=="rejected" else "通过")}任务#{tid}的{("进度" if kind=="progress_confirm" else "任务")}确认。回复“确认”执行，回复“取消”放弃。'
+    owner_match=re.search(r'(?:责任人|负责人)(?:改为|变更为|调整为|为)\s*([\u4e00-\u9fffA-Za-z·]{2,20})',source)
+    if owner_match and tid:
+        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone(); target=user_by_name(c,owner_match.group(1))
+        if not task: return None,f'未找到任务#{tid}。'
+        if not target: return None,f'未找到成员“{owner_match.group(1)}”。'
+        if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以变更责任人。'
+        action={'type':'change_owner','task_id':tid,'owner_id':target['id']}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟将任务#{tid}《{task["title"]}》的责任人变更为{target["name"]}。回复“确认”执行，回复“取消”放弃。'
+    field_match=re.search(r'(?:任务标题|标题|任务详情|详情|验收标准|交付物)\s*(?:改为|变更为|调整为)\s*[：:]?\s*(.+)$',source)
+    if tid and field_match:
+        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        if not task: return None,f'未找到任务#{tid}。'
+        if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以修改任务。'
+        field='title' if ('标题' in field_match.group(0) and '详情' not in field_match.group(0)) else ('deliverable' if ('验收' in field_match.group(0) or '交付物' in field_match.group(0)) else 'description')
+        value=field_match.group(1).strip('。；; ')
+        if not value: return None,'请补充修改后的内容。'
+        action={'type':'edit_field','task_id':tid,'field':field,'value':value[:2000]}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟修改任务#{tid}《{task["title"]}》的{ {"title":"标题","description":"详情","deliverable":"交付物/验收标准"}[field] }。回复“确认”执行，回复“取消”放弃。'
+    due=parse_due(source)
+    if tid and due and re.search(r'(?:截止|延期|日期|时间).*(?:改|调|变|为)|(?:改|调|变).*(?:截止|日期|时间)',source):
+        task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        if not task: return None,f'未找到任务#{tid}。'
+        if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以变更截止日期。'
+        action={'type':'change_due','task_id':tid,'due_at':due}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟将任务#{tid}《{task["title"]}》截止日期调整为{due[:10]}。回复“确认”执行，回复“取消”放弃。'
+    delegate=re.search(r'([\u4e00-\u9fffA-Za-z·]{2,20})\s*(?:代理|代为确认)\s*([\u4e00-\u9fffA-Za-z·]{2,20})',source)
+    if delegate:
+        principal=user_by_name(c,delegate.group(1)); proxy=user_by_name(c,delegate.group(2))
+        if not principal or not proxy: return None,'未能识别被代理确认人或代理人，请使用系统内成员姓名。'
+        actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone()
+        if int(user_id)!=int(principal['id']) and not (actor and actor['role'] in ('manager','pm')): return None,'只能为自己设置确认代理；管理PM或部门负责人可代为配置。'
+        dates=re.findall(r'\d{4}[年\-/]\d{1,2}[月\-/]\d{1,2}日?',source)
+        start=parse_due(dates[0]) if dates else datetime.now(timezone.utc).date().isoformat()+'T00:00:00+08:00'
+        end=parse_due(dates[1]) if len(dates)>1 else (datetime.now(timezone.utc)+timedelta(days=7)).date().isoformat()+'T23:59:59+08:00'
+        action={'type':'set_delegate','user_id':principal['id'],'delegate_user_id':proxy['id'],'start_at':start,'end_at':end}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟设置{principal["name"]}的确认代理为{proxy["name"]}（{start[:10]} 至 {end[:10]}）。回复“确认”执行，回复“取消”放弃。'
+    return None,None
+
+def execute_bot_action(c, action, user_id):
+    typ=action['type']; t=now()
+    if typ in ('start_task','submit_acceptance'):
+        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone(); expected='assigned' if typ=='start_task' else 'in_progress'
+        if not task or int(task['owner_id'])!=int(user_id) or task['work_status']!=expected: raise PermissionError('当前无法执行该任务状态变更')
+        status='in_progress' if typ=='start_task' else 'awaiting_acceptance'; c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',(status,t,task['id'])); audit(c,'task',task['id'],typ,str(user_id)); return '任务已开始。' if typ=='start_task' else '已提交验收，等待上级确认。'
+    if typ=='delete_task':
+        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
+        if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权删除该任务')
+        c.execute('DELETE FROM approval_record WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM progress_record WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM feedback WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM acceptance WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM task WHERE id=?',(task['id'],)); audit(c,'task',action['task_id'],'delete',str(user_id),before=rowdict(task)); return '任务已删除。'
+    if typ=='accept_task':
+        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone(); approver=task['approver_id'] or approver_for(c,task['owner_id']) if task else None
+        if not task or task['work_status']!='awaiting_acceptance' or int(approver or 0)!=int(user_id): raise PermissionError('当前无权验收该任务')
+        c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(task['id'],user_id,action['result'],'飞书机器人操作',t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if action['result']=='passed' else 'in_progress',t,task['id'])); audit(c,'task',task['id'],'accept' if action['result']=='passed' else 'reject',str(user_id)); return '已'+('验收通过。' if action['result']=='passed' else '驳回任务，已退回责任人继续处理。')
+    if typ=='change_owner':
+        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
+        if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权变更该任务责任人')
+        c.execute('UPDATE task SET owner_id=?,approver_id=?,updated_at=? WHERE id=?',(action['owner_id'],approver_for(c,action['owner_id']),t,task['id'])); audit(c,'task',task['id'],'change_owner',str(user_id),before=rowdict(task),after=action); return '任务责任人已变更。'
+    if typ=='change_due':
+        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
+        if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权变更截止日期')
+        c.execute('UPDATE task SET due_at=?,updated_at=? WHERE id=?',(action['due_at'],t,task['id'])); audit(c,'task',task['id'],'change_due',str(user_id),before=rowdict(task),after=action); return '任务截止日期已调整。'
+    if typ=='edit_field':
+        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
+        if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权修改该任务')
+        if action['field'] not in ('title','description','deliverable'): raise ValueError('不支持的修改字段')
+        c.execute(f"UPDATE task SET {action['field']}=?,updated_at=? WHERE id=?",(action['value'],t,task['id'])); audit(c,'task',task['id'],'edit_'+action['field'],str(user_id),before=rowdict(task),after=action); return '任务内容已修改。'
+    if typ=='confirm_approval':
+        approval=c.execute("SELECT * FROM approval_record WHERE id=? AND status='pending'",(action['approval_id'],)).fetchone()
+        if not approval or int(approval['approver_id'] or 0)!=int(user_id): raise PermissionError('当前无权执行该确认')
+        c.execute('UPDATE approval_record SET status=?,operated_by=?,operated_at=? WHERE id=?',(action['result'],user_id,t,approval['id']))
+        if approval['biz_type']=='task_confirm': c.execute("UPDATE task SET approval_status=?,work_status=?,confirmed_by=?,confirmed_at=?,confirm_source='feishu',updated_at=? WHERE id=?",('approved' if action['result']=='approved' else 'rejected','assigned' if action['result']=='approved' else 'draft',user_id,t,t,approval['task_id']))
+        elif approval['biz_type']=='progress_confirm' and action['result']=='approved':
+            record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone(); c.execute('UPDATE progress_record SET status=?,effective_percent=?,confirmed_by=?,confirmed_at=? WHERE id=?',('approved',record['reported_percent'],user_id,t,record['id'])); c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],'completed' if record['reported_percent']==100 else 'in_progress',t,approval['task_id']))
+        audit(c,'approval',approval['id'],action['result'],str(user_id),after=action); return '确认已通过。' if action['result']=='approved' else '已驳回。'
+    if typ=='set_delegate':
+        c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(action['user_id'],action['delegate_user_id'],'approval',action['start_at'],action['end_at'])); audit(c,'delegate',action['user_id'],'create',str(user_id),after=action); return '确认代理已设置。'
+    raise ValueError('不支持的机器人操作')
 
 def extract_document_text(data, filename=''):
     """Best-effort local extraction for common text documents; never invents content."""
@@ -1050,32 +1187,43 @@ class Handler(BaseHTTPRequestHandler):
             c=db(); user=c.execute('SELECT id FROM user WHERE feishu_open_id=?',(sender,)).fetchone() if sender else None
             try: c.execute('INSERT INTO im_message_log(channel,external_msg_id,user_id,payload_json,created_at) VALUES(?,?,?,?,?)',('feishu',event_id,user[0] if user else None,json.dumps(payload,ensure_ascii=False),now()))
             except sqlite3.IntegrityError: c.close(); return self.json(200,{'code':0})
-            text='';
-            if message.get('message_type')=='text':
+            text=''; reply=''; message_type=message.get('message_type')
+            if message_type=='text':
                 try: text=json.loads(content).get('text','')
                 except Exception: text=content
+            elif message_type=='audio':
+                try:
+                    audio=json.loads(content); raw=adapter.download_message_resource(message.get('message_id'),audio.get('file_key'),'file')
+                    text=ai_audio_transcribe(raw,audio.get('file_name') or 'feishu-audio.ogg','audio/ogg')
+                except Exception as exc: reply='暂未能识别这段语音：'+str(exc)+'。请改发文字，或联系管理员配置语音转写能力。'
             if text:
-                uid=user[0] if user else None
-                progress,error=resolve_progress_message(c,text,uid)
-                if progress:
-                    try:
-                        rid,aid,task=submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
-                        reply=f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
-                    except (ValueError,PermissionError) as exc:
-                        reply=str(exc)
-                elif error:
-                    reply=error
-                elif re.search(r'(?:我的|今天|今日).{0,4}(?:任务|待办)|(?:任务|待办).{0,4}(?:清单|查询)',text):
-                    reply=feishu_task_list(c,uid)
-                elif is_task_creation_request(text):
-                    slots,missing=draft_slots(text,uid,c)
-                    expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-                    c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(f'feishu:{sender or "anonymous"}',uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
-                    domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-                    reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+                uid=user[0] if user else None; session_id=f'feishu:{sender or "anonymous"}'
+                if re.fullmatch(r'\s*(?:确认|确认执行|好的，?确认|是)\s*',text):
+                    pending=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='pending' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,uid,now())).fetchone()
+                    if not pending: reply='没有待确认的操作。请先告诉我需要执行什么。'
+                    else:
+                        try: reply=execute_bot_action(c,json.loads(pending['action_json']),uid); c.execute("UPDATE bot_pending_action SET status='executed',confirmed_at=? WHERE id=?",(now(),pending['id']))
+                        except (ValueError,PermissionError) as exc: reply='操作未执行：'+str(exc); c.execute("UPDATE bot_pending_action SET status='failed',confirmed_at=? WHERE id=?",(now(),pending['id']))
+                elif re.fullmatch(r'\s*(?:取消|取消操作|不确认|否)\s*',text):
+                    c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status='pending'",(now(),session_id,uid)); reply='已取消待执行操作。'
                 else:
-                    reply='我可以协助你：\n1. 填报进度：任务#15 完成 80%；\n2. 查询待办：我的任务；\n3. 新建任务：请张三于本周五前完成需求评审。\n如需更新当前任务，请带上任务编号，避免误操作。'
-                if sender: adapter.send_text(sender,reply)
+                    action,action_reply=plan_bot_action(c,text,uid,session_id)
+                    progress,error=resolve_progress_message(c,text,uid) if not action else (None,None)
+                    if action: reply=action_reply
+                    elif progress:
+                        try:
+                            rid,aid,task=submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
+                            reply=f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
+                        except (ValueError,PermissionError) as exc: reply=str(exc)
+                    elif error: reply=error
+                    elif re.search(r'(?:我的|今天|今日).{0,4}(?:任务|待办)|(?:任务|待办).{0,4}(?:清单|查询)',text): reply=feishu_task_list(c,uid)
+                    elif is_task_creation_request(text):
+                        slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                        c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
+                        domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+                        reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+                    else: reply='我可以协助你：\n• 填报进度：任务#15 完成 80%\n• 查询待办：我的任务\n• 新建任务：请张三于本周五前完成需求评审\n• 修改任务：任务#15 截止日期改为2026年11月3日\n• 变更责任人：任务#15 责任人改为钱缘\n• 删除任务：删除任务#15\n• 验收任务：验收任务#15 通过\n• 设置代理：钱缘代理刘明\n涉及变更、删除和验收时，我会先回显，回复“确认”后才执行。'
+            if sender and reply: adapter.send_text(sender,reply)
             c.commit(); c.close(); self.json(200,{'code':0})
         except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})
     def handle_wecom_post(self):

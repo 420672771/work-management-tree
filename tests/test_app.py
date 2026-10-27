@@ -37,6 +37,20 @@ class WorkTreeTests(unittest.TestCase):
             self.assertTrue(app.is_task_creation_request('请张晨负责于2030年1月2日前完成需求评审'))
             self.assertIn('我的待办',app.feishu_task_list(c,owner))
         finally: c.close()
+    def test_bot_sensitive_actions_require_a_plan_before_execution(self):
+        c=app.db()
+        try:
+            pm=c.execute("select id from user where role='pm' limit 1").fetchone()[0]
+            owner=c.execute("select id from user where role<>'manager' and id<>? limit 1",(pm,)).fetchone()[0]
+            target=c.execute("select * from user where id<>? limit 1",(owner,)).fetchone()
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,approver_id,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('机器人变更',owner,'2030-01-01T17:00:00+08:00','记录','approved',manager,app.now(),app.now())).lastrowid; c.commit()
+            action,reply=app.plan_bot_action(c,f'任务#{tid} 责任人改为{target["name"]}',pm,'feishu:test')
+            self.assertEqual(action['type'],'change_owner'); self.assertIn('回复“确认”',reply)
+            self.assertEqual(c.execute("select status from bot_pending_action where session_id='feishu:test'").fetchone()[0],'pending')
+            self.assertEqual(app.execute_bot_action(c,action,pm),'任务责任人已变更。')
+            self.assertEqual(c.execute('select owner_id from task where id=?',(tid,)).fetchone()[0],target['id'])
+        finally: c.close()
     def test_task_view_preserves_separate_risk_and_time_states(self):
         c=app.db()
         try:
