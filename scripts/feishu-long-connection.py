@@ -45,10 +45,10 @@ def receive(data):
                 source_type='feishu_audio' if material['type']=='audio' else 'feishu_document'
                 title=f"{kind}材料：{material['name'] or '未命名材料'}"
                 extracted=''
-                if material['type']=='file' and material['file_key']:
+                if material['file_key']:
                     try:
                         blob=app.FeishuAdapter().download_message_resource(message.get('message_id',''),material['file_key'])
-                        extracted=app.extract_document_text(blob,material['name'])
+                        extracted=app.ai_audio_transcribe(blob,material['name'] or 'feishu-audio.ogg','audio/ogg') if material['type']=='audio' else app.extract_uploaded_text(blob,material['name'])
                     except Exception as exc:
                         print(f'Feishu material fetch failed: {exc}', file=sys.stderr)
                 slots,missing=save_draft(c,sender,user,extracted or title,source_type,event_id)
@@ -59,27 +59,34 @@ def receive(data):
                 else:
                     reply='已收取'+kind+'并生成待解析草稿。请在工作管理树的确认中心补充任务内容和截止日期后确认。'
             else:
-                progress=app.parse_progress_message(text)
-                if progress:
-                    if not user:
-                        reply='已识别为任务进度，但当前飞书账号尚未绑定系统成员，请先完成成员绑定。'
-                    elif progress['percent'] is None:
-                        reply=f"已识别任务#{progress['task_id']}。请补充完成比例，例如：任务#{progress['task_id']} 完成 60%。"
+                uid=user[0] if user else None; session_id=f'feishu:{sender}'
+                if text.strip() in ('确认','确认执行','好的确认','好的，确认','是'):
+                    pending=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='pending' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,uid,app.now())).fetchone()
+                    if not pending: reply='没有待确认的操作。请先告诉我需要执行什么。'
                     else:
                         try:
-                            _,_,task=app.submit_progress(c,progress['task_id'],user[0],progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
-                            reply=f"已提交《{task['title']}》进度 {progress['percent']}%，等待上级确认后生效。"
-                        except PermissionError:
-                            reply='该任务的进度只能由任务责任人提交。'
-                        except ValueError as exc:
-                            reply='进度提交未成功：'+str(exc)
+                            reply=app.execute_bot_action(c,json.loads(pending['action_json']),uid); c.execute("UPDATE bot_pending_action SET status='executed',confirmed_at=? WHERE id=?",(app.now(),pending['id']))
+                        except (ValueError,PermissionError) as exc:
+                            reply='操作未执行：'+str(exc); c.execute("UPDATE bot_pending_action SET status='failed',confirmed_at=? WHERE id=?",(app.now(),pending['id']))
+                elif text.strip() in ('取消','取消操作','不确认','否'):
+                    c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status='pending'",(app.now(),session_id,uid)); reply='已取消待执行操作。'
                 else:
-                    slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
-                    if user:
-                        missing_text=app.friendly_slot_labels(missing)
-                        reply='已识别任务草稿：'+slots['title']+('。请补充：'+missing_text if missing else '。已进入待确认草稿，请在工作管理树中确认生成。')
+                    action,reply=app.plan_bot_action(c,text,uid,session_id)
+                    progress,error=app.resolve_progress_message(c,text,uid) if not action else (None,None)
+                    if action: pass
+                    elif progress:
+                        try:
+                            _,_,task=app.submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
+                            reply=f"已记录《{task['title']}》进度 {progress['percent']}%，已提交上级确认。"
+                        except (ValueError,PermissionError) as exc: reply='进度提交未成功：'+str(exc)
+                    elif error: reply=error
+                    elif app.re.search(r'(?:我的|今天|今日).{0,4}(?:任务|待办)|(?:任务|待办).{0,4}(?:清单|查询)',text): reply=app.feishu_task_list(c,uid)
+                    elif app.is_task_creation_request(text):
+                        slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
+                        domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+                        reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+app.friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
                     else:
-                        reply='已识别任务草稿：'+slots['title']+'。当前飞书账号尚未绑定系统成员，请管理员在“组织配置 → 飞书成员绑定”中完成绑定；绑定后再次发送即可自动带入责任人。'
+                        reply='我可以协助你：查询待办、填报进度、新建/修改/删除任务、验收、变更责任人和设置确认代理。涉及变更操作时，我会先回显，回复“确认”后执行。'
             # Persist the event and draft before calling the remote send API. A transient
             # Feishu send failure must not cause the event receiver to fail or retry-create.
             c.commit()
