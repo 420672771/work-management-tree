@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PORT="${PORT:-8080}"
+# 当前试点服务由用户空间 systemd 以 5100 对外提供；仍可通过 PORT 覆盖。
+PORT="${PORT:-5100}"
 for attempt in 1 2 3 4 5; do
   if python3 - <<PY
 import base64, json, os, sys, urllib.request
