@@ -122,6 +122,23 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(x['risk_status'],'blocked')
             self.assertEqual(x['time_status'],'overdue')
         finally: c.close()
+
+    def test_performance_uses_weighted_hours_quality_and_timeliness(self):
+        c=app.db()
+        try:
+            owner=c.execute("select id from user where role<>'manager' limit 1").fetchone()[0]
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,priority,task_type,estimated_hours,complexity,approval_status,approver_id,work_status,created_at,updated_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",('绩效专项',owner,'2030-01-10T17:00:00+08:00','验收记录','P0','PROJECT',10,'complex','approved',manager,'completed',app.now(),app.now())).lastrowid
+            c.execute("insert into acceptance(task_id,acceptor_id,result,created_at) values(?,?,?,?)",(tid,manager,'passed','2030-01-09T10:00:00+08:00'))
+            c.execute("insert into progress_record(task_id,reported_percent,report_text,reported_at) values(?,?,?,?)",(tid,100,'按计划完成','2030-01-08T10:00:00+08:00'))
+            c.commit()
+            report=app.performance_summary(c,owner,'2030-01')
+            item=next(x for x in report['evidence'] if x['task_id']==tid)
+            self.assertEqual(item['base_points'],36.0) # 10h * 2.0 * 1.5 * 1.2
+            self.assertEqual(item['earned_points'],36.0)
+            self.assertGreaterEqual(report['delivery'],0)
+            self.assertIn('score',report)
+        finally: c.close()
     def test_v2_reporting_line_and_progress_confirmation_models(self):
         c=app.db()
         try:

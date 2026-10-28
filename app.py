@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS bot_pending_action (id INTEGER PRIMARY KEY AUTOINCREM
 CREATE TABLE IF NOT EXISTS bot_task_context (session_id TEXT PRIMARY KEY, user_id INTEGER, task_id INTEGER NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scheduled_report (id INTEGER PRIMARY KEY AUTOINCREMENT, created_by INTEGER NOT NULL, receiver_id INTEGER NOT NULL, scope TEXT NOT NULL DEFAULT 'self', frequency TEXT NOT NULL DEFAULT 'daily', schedule_time TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scheduled_report_run (id INTEGER PRIMARY KEY AUTOINCREMENT, schedule_id INTEGER NOT NULL, run_date TEXT NOT NULL, sent_at TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}', UNIQUE(schedule_id,run_date));
+CREATE TABLE IF NOT EXISTS performance_config (config_key TEXT PRIMARY KEY, config_json TEXT NOT NULL, updated_at TEXT NOT NULL, updated_by INTEGER);
+CREATE TABLE IF NOT EXISTS performance_adjustment (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL, score_delta REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL, created_by INTEGER, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_state (state_hash TEXT PRIMARY KEY, expire_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_session (session_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expire_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
 """
@@ -50,7 +52,7 @@ def feishu_redirect_uri():
     return base+'/auth/feishu/callback' if base else ''
 def db():
     c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA)
-    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT"):
+    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
     return c
@@ -281,6 +283,88 @@ def task_view(c, r):
     progress=c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC LIMIT 1',(d['id'],)).fetchone()
     d['latest_progress']=rowdict(progress)
     return d
+
+# 绩效只对已确认生效的任务计算。标准工时用于衡量工作量，实际工时只用于负荷与估算偏差分析。
+PERFORMANCE_DEFAULTS={
+    'priority':{'P0':1.5,'P1':1.2,'P2':1.0},
+    'complexity':{'simple':1.0,'general':1.5,'complex':2.0,'major':3.0},
+    'type':{'ROUTINE':1.0,'PROJECT':1.2,'ADHOC':1.1},
+    'role_weights':{
+        'member':{'delivery':40,'quality':25,'timeliness':20,'process':15,'management':0},
+        'leader':{'delivery':25,'quality':20,'timeliness':15,'process':10,'management':30},
+        'pm':{'delivery':20,'quality':15,'timeliness':20,'process':15,'management':30},
+        'manager':{'delivery':0,'quality':0,'timeliness':0,'process':0,'management':100},
+    }
+}
+
+def performance_config(c):
+    row=c.execute("SELECT config_json FROM performance_config WHERE config_key='default'").fetchone()
+    if not row: return json.loads(json.dumps(PERFORMANCE_DEFAULTS))
+    try:
+        value=json.loads(row['config_json'])
+        return {**json.loads(json.dumps(PERFORMANCE_DEFAULTS)),**value}
+    except Exception: return json.loads(json.dumps(PERFORMANCE_DEFAULTS))
+
+def performance_period(period=None, start=None, end=None):
+    if start and end: return str(start)[:10],str(end)[:10]
+    raw=str(period or datetime.now(timezone.utc).strftime('%Y-%m'))
+    try:
+        from calendar import monthrange
+        year,month=map(int,raw[:7].split('-')); return f'{year:04d}-{month:02d}-01',f'{year:04d}-{month:02d}-{monthrange(year,month)[1]:02d}'
+    except Exception: raise ValueError('period must be YYYY-MM or provide start/end dates')
+
+def position_name_for(c,user_id):
+    row=c.execute("SELECT p.name FROM user_position up JOIN org_position p ON p.id=up.position_id WHERE up.user_id=? AND (up.valid_to IS NULL OR up.valid_to>?) ORDER BY up.is_primary DESC,up.id DESC LIMIT 1",(user_id,now())).fetchone()
+    return row['name'] if row else ''
+
+def performance_role(c,user):
+    if user['role']=='manager': return 'manager'
+    if user['role']=='pm': return 'pm'
+    position=position_name_for(c,user['id']).lower()
+    return 'leader' if 'leader' in position else 'member'
+
+def task_performance(c,task,config=None):
+    config=config or performance_config(c); priority=config['priority'].get(task['priority'],1.0)
+    complexity=config['complexity'].get(task.get('complexity') or 'general',1.5)
+    task_type=config['type'].get(task.get('task_type') or 'PROJECT',1.2)
+    fallback={'ROUTINE':2,'PROJECT':8,'ADHOC':4}.get(task.get('task_type') or 'PROJECT',8)
+    hours=float(task.get('estimated_hours') or fallback)
+    base=round(hours*complexity*priority*task_type,2)
+    accepts=[rowdict(x) for x in c.execute('SELECT * FROM acceptance WHERE task_id=? ORDER BY id',(task['id'],))]
+    passed=[x for x in accepts if x['result']=='passed']; rejected=[x for x in accepts if x['result']=='rejected']
+    completed=task['work_status']=='completed' and bool(passed or task.get('effective_percent')==100)
+    actual_at=(passed[-1]['created_at'] if passed else task.get('updated_at','')) if completed else ''
+    on_time=bool(completed and actual_at and str(actual_at)[:10]<=str(task['due_at'])[:10])
+    quality=1.0 if completed and not rejected else (.8 if completed and len(rejected)==1 else (.6 if completed and rejected else 0))
+    days_late=0
+    if completed and actual_at:
+        try: days_late=max(0,(datetime.fromisoformat(str(actual_at).replace('Z','+00:00')).date()-datetime.fromisoformat(str(task['due_at']).replace('Z','+00:00')).date()).days)
+        except Exception: days_late=0
+    timeliness=1.0 if on_time else (.9 if days_late<=3 else (.75 if days_late<=7 else (.5 if completed else 0)))
+    progress_count=c.execute('SELECT count(*) FROM progress_record WHERE task_id=?',(task['id'],)).fetchone()[0]
+    risk_count=c.execute("SELECT count(*) FROM progress_record WHERE task_id=? AND is_blocked=1",(task['id'],)).fetchone()[0]
+    return {'task_id':task['id'],'base_points':base,'estimated_hours':hours,'actual_hours':float(task.get('actual_hours') or 0),'complexity_factor':complexity,'priority_factor':priority,'type_factor':task_type,'completed':completed,'on_time':on_time,'quality_factor':quality,'timeliness_factor':timeliness,'earned_points':round(base*quality*timeliness,2) if completed else 0,'days_late':days_late,'progress_count':progress_count,'risk_count':risk_count}
+
+def performance_summary(c,user_id,period=None,start=None,end=None):
+    start,end=performance_period(period,start,end); config=performance_config(c)
+    user=c.execute('SELECT * FROM user WHERE id=?',(user_id,)).fetchone()
+    if not user: raise ValueError('user not found')
+    tasks=[rowdict(x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' AND owner_id=? AND substr(due_at,1,10)>=? AND substr(due_at,1,10)<=? ORDER BY due_at,id",(user_id,start,end))]
+    scored=[task_performance(c,x,config) for x in tasks]
+    base=sum(x['base_points'] for x in scored); earned=sum(x['earned_points'] for x in scored); completed=[x for x in scored if x['completed']]
+    delivery=round(100*earned/base,1) if base else 0
+    timeliness=round(100*sum(x['base_points'] for x in completed if x['on_time'])/sum(x['base_points'] for x in completed),1) if completed else 0
+    quality=round(100*sum(x['base_points']*x['quality_factor'] for x in completed)/sum(x['base_points'] for x in completed),1) if completed else 0
+    process=round(100*sum(1 for x in scored if x['progress_count'])/len(scored),1) if scored else 0
+    role=performance_role(c,user); weights=config['role_weights'][role]
+    management=0
+    if role in ('leader','pm','manager'):
+        managed=managed_user_ids(c,user_id) if role=='leader' else [x['id'] for x in c.execute("SELECT id FROM user WHERE role<>'manager'")]
+        child=[performance_summary(c,uid,start=start,end=end) for uid in managed if uid!=user_id]
+        management=round(sum(x['delivery'] for x in child)/len(child),1) if child else 0
+    total=round(delivery*weights['delivery']/100+quality*weights['quality']/100+timeliness*weights['timeliness']/100+process*weights['process']/100+management*weights['management']/100,1)
+    adjustments=sum(x[0] for x in c.execute('SELECT score_delta FROM performance_adjustment WHERE user_id=? AND period_start=? AND period_end=?',(user_id,start,end)))
+    return {'period_start':start,'period_end':end,'user':rowdict(user),'position':position_name_for(c,user_id),'performance_role':role,'weights':weights,'task_count':len(scored),'completed_count':len(completed),'base_points':round(base,2),'earned_points':round(earned,2),'estimated_hours':round(sum(x['estimated_hours'] for x in scored),1),'actual_hours':round(sum(x['actual_hours'] for x in scored),1),'delivery':delivery,'timeliness':timeliness,'quality':quality,'process':process,'management':management,'raw_score':total,'adjustment':round(adjustments,1),'score':round(total+adjustments,1),'evidence':[{**task_performance(c,t,config),**{'title':t['title'],'task_type':t.get('task_type'),'priority':t['priority'],'complexity':t.get('complexity'),'due_at':t['due_at'],'work_status':t['work_status'],'deliverable':t['deliverable']}} for t in tasks]}
 
 def parse_due(text):
     # Meeting minutes commonly write dates as “2026 年 10 月 30 日前”.
@@ -1241,6 +1325,28 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/ops/daily-preview': out={'date':q.get('date',[None])[0] or datetime.now(timezone.utc).date().isoformat(),'targets':daily_targets(c,q.get('date',[None])[0])}
         elif p.path=='/api/dashboard':
             tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; today=datetime.now(timezone.utc).date().isoformat(); out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]}
+        elif p.path=='/api/performance/config': out=performance_config(c)
+        elif p.path=='/api/performance/personal':
+            actor=self.actor_id(q.get('actor_id',[None])[0]); target=int(q.get('user_id',[actor])[0] or actor or 0)
+            actor_row=c.execute('SELECT * FROM user WHERE id=?',(actor,)).fetchone() if actor else None
+            allowed=actor==target or (actor_row and actor_row['role'] in ('manager','pm')) or (actor and target in managed_user_ids(c,actor))
+            if not allowed: return self.json(403,{'error':'无权查看该成员绩效'})
+            out=performance_summary(c,target,q.get('period',[None])[0],q.get('start',[None])[0],q.get('end',[None])[0])
+        elif p.path=='/api/performance/team':
+            actor=self.actor_id(q.get('actor_id',[None])[0]); actor_row=c.execute('SELECT * FROM user WHERE id=?',(actor,)).fetchone() if actor else None
+            if not actor_row: return self.json(400,{'error':'请选择查看身份'})
+            user_ids=[x['id'] for x in c.execute("SELECT id FROM user WHERE role<>'manager'")] if actor_row['role'] in ('manager','pm') else managed_user_ids(c,actor)
+            reports=[performance_summary(c,uid,q.get('period',[None])[0],q.get('start',[None])[0],q.get('end',[None])[0]) for uid in user_ids if uid!=actor]
+            out={'period_start':reports[0]['period_start'] if reports else performance_period(q.get('period',[None])[0])[0],'period_end':reports[0]['period_end'] if reports else performance_period(q.get('period',[None])[0])[1],'members':reports,'summary':{'member_count':len(reports),'base_points':round(sum(x['base_points'] for x in reports),2),'earned_points':round(sum(x['earned_points'] for x in reports),2),'estimated_hours':round(sum(x['estimated_hours'] for x in reports),1),'actual_hours':round(sum(x['actual_hours'] for x in reports),1),'average_score':round(sum(x['score'] for x in reports)/len(reports),1) if reports else 0}}
+        elif p.path=='/api/performance/department':
+            actor=self.actor_id(q.get('actor_id',[None])[0]); actor_row=c.execute('SELECT * FROM user WHERE id=?',(actor,)).fetchone() if actor else None
+            if not actor_row or actor_row['role'] not in ('manager','pm'): return self.json(403,{'error':'仅管理PM和部门负责人可查看部门绩效'})
+            users=[rowdict(x) for x in c.execute("SELECT * FROM user WHERE role<>'manager' ORDER BY department,name")]
+            reports=[performance_summary(c,x['id'],q.get('period',[None])[0],q.get('start',[None])[0],q.get('end',[None])[0]) for x in users]
+            groups={}
+            for report in reports:
+                key=report['user'].get('department') or '未分组'; groups.setdefault(key,[]).append(report)
+            out={'teams':[{'name':name,'member_count':len(items),'score':round(sum(x['score'] for x in items)/len(items),1) if items else 0,'base_points':round(sum(x['base_points'] for x in items),2),'earned_points':round(sum(x['earned_points'] for x in items),2),'on_time':round(sum(x['timeliness'] for x in items)/len(items),1) if items else 0,'quality':round(sum(x['quality'] for x in items)/len(items),1) if items else 0} for name,items in groups.items()],'members':reports}
         else: self.json(404,{'error':'not found'}); c.close(); return
         c.commit(); self.json(200,out); c.close()
     def handle_wecom_get(self):
@@ -1425,9 +1531,26 @@ class Handler(BaseHTTPRequestHandler):
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
                 if not c.execute('SELECT 1 FROM user WHERE id=?',(b['owner_id'],)).fetchone(): return self.json(400,{'error':'owner_id does not exist'})
                 approver_id=approver_for(c,b['owner_id'])
-                oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(b.get('org_node_id'),b['title'],b.get('description',''),b['owner_id'],b['due_at'],b.get('priority','P1'),b.get('risk_status','normal'),b['deliverable'],b.get('source','manual'),b.get('task_type','PROJECT'),'pending',approver_id,t,t)).lastrowid
+                task_type=b.get('task_type','PROJECT')
+                if task_type not in ('ROUTINE','PROJECT','ADHOC'): return self.json(400,{'error':'invalid task_type'})
+                complexity=b.get('complexity','general')
+                if complexity not in PERFORMANCE_DEFAULTS['complexity']: return self.json(400,{'error':'invalid complexity'})
+                # 兼容历史接口：未填写时按类型带出待校准的默认标准工时；网页端会要求专项、临时任务补充口径。
+                estimated_hours=float(b.get('estimated_hours') or {'ROUTINE':2,'PROJECT':8,'ADHOC':4}[task_type])
+                oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,estimated_hours,actual_hours,complexity,business_impact,urgent_source,urgent_level,plan_impact,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(b.get('org_node_id'),b['title'],b.get('description',''),b['owner_id'],b['due_at'],b.get('priority','P1'),b.get('risk_status','normal'),b['deliverable'],b.get('source','manual'),task_type,'pending',approver_id,estimated_hours,float(b.get('actual_hours') or 0),complexity,b.get('business_impact',''),b.get('urgent_source',''),b.get('urgent_level',''),b.get('plan_impact',''),t,t)).lastrowid
                 aid=create_approval(c,'task_confirm',oid,oid,approver_id); audit(c,'task',oid,'create_pending','local',after=b); c.commit(); out={'id':oid,'approval_id':aid,'approval_status':'pending'}
             elif p.path=='/api/ai/draft': out=ai_draft(b.get('text',''))
+            elif p.path=='/api/performance/config':
+                operator=self.actor_id(b.get('operator_id')); user=c.execute('SELECT role FROM user WHERE id=?',(operator,)).fetchone() if operator else None
+                if not user or user['role'] not in ('manager','pm'): return self.json(403,{'error':'仅管理PM和部门负责人可配置绩效口径'})
+                config=b.get('config') or PERFORMANCE_DEFAULTS
+                c.execute("INSERT INTO performance_config(config_key,config_json,updated_at,updated_by) VALUES('default',?,?,?) ON CONFLICT(config_key) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at,updated_by=excluded.updated_by",(json.dumps(config,ensure_ascii=False),t,operator)); audit(c,'performance_config',1,'update',str(operator),after=config); c.commit(); out={'status':'updated'}
+            elif p.path=='/api/performance/adjustments':
+                operator=self.actor_id(b.get('operator_id')); user=c.execute('SELECT role FROM user WHERE id=?',(operator,)).fetchone() if operator else None
+                if not user or user['role'] not in ('manager','pm'): return self.json(403,{'error':'仅管理PM和部门负责人可调整绩效'})
+                start,end=performance_period(b.get('period'),b.get('period_start'),b.get('period_end'))
+                if not b.get('user_id') or not b.get('reason'): return self.json(400,{'error':'成员和调整原因必填'})
+                oid=c.execute('INSERT INTO performance_adjustment(user_id,period_start,period_end,score_delta,reason,created_by,created_at) VALUES(?,?,?,?,?,?,?)',(b['user_id'],start,end,float(b.get('score_delta') or 0),b['reason'],operator,t)).lastrowid; audit(c,'performance_adjustment',oid,'create',str(operator),after=b); c.commit(); out={'id':oid}
             elif p.path.startswith('/api/approvals/') and p.path.endswith('/confirm'):
                 aid=int(p.path.split('/')[3]); approval=c.execute('SELECT * FROM approval_record WHERE id=?',(aid,)).fetchone()
                 if not approval or approval['status']!='pending': return self.json(404,{'error':'pending approval not found'})
@@ -1470,7 +1593,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not acceptor_id or int(acceptor_id)!=int(approver_id): return self.json(403,{'error':'only the task owner\'s approver may accept'})
                     c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,b.get('acceptor_id'),result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
                 else:
-                    allowed={'title','description','org_node_id','task_type','work_status','risk_status','due_at','priority','owner_id','deliverable'}; changes={k:v for k,v in b.items() if k in allowed};
+                    allowed={'title','description','org_node_id','task_type','work_status','risk_status','due_at','priority','owner_id','deliverable','estimated_hours','actual_hours','complexity','business_impact','urgent_source','urgent_level','plan_impact'}; changes={k:v for k,v in b.items() if k in allowed};
                     if not changes: return self.json(400,{'error':'no editable fields'})
                     if 'work_status' in changes:
                         operator_id=actor
