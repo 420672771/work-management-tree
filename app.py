@@ -168,6 +168,7 @@ def run_daily_jobs(c, report_date=None, kind='all'):
     c.execute("INSERT OR REPLACE INTO job_run_log(job_name,run_key,result_json,created_at) VALUES(?,?,?,?)",('daily_'+kind,day,json.dumps(out,ensure_ascii=False),now()))
     return out
 def draft_slots(text, owner_id=None, c=None):
+    text=strip_decorative_emoji(text)
     draft=ai_draft(text); own_connection=c is None; c=c or db()
     try:
         instruction=task_instruction_text(text)
@@ -916,6 +917,11 @@ def extract_document_text(data, filename=''):
 def ai_configured():
     return all(os.getenv(key) for key in ('AI_API_BASE','AI_API_KEY','AI_MODEL'))
 
+def strip_decorative_emoji(text):
+    """Remove decorative emoji from extracted materials without touching @mentions."""
+    cleaned=re.sub(r'[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]','',str(text or ''))
+    return re.sub(r'[ \t]{2,}',' ',cleaned).strip()
+
 def ai_vision_extract(data, mime_type):
     """Transcribe image text faithfully before the task extractor summarizes it."""
     if not ai_configured():
@@ -927,7 +933,7 @@ def ai_vision_extract(data, mime_type):
     payload={'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':[{'type':'text','text':prompt},{'type':'image_url','image_url':{'url':f'data:{mime_type};base64,{encoded}'}}]}],'temperature':0}
     req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',json.dumps(payload).encode(),{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
     with urllib.request.urlopen(req,timeout=45) as response:
-        return json.load(response)['choices'][0]['message']['content'].strip()
+        return strip_decorative_emoji(json.load(response)['choices'][0]['message']['content'])
 
 def ai_audio_transcribe(data, filename, mime_type):
     """Transcribe an uploaded recording via an OpenAI-compatible transcription endpoint."""
@@ -966,6 +972,7 @@ def extract_uploaded_text(data, filename, mime_type=''):
         text=ai_audio_transcribe(data,filename,mime_type)
     else:
         raise ValueError('仅支持图片、Word、PDF、文本和常见录音文件')
+    text=strip_decorative_emoji(text)
     if not text: raise ValueError('未从文件中识别到可用于建单的文字')
     return text
 
@@ -1072,6 +1079,7 @@ def normalize_legacy_conversation_tasks(c):
 
 def ai_draft(text):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
+    text=strip_decorative_emoji(text)
     api_base, api_key, model = os.getenv('AI_API_BASE'), os.getenv('AI_API_KEY'), os.getenv('AI_MODEL')
     raw_without_header=re.sub(r'【[^】]*】','',str(text or '')).strip()
     instruction=task_instruction_text(text)

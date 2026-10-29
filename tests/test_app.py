@@ -253,6 +253,11 @@ class WorkTreeTests(unittest.TestCase):
             self.assertNotIn('owner_id',missing)
             self.assertNotIn('due_at',missing)
         finally: c.close()
+    def test_task_draft_removes_decorative_emoji_but_keeps_mentions(self):
+        text='请钱缘😄负责推进采购签约，并于2030年1月1日前完成。@钱缘 😁'
+        self.assertEqual(app.strip_decorative_emoji(text),'请钱缘负责推进采购签约，并于2030年1月1日前完成。@钱缘')
+        draft=app.ai_draft(text)
+        self.assertNotRegex(draft['title']+draft['description'],r'[\U0001F000-\U0001FAFF]')
     def test_friendly_slot_labels_never_returns_internal_names(self):
         labels=app.friendly_slot_labels(['owner_id','due_at','unexpected_key'])
         self.assertEqual(labels,'任务责任人、截止日期、必要信息')
