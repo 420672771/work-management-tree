@@ -61,9 +61,10 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(c.execute("select status from bot_pending_action where session_id='feishu:test'").fetchone()[0],'pending')
             self.assertEqual(app.execute_bot_action(c,action,pm),'任务责任人已变更。')
             self.assertEqual(c.execute('select owner_id from task where id=?',(tid,)).fetchone()[0],target['id'])
-            self.assertEqual(app.parse_due('修改任务截止日期到10月28号')[:10],'2026-10-28')
+            today=app.datetime.now(app.timezone.utc).date(); expected=f"{today.year + (1 if (10,28)<(today.month,today.day) else 0)}-10-28"
+            self.assertEqual(app.parse_due('修改任务截止日期到10月28号')[:10],expected)
             action,reply=app.plan_bot_action(c,f'修改任务{tid}的截止日期到10月28号',pm,'feishu:test-due')
-            self.assertEqual(action['type'],'change_due'); self.assertEqual(action['due_at'][:10],'2026-10-28')
+            self.assertEqual(action['type'],'change_due'); self.assertEqual(action['due_at'][:10],expected)
             self.assertIn('回复“确认”',reply)
             self.assertEqual(app.model_action_to_command({'operation':'change_due','task_id':tid,'due_date':'2030-02-03'}),f'任务#{tid} 截止日期改为2030-02-03')
             self.assertEqual(app.model_action_to_command({'operation':'edit_task','task_id':tid,'field':'title','value':'更新标题'}),f'任务#{tid} 任务标题改为更新标题')
@@ -81,7 +82,8 @@ class WorkTreeTests(unittest.TestCase):
             action,reply=app.plan_bot_action(c,'该任务截止日期修改为10.28',owner,'feishu:context-test')
             self.assertEqual(action['type'],'change_due')
             self.assertEqual(action['task_id'],tid)
-            self.assertEqual(action['due_at'][:10],'2026-10-28')
+            today=app.datetime.now(app.timezone.utc).date(); expected=f"{today.year + (1 if (10,28)<(today.month,today.day) else 0)}-10-28"
+            self.assertEqual(action['due_at'][:10],expected)
             self.assertIn('回复“确认”',reply)
         finally: c.close()
     def test_management_bot_can_summarize_department_progress(self):
