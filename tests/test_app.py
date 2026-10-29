@@ -240,6 +240,19 @@ class WorkTreeTests(unittest.TestCase):
         self.assertNotIn('经营数据',draft['title']+draft['description'])
         self.assertNotIn('闫兴赫',draft['description'])
         self.assertNotIn('2026',draft['description'])
+    def test_multispeaker_material_uses_latest_instruction_not_prior_report(self):
+        text='钱缘\n@李康宁 法务那边评估了爬取立创数据的风险，反馈如上。\n综合下来就是：未经授权批量采集公开商品页面字段存在风险。\n李康宁\n那就请示总办，由公司协调业务部门推动约立创签约。@LM @钱缘 我们先和对口业务部门开个会，下周三前完成'
+        self.assertEqual(app.task_instruction_text(text),'那就请示总办，由公司协调业务部门推动约立创签约。@LM @钱缘 我们先和对口业务部门开个会，下周三前完成')
+        self.assertEqual(app.concise_task_title(text),'协调业务部门推动约立创签约')
+        self.assertNotIn('法务',app.task_detail(text))
+        c=app.db()
+        try:
+            money=c.execute("select id from user where name='钱缘'").fetchone()[0]
+            slots,missing=app.draft_slots(text,None,c)
+            self.assertEqual(slots['owner_id'],money)
+            self.assertNotIn('owner_id',missing)
+            self.assertNotIn('due_at',missing)
+        finally: c.close()
     def test_friendly_slot_labels_never_returns_internal_names(self):
         labels=app.friendly_slot_labels(['owner_id','due_at','unexpected_key'])
         self.assertEqual(labels,'任务责任人、截止日期、必要信息')

@@ -170,10 +170,11 @@ def run_daily_jobs(c, report_date=None, kind='all'):
 def draft_slots(text, owner_id=None, c=None):
     draft=ai_draft(text); own_connection=c is None; c=c or db()
     try:
-        domain=detect_responsibility_domain(c,text)
+        instruction=task_instruction_text(text)
+        domain=detect_responsibility_domain(c,instruction)
         # An explicitly named owner in the meeting item always takes precedence
         # over the sender/current web user used only as a fallback.
-        detected_owner=detect_task_owner(c,text) or owner_id
+        detected_owner=detect_task_owner(c,instruction) or owner_id
         # Rule parsing is the stable fallback for an explicit date in meeting notes.
         # It also covers dates that a model may omit because of formatting whitespace.
         slots={'title':draft['title'],'description':draft.get('description') or task_detail(text),'due_at':draft['due_at'] or parse_due(text),'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':detected_owner,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
@@ -981,8 +982,13 @@ def submit_progress(c, task_id, reporter_id, percent, comment, blocked=False, bl
 
 def concise_task_title(text):
     """Extract a manageable task title from a meeting note without losing the source note."""
-    source=re.sub(r'【[^】]*】','',str(text or '')).strip()
+    source=task_instruction_text(text)
     source=re.sub(r'\s+',' ',source)
+    source=re.sub(r'[@＠][\w\-\u4e00-\u9fff]+','',source).strip()
+    coordinated=re.search(r'由\s*(?:公司)?\s*协调\s*([^，。；\n]+)',source)
+    if coordinated:
+        candidate='协调'+coordinated.group(1).strip()
+        return candidate[:40]
     # The action after “请某人负责完成” is normally the task itself.
     action=re.search(r'(?:请[^，。；]{1,20}?负责)?(?:完成|推进|落实|组织|开展|协同)([^。；]+)',source)
     candidate=action.group(1).strip() if action else source
@@ -991,10 +997,26 @@ def concise_task_title(text):
     if not candidate: candidate='待明确工作事项'
     return candidate[:40]
 
+def task_instruction_text(text):
+    """Prefer the final actionable speaker turn over earlier status updates."""
+    source=re.sub(r'【[^】]*】','',str(text or '')).strip()
+    parts=re.split(r'(?:^|\n)\s*[\u4e00-\u9fff]{2,5}\s*(?=\n)',source)
+    if len(parts)>1:
+        actionable=[part.strip() for part in parts if re.search(r'(?:[@＠]|请|由|完成|推进|推动|落实|组织|开展|协同|本周|下周|截止)',part)]
+        if actionable:
+            return actionable[-1]
+    return source
+
 def task_detail(text):
     """Keep the work scope, but omit meeting headers and fields already structured."""
-    source=re.sub(r'【[^】]*】','',str(text or '')).strip()
+    source=task_instruction_text(text)
     source=re.sub(r'\s+',' ',source)
+    source=re.sub(r'[@＠][\w\-\u4e00-\u9fff]+','',source).strip()
+    # In multi-speaker records preserve the final instruction as the scope,
+    # while date/owner stay in their structured fields.
+    if source != re.sub(r'【[^】]*】','',str(text or '')).strip():
+        source=re.sub(r'(?:本|下)周[一二三四五六日天][之前前]?\s*(?:完成)?','',source)
+        return source.strip(' ，,。；;')[:240] or '待补充任务范围'
     action=re.search(r'(?:请[^，。；]{1,20}?负责)?(?:完成|推进|落实|组织|开展|协同)([^。；]+)',source)
     detail=(action.group(1).strip() if action else concise_task_title(source))
     detail=re.split(r'[，,](?:并)?(?:于|在)\s*\d{4}\s*年|[，,](?:请)?(?:于|在)\s*\d{4}[-/]',detail)[0]
@@ -1051,6 +1073,8 @@ def normalize_legacy_conversation_tasks(c):
 def ai_draft(text):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
     api_base, api_key, model = os.getenv('AI_API_BASE'), os.getenv('AI_API_KEY'), os.getenv('AI_MODEL')
+    raw_without_header=re.sub(r'【[^】]*】','',str(text or '')).strip()
+    instruction=task_instruction_text(text)
     if api_base and api_key and model:
         prompt = ('从以下材料中仅提炼明确待办，输出 JSON，不要输出解释。字段为 title,description,due_at,priority,deliverable,owner_id,confidence。'
                   '忽略会议标题、参会信息、背景数据、讨论过程、已完成事项和与待办无关的内容。title 为简洁工作标题（不超过40字）；'
@@ -1063,9 +1087,12 @@ def ai_draft(text):
                 content=json.load(f)['choices'][0]['message']['content']
             draft=json.loads(content.removeprefix('```json').removesuffix('```').strip())
             title=(draft.get('title') or '').strip()
-            if not title or len(title)>40 or title in text:
+            # A later speaker's instruction takes precedence over an earlier
+            # report, even when a model tries to summarize the whole thread.
+            if instruction!=raw_without_header or not title or len(title)>40 or title in text:
                 title=concise_task_title(text)
-            return {'title':title, 'description':task_detail(draft.get('description') or text), 'due_at':draft.get('due_at'), 'priority':draft.get('priority','P1'), 'deliverable':draft.get('deliverable') or '待补充验收标准', 'owner_id':None, 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
+            description=task_detail(text) if instruction!=raw_without_header else task_detail(draft.get('description') or text)
+            return {'title':title, 'description':description, 'due_at':draft.get('due_at'), 'priority':draft.get('priority','P1'), 'deliverable':draft.get('deliverable') or '待补充验收标准', 'owner_id':None, 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
         except Exception:
             # Safe fallback: a model outage must never block a human-created task.
             pass
