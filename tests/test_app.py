@@ -210,6 +210,15 @@ class WorkTreeTests(unittest.TestCase):
         slots,missing=app.draft_slots(text,2)
         self.assertEqual(slots['due_at'],'2026-10-30T17:00:00+08:00')
         self.assertNotIn('due_at',missing)
+    def test_draft_slots_recognizes_explicit_system_member_mention(self):
+        c=app.db()
+        try:
+            money=c.execute("select id from user where name='钱缘'").fetchone()[0]
+            slots,missing=app.draft_slots('请示总办，由公司协调业务部门推动签约。@LM @钱缘 我们先和对口业务部门开个会',None,c)
+            self.assertEqual(slots['owner_id'],money)
+            self.assertNotIn('owner_id',missing)
+            self.assertIn('due_at',missing)
+        finally: c.close()
     def test_ai_draft_splits_concise_title_from_meeting_note_detail(self):
         text='【科技产品中心周例会纪要】业务部门提出，希望在采购审批场景上线智能问答助手。请钱缘负责完成采购审批 Agent 的方案评审、测试环境部署及业务试用支持，并于 2026 年 10 月 30 日前提交上线验证记录和业务反馈汇总。'
         draft=app.ai_draft(text)

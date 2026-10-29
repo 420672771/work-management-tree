@@ -1013,11 +1013,19 @@ def similar_tasks(c, title, limit=5):
     return [dict(rowdict(task),similarity=round(score,2)) for score,task in sorted(candidates,key=lambda item:item[0],reverse=True)[:limit]]
 
 def detect_task_owner(c, text):
-    """Recognize only explicit task assignments, never mere mentions in meeting notes."""
+    """Recognize an explicit assignee, including a system-member @mention."""
     source=str(text or '')
     for user in c.execute('SELECT id,name FROM user ORDER BY length(name) DESC'):
         name=re.escape(user['name'])
         if re.search(rf'(?:请|由)\s*{name}\s*(?:负责|牵头|完成|推进|落实|组织|开展|协同)',source):
+            return user['id']
+    # Materials pasted from chat/screenshots commonly use @姓名 instead of a
+    # full "请某某负责" sentence.  An exact mention of a configured member is
+    # still an explicit assignment signal; unknown mentions (such as @LM) are
+    # ignored rather than guessed.
+    for user in c.execute('SELECT id,name FROM user ORDER BY length(name) DESC'):
+        name=re.escape(user['name'])
+        if re.search(rf'[@＠]\s*{name}(?![\u4e00-\u9fffA-Za-z0-9_])',source):
             return user['id']
     return None
 
