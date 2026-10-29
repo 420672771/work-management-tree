@@ -916,11 +916,13 @@ def ai_configured():
     return all(os.getenv(key) for key in ('AI_API_BASE','AI_API_KEY','AI_MODEL'))
 
 def ai_vision_extract(data, mime_type):
-    """Extract task-bearing text from an image through the configured vision model."""
+    """Transcribe image text faithfully before the task extractor summarizes it."""
     if not ai_configured():
         raise ValueError('图片识别需要先配置 AI 视觉模型')
     encoded=base64.b64encode(data).decode()
-    prompt='请识别图片中的中文文字，只输出与待办任务、责任人、截止日期、交付物有关的原文，不要解释。若没有任务信息则输出空字符串。'
+    prompt=('请完整、逐行转写图片中所有可辨识的中文、英文、数字、@提及和标点，保持原有顺序。'
+            '不要概括、不要筛选、不要纠错、不要只保留待办；即使是背景、风险结论或上下文也必须保留。'
+            '只输出转写结果，不要说明。')
     payload={'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':[{'type':'text','text':prompt},{'type':'image_url','image_url':{'url':f'data:{mime_type};base64,{encoded}'}}]}],'temperature':0}
     req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',json.dumps(payload).encode(),{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
     with urllib.request.urlopen(req,timeout=45) as response:
