@@ -4,7 +4,6 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
-os.environ['WMT_DB']=str(Path(tempfile.mkdtemp())/'test.db')
 import sys; sys.path.insert(0,str(Path(__file__).parents[1]))
 import app
 
@@ -12,8 +11,13 @@ class WorkTreeTests(unittest.TestCase):
     def setUp(self):
         # Unit/API fixtures use deterministic rules. Model-specific tests below
         # provide their own configuration and mock the external response.
-        ai_environment=patch.dict(os.environ,{'AI_API_BASE':'','AI_API_KEY':'','AI_MODEL':''})
+        ai_environment=patch.dict(os.environ,{'AI_API_BASE':'','AI_API_KEY':'','AI_MODEL':'','FEISHU_APP_ID':'','FEISHU_APP_SECRET':'','FEISHU_VERIFICATION_TOKEN':'','WECOM_CORP_ID':'','WECOM_AGENT_ID':'','WECOM_SECRET':''})
         ai_environment.start(); self.addCleanup(ai_environment.stop)
+        temporary=tempfile.TemporaryDirectory()
+        database_patch=patch.object(app,'DB_PATH',Path(temporary.name)/'test.db')
+        database_patch.start()
+        self.addCleanup(temporary.cleanup)
+        self.addCleanup(database_patch.stop)
         app.initialize()
     def test_seed_and_ai_draft_requires_confirmation(self):
         c=app.db(); self.assertGreater(c.execute('select count(*) from org_node').fetchone()[0],0); c.close()
@@ -226,6 +230,8 @@ class WorkTreeTests(unittest.TestCase):
             pm=c.execute("select id from user where role='pm' limit 1").fetchone()[0]
             manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
             member=c.execute("select id from user where role='member' limit 1").fetchone()[0]
+            domain=c.execute("SELECT id FROM org_node WHERE domain_code='A1'").fetchone()[0]
+            c.execute("INSERT INTO task(title,owner_id,org_node_id,due_at,deliverable,approval_status,work_status,created_at,updated_at) VALUES(?,?,?,?,?,'approved','in_progress',?,?)",('部门汇总测试任务',member,domain,'2030-01-01T17:00:00+08:00','测试记录',app.now(),app.now()))
             self.assertTrue(app.is_department_progress_query('总结汇报一下部门所有任务的进展情况'))
             self.assertTrue(app.is_team_progress_query('汇总一下团队任务进度'))
             summary=app.feishu_department_progress(c,pm)

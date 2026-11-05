@@ -6,6 +6,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 import weekly_reports
 import monthly_reports
+import accounts
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS test_issue (id INTEGER PRIMARY KEY AUTOINCREMENT, rec
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def feishu_login_enabled(): return os.getenv('WMT_AUTH_MODE','').lower()=='feishu'
+def login_required(): return os.getenv('WMT_AUTH_MODE','demo').lower() in ('account','feishu')
 def monthly_demo_enabled():
     return (os.getenv('WMT_AUTH_MODE','demo').lower()=='demo' and
             os.getenv('WMT_MONTHLY_DEMO','').lower() in ('1','true','yes'))
@@ -64,10 +66,11 @@ def db():
 
 def migrate(c):
     """Schema work must run once at service startup, never on every request."""
-    c.executescript(SCHEMA + weekly_reports.SCHEMA + monthly_reports.SCHEMA)
-    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''", "ALTER TABLE test_issue ADD COLUMN record_type TEXT NOT NULL DEFAULT 'issue'"):
+    c.executescript(SCHEMA + weekly_reports.SCHEMA + monthly_reports.SCHEMA + accounts.SCHEMA)
+    for statement in ("ALTER TABLE login_state ADD COLUMN flow_type TEXT NOT NULL DEFAULT 'login'", "ALTER TABLE login_state ADD COLUMN user_id INTEGER", "ALTER TABLE login_state ADD COLUMN session_hash TEXT", "ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''", "ALTER TABLE test_issue ADD COLUMN record_type TEXT NOT NULL DEFAULT 'issue'"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_feishu_identity ON user(feishu_open_id) WHERE feishu_open_id IS NOT NULL AND feishu_open_id<>''")
     c.execute('PRAGMA journal_mode=WAL')
     c.execute('PRAGMA synchronous=NORMAL')
 def rowdict(row): return dict(row) if row else None
@@ -1592,12 +1595,12 @@ class FeishuAdapter:
     def login_configured(self): return bool(self.app_id and self.secret and feishu_redirect_uri())
     def authorization_url(self, state):
         if not self.login_configured(): raise RuntimeError('Feishu login is not configured')
-        query=urllib.parse.urlencode({'app_id':self.app_id,'redirect_uri':feishu_redirect_uri(),'state':state,'response_type':'code'})
+        query=urllib.parse.urlencode({'client_id':self.app_id,'redirect_uri':feishu_redirect_uri(),'state':state,'response_type':'code'})
         return 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?'+query
     def exchange_login_code(self, code):
         if not self.login_configured(): raise RuntimeError('Feishu login is not configured')
         payload={'grant_type':'authorization_code','code':code,'client_id':self.app_id,'client_secret':self.secret,'redirect_uri':feishu_redirect_uri()}
-        req=urllib.request.Request('https://open.feishu.cn/open-apis/authen/v1/access_token',json.dumps(payload).encode(),{'Content-Type':'application/json'})
+        req=urllib.request.Request('https://open.feishu.cn/open-apis/authen/v2/oauth/token',json.dumps(payload).encode(),{'Content-Type':'application/json'})
         with urllib.request.urlopen(req,timeout=10) as f: out=json.load(f)
         data=out.get('data') or out
         if out.get('code',0)!=0 or not data.get('access_token'): raise RuntimeError(out.get('msg','Feishu authorization failed'))
@@ -1677,7 +1680,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             row=c.execute("SELECT u.* FROM login_session s JOIN user u ON u.id=s.user_id WHERE s.session_id=? AND s.expire_at>?",(session_id,now())).fetchone()
             if row: c.execute('UPDATE login_session SET last_seen_at=? WHERE session_id=?',(now(),session_id)); c.commit()
-            return rowdict(row)
+            return accounts.public_user(c,row) if row else None
         finally: c.close()
     def actor_id(self, submitted=None): return getattr(self,'authenticated_user_id',None) or submitted
     def handle_monthly_reports(self, path, query=None):
@@ -1770,7 +1773,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError,TypeError) as exc: return self.json(400,{'error':str(exc)})
         finally: c.close()
     def authorized(self):
-        if feishu_login_enabled(): return bool(self.session_user())
+        if login_required(): return bool(self.session_user())
         # Local-only mode remains frictionless; public/tunnel mode must set both values.
         username=os.getenv('WMT_PUBLIC_USER'); password=os.getenv('WMT_PUBLIC_PASSWORD')
         if not username and not password: return True
@@ -1781,59 +1784,142 @@ class Handler(BaseHTTPRequestHandler):
         except Exception: return False
         return bool(sep and user==username and pwd==password)
     def require_auth(self):
-        user=self.session_user() if feishu_login_enabled() else None
+        self.authenticated_user_id=None
+        user=self.session_user()
         if user:
             self.authenticated_user_id=user['id']; return True
         if self.authorized(): return True
-        if feishu_login_enabled(): return self.json(401,{'error':'login_required','login_url':'/auth/feishu/start'}) or False
+        if getattr(self,'command','GET')=='POST':self.close_connection=True
+        if login_required(): return self.json(401,{'error':'login_required','login_url':'/auth/feishu/start'}) or False
         self.send_response(401); self.send_header('WWW-Authenticate','Basic realm="Work Management Tree"'); self.send_header('Content-Length','0'); self.end_headers(); return False
     def redirect(self, location, cookie=None):
         self.send_response(302); self.send_header('Location',location)
-        if cookie: self.send_header('Set-Cookie',cookie)
+        for item in ([cookie] if isinstance(cookie,str) else cookie or []):self.send_header('Set-Cookie',item)
         self.send_header('Content-Length','0'); self.end_headers()
     def session_payload(self):
         user=self.session_user()
-        return {'authenticated':bool(user),'mode':'feishu' if feishu_login_enabled() else 'demo','user':user,
-                'monthly_demo':monthly_demo_enabled()}
-    def start_feishu_login(self):
-        adapter=FeishuAdapter()
-        if not feishu_login_enabled(): return self.redirect('/?login_error=disabled')
-        if not adapter.login_configured(): return self.redirect('/?login_error=not_configured')
-        state=secrets.token_urlsafe(32); c=db()
+        return {'authenticated':bool(user),'mode':os.getenv('WMT_AUTH_MODE','demo').lower(),'user':user,
+                'monthly_demo':monthly_demo_enabled(),'feishu_ready':FeishuAdapter().login_configured()}
+    def management_user(self,c,body=None):
+        uid=getattr(self,'authenticated_user_id',None)
+        if not uid and monthly_demo_enabled():uid=(body or {}).get('actor_id')
+        row=c.execute('SELECT id,role FROM user WHERE id=?',(uid,)).fetchone() if uid else None
+        if not row or row['role'] not in ('manager','pm'):raise PermissionError('仅部门负责人和管理 PM 可配置账号或重置密码')
+        return row['id']
+    def account_cookie(self,token,max_age=28800,name='wmt_session',path='/'):
+        secure='; Secure' if feishu_redirect_uri().startswith('https://') else ''
+        return f'{name}={token}; Path={path}; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}'
+    def handle_account_api(self,path):
+        user=self.session_user();self.authenticated_user_id=user['id'] if user else None;c=db()
+        try:
+            if self.command=='GET':
+                if path=='/api/auth/options':return self.json(200,{'demo_enabled':not login_required(),'feishu_ready':FeishuAdapter().login_configured()})
+                if path=='/api/me':
+                    if not user:return self.json(401,{'error':'请先登录个人账号','login_url':'/login'})
+                    return self.json(200,{'user':user,'feishu_bound':bool(user.get('feishu_open_id')),
+                                          'feishu_masked':mask_external_id(user.get('feishu_open_id')),
+                                          'feishu_ready':FeishuAdapter().login_configured()})
+                return self.json(404,{'error':'接口不存在'})
+            origin=self.headers.get('Origin')
+            if origin and urllib.parse.urlparse(origin).netloc!=self.headers.get('Host'):
+                self.close_connection=True
+                return self.json(403,{'error':'请从本站页面发起操作'})
+            if self.headers.get('Content-Type','').split(';')[0]!='application/json':
+                self.close_connection=True
+                return self.json(400,{'error':'请求须使用 JSON 格式'})
+            body=self.body()
+            if not isinstance(body,dict):raise ValueError('请求须为 JSON 对象')
+            if path=='/api/auth/login':
+                previous=self.cookie('wmt_session')
+                uid=accounts.authenticate(c,body.get('username'),body.get('password'),getattr(self,'client_address',('local',))[0])
+                if previous:c.execute('DELETE FROM login_session WHERE session_id=?',(previous,))
+                token=accounts.new_session(c,uid);c.commit()
+                return self.json(200,{'status':'ok','redirect':'/'},self.account_cookie(token))
+            if path=='/api/auth/logout':
+                c.execute('DELETE FROM login_session WHERE session_id=?',(self.cookie('wmt_session'),));c.commit()
+                return self.json(200,{'status':'ok'},self.account_cookie('',0))
+            if path=='/api/me/password':
+                if not user:return self.json(401,{'error':'请先登录个人账号'})
+                accounts.change_password(c,user['id'],body.get('current_password'),body.get('new_password'))
+                token=accounts.new_session(c,user['id']);c.commit()
+                return self.json(200,{'status':'ok','message':'密码已更新，其他登录会话已失效'},self.account_cookie(token))
+            match=re.fullmatch(r'/api/users/(\d+)/password-reset',path)
+            if match:
+                if user:self.authenticated_user_id=user['id']
+                actor=self.management_user(c,body)
+                accounts.reset_password(c,int(match[1]),body.get('new_password'),actor);c.commit()
+                return self.json(200,{'status':'ok','message':'密码已重置，该员工原登录会话已失效'})
+            return self.json(404,{'error':'接口不存在'})
+        except accounts.Throttled as exc:return self.json(429,{'error':str(exc)})
+        except accounts.Conflict as exc:return self.json(409,{'error':str(exc)})
+        except PermissionError as exc:return self.json(403 if path!='/api/auth/login' else 401,{'error':str(exc)})
+        except LookupError as exc:return self.json(404,{'error':str(exc)})
+        except (ValueError,TypeError) as exc:return self.json(400,{'error':str(exc)})
+        finally:c.close()
+    def start_feishu_login(self,bind=False):
+        user=self.session_user()
+        if bind and not user:return self.redirect('/login')
+        if not FeishuAdapter().login_configured():return self.redirect('/?page=profile&binding=not_configured' if bind else '/login?login_error=not_configured')
+        state=secrets.token_urlsafe(32);c=db()
         try:
             c.execute('DELETE FROM login_state WHERE expire_at<=?',(now(),))
-            c.execute('INSERT INTO login_state(state_hash,expire_at,created_at) VALUES(?,?,?)',(hashlib.sha256(state.encode()).hexdigest(),(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat(),now())); c.commit()
-        finally: c.close()
-        self.redirect(adapter.authorization_url(state))
-    def finish_feishu_login(self, query):
-        state=query.get('state',[''])[0]; code=query.get('code',[''])[0]
-        if not state or not code: return self.redirect('/?login_error=invalid_callback')
+            c.execute('INSERT INTO login_state(state_hash,expire_at,created_at,flow_type,user_id,session_hash) VALUES(?,?,?,?,?,?)',
+                (hashlib.sha256(state.encode()).hexdigest(),(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat(),now(),
+                 'bind' if bind else 'login',user['id'] if bind else None,hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest() if bind else None));c.commit()
+        finally:c.close()
+        self.redirect(FeishuAdapter().authorization_url(state),self.account_cookie(state,600,'wmt_oauth_state','/auth/feishu'))
+    def finish_feishu_login(self,query):
+        state=query.get('state',[''])[0];code=query.get('code',[''])[0]
+        if not state or not secrets.compare_digest(state,self.cookie('wmt_oauth_state')):return self.redirect('/login?login_error=expired')
+        current=self.session_user();c=db()
+        try:
+            c.execute('BEGIN IMMEDIATE')
+            valid=c.execute('SELECT * FROM login_state WHERE state_hash=? AND expire_at>?',(hashlib.sha256(state.encode()).hexdigest(),now())).fetchone()
+            c.execute('DELETE FROM login_state WHERE state_hash=?',(hashlib.sha256(state.encode()).hexdigest(),));c.commit()
+        finally:c.close()
+        clear=self.account_cookie('',0,'wmt_oauth_state','/auth/feishu')
+        if not valid:return self.redirect('/login?login_error=expired',clear)
+        binding=valid['flow_type']=='bind'
+        target='/?page=profile&binding=' if binding else '/login?login_error='
+        if binding and (not current or current['id']!=valid['user_id'] or
+            not secrets.compare_digest(valid['session_hash'] or '',hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest())):
+            return self.redirect('/login?login_error=expired',clear)
+        if not code:return self.redirect(target+'cancelled',clear)
+        try:
+            adapter=FeishuAdapter();token=adapter.exchange_login_code(code);open_id=adapter.login_open_id(token['access_token'])
+        except Exception:return self.redirect(target+'authorization_failed',clear)
         c=db()
         try:
-            valid=c.execute('SELECT 1 FROM login_state WHERE state_hash=? AND expire_at>?',(hashlib.sha256(state.encode()).hexdigest(),now())).fetchone()
-            c.execute('DELETE FROM login_state WHERE state_hash=?',(hashlib.sha256(state.encode()).hexdigest(),)); c.commit()
-        finally: c.close()
-        if not valid: return self.redirect('/?login_error=expired')
-        try:
-            token=FeishuAdapter().exchange_login_code(code); open_id=FeishuAdapter().login_open_id(token['access_token'])
-        except Exception: return self.redirect('/?login_error=authorization_failed')
-        c=db()
-        try:
-            user=c.execute("SELECT id FROM user WHERE feishu_open_id=?",(open_id,)).fetchone()
-            if not user: return self.redirect('/?login_error=unbound')
-            session_id=secrets.token_urlsafe(48); expires=(datetime.now(timezone.utc)+timedelta(hours=8)).isoformat()
-            c.execute('DELETE FROM login_session WHERE expire_at<=?',(now(),)); c.execute('INSERT INTO login_session(session_id,user_id,expire_at,created_at,last_seen_at) VALUES(?,?,?,?,?)',(session_id,user['id'],expires,now(),now())); audit(c,'login',user['id'],'feishu_login',str(user['id']),after={'channel':'feishu'}); c.commit()
-        finally: c.close()
-        secure='; Secure' if feishu_redirect_uri().startswith('https://') else ''
-        self.redirect('/',f'wmt_session={session_id}; Path=/; Max-Age=28800; HttpOnly; SameSite=Lax{secure}')
+            c.execute('BEGIN IMMEDIATE')
+            if binding:
+                # A reset/logout during OAuth must invalidate the pending binding, too.
+                live=c.execute('SELECT 1 FROM login_session WHERE session_id=? AND user_id=? AND expire_at>?',
+                               (self.cookie('wmt_session'),current['id'],now())).fetchone()
+                if not live:return self.redirect('/login?login_error=expired',clear)
+                occupied=c.execute('SELECT id FROM user WHERE feishu_open_id=? AND id<>?',(open_id,current['id'])).fetchone()
+                if occupied:return self.redirect(target+'already_bound',clear)
+                old=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(current['id'],)).fetchone()[0]
+                if old and old!=open_id:return self.redirect(target+'different_account',clear)
+                c.execute('UPDATE user SET feishu_open_id=? WHERE id=?',(open_id,current['id']))
+                if old!=open_id:record_feishu_binding(c,current['id'],'bind',old,open_id,str(current['id']))
+                audit(c,'user',current['id'],'self_bind_feishu',str(current['id']),after={'bound':True});c.commit()
+                return self.redirect(target+'success',clear)
+            user=c.execute('SELECT id FROM user WHERE feishu_open_id=?',(open_id,)).fetchone()
+            if not user:return self.redirect(target+'unbound',clear)
+            c.execute('DELETE FROM login_session WHERE session_id=?',(self.cookie('wmt_session'),))
+            session_id=accounts.new_session(c,user['id']);audit(c,'login',user['id'],'feishu_login',str(user['id']),after={'channel':'feishu'});c.commit()
+            return self.redirect('/',[clear,self.account_cookie(session_id)])
+        except sqlite3.IntegrityError:return self.redirect(target+'already_bound',clear)
+        finally:c.close()
     def logout(self):
-        session_id=self.cookie('wmt_session'); c=db()
-        try:
-            if session_id: c.execute('DELETE FROM login_session WHERE session_id=?',(session_id,)); c.commit()
-        finally: c.close()
-        self.redirect('/', 'wmt_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
-    def json(self, code, payload):
-        data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Cache-Control','no-store, no-cache, must-revalidate'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        c=db()
+        try:c.execute('DELETE FROM login_session WHERE session_id=?',(self.cookie('wmt_session'),));c.commit()
+        finally:c.close()
+        self.redirect('/login',self.account_cookie('',0))
+    def json(self, code, payload, cookie=None):
+        data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Cache-Control','no-store, no-cache, must-revalidate'); self.send_header('Content-Length',str(len(data)));
+        if cookie:self.send_header('Set-Cookie',cookie)
+        self.end_headers(); self.wfile.write(data)
     def body(self):
         try: n=int(self.headers.get('Content-Length','0'))
         except ValueError: raise ValueError('Content-Length 无效')
@@ -1885,6 +1971,12 @@ class Handler(BaseHTTPRequestHandler):
         return fields,files
     def do_GET(self):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
+        if p.path in ('/login','/login.html'):
+            return self.send_bytes(200,'text/html; charset=utf-8',(ROOT/'static'/'login.html').read_bytes(),'no-store')
+        if p.path=='/static/accounts.js':
+            return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'accounts.js').read_bytes(),'no-cache')
+        if p.path in ('/api/auth/options','/api/me'):return self.handle_account_api(p.path)
+        if p.path=='/auth/feishu/bind':return self.start_feishu_login(bind=True)
         if p.path=='/static/monthly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'monthly-reports.js').read_bytes(),'no-cache')
         if p.path=='/static/weekly-reports.js':
@@ -1918,7 +2010,7 @@ class Handler(BaseHTTPRequestHandler):
         if p.path in manual_assets:
             data=(ROOT/'static'/'manual-assets'/manual_assets[p.path]).read_bytes(); self.send_response(200); self.send_header('Content-Type','image/svg+xml'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/' or p.path=='/index.html':
-            if not feishu_login_enabled() and not self.require_auth(): return
+            if not login_required() and not self.require_auth(): return
             data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261104-layout2"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261104-layout1"></script><script defer src="/static/layout-guard.js?v=20261104-layout3"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
         if p.path=='/manual' or p.path=='/manual.html':
             if not self.require_auth(): return
@@ -1954,8 +2046,8 @@ class Handler(BaseHTTPRequestHandler):
         if p.path=='/api/bootstrap':
             task_rows=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
             today=datetime.now(timezone.utc).date().isoformat()
-            out={'dashboard':{'total':len(task_rows),'active':sum(x['work_status']!='completed' for x in task_rows),'completed':sum(x['work_status']=='completed' for x in task_rows),'overdue':sum(x['time_status']=='overdue' for x in task_rows),'risk':sum(x['risk_status']!='normal' for x in task_rows),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]},'users':[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')],'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
-        elif p.path=='/api/users': out=[rowdict(x) for x in c.execute('SELECT * FROM user ORDER BY id')]
+            out={'dashboard':{'total':len(task_rows),'active':sum(x['work_status']!='completed' for x in task_rows),'completed':sum(x['work_status']=='completed' for x in task_rows),'overdue':sum(x['time_status']=='overdue' for x in task_rows),'risk':sum(x['risk_status']!='normal' for x in task_rows),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]},'users':[accounts.public_user(c,x) for x in c.execute('SELECT * FROM user ORDER BY id')],'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
+        elif p.path=='/api/users': out=[accounts.public_user(c,x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
         elif p.path=='/api/tasks/similar':
@@ -2050,8 +2142,10 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_wecom_post(); return
         if self.path.startswith('/im/callback/feishu'):
             self.handle_feishu_post(); return
-        if not self.require_auth(): return
         p=urllib.parse.urlparse(self.path)
+        if p.path in ('/api/auth/login','/api/auth/logout','/api/me/password') or re.fullmatch(r'/api/users/\d+/password-reset',p.path):
+            return self.handle_account_api(p.path)
+        if not self.require_auth(): return
         if p.path.startswith('/api/monthly-reports'):
             return self.handle_monthly_reports(p.path)
         if p.path.startswith('/api/weekly-reports'):
@@ -2078,26 +2172,31 @@ class Handler(BaseHTTPRequestHandler):
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,effective_at,created_at) VALUES(?,?,?,?,?,?,?)',(b.get('parent_id'),b.get('node_type','domain'),b['name'],b.get('boundary',''),b.get('owner_id'),t,t)).lastrowid; audit(c,'org_node',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/users':
+                account_actor=self.management_user(c,b) if getattr(self,'authenticated_user_id',None) or b.get('username') or b.get('password') else None
                 required=['name']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
                 if b.get('role','member') not in ('manager','pm','member'): return self.json(400,{'error':'invalid role'})
                 try:
                     oid=c.execute('INSERT INTO user(name,department,role,wecom_userid) VALUES(?,?,?,?)',(b['name'],b.get('department','科技产品中心'),b.get('role','member'),b.get('wecom_userid') or None)).lastrowid
                 except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
-                audit(c,'user',oid,'create','local',after=b); c.commit(); out={'id':oid}
+                if b.get('username') or b.get('password'):accounts.configure(c,oid,b.get('username'),b.get('password'),account_actor)
+                audit(c,'user',oid,'create',str(account_actor or 'local'),after={k:v for k,v in b.items() if 'password' not in k.lower()}); c.commit(); out={'id':oid}
             elif p.path.startswith('/api/users/') and p.path.endswith('/manage'):
+                account_actor=self.management_user(c,b) if getattr(self,'authenticated_user_id',None) or b.get('username') or b.get('password') else None
                 uid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM user WHERE id=?',(uid,)).fetchone()
                 if not old: return self.json(404,{'error':'user not found'})
+                old_account=accounts.metadata(c,uid)
                 action=b.get('action')
                 if action=='delete':
                     if c.execute('SELECT 1 FROM task WHERE owner_id=? LIMIT 1',(uid,)).fetchone(): return self.json(409,{'error':'该成员仍有关联任务，暂不能删除'})
-                    c.execute('DELETE FROM reporting_line WHERE user_id=? OR direct_leader_id=? OR approver_id=?',(uid,uid,uid)); c.execute('DELETE FROM user_position WHERE user_id=?',(uid,)); c.execute('DELETE FROM delegate WHERE user_id=? OR delegate_user_id=?',(uid,uid)); c.execute('DELETE FROM user WHERE id=?',(uid,)); audit(c,'user',uid,'delete','local',before=rowdict(old)); c.commit(); out={'id':uid,'status':'deleted'}
+                    c.execute('DELETE FROM reporting_line WHERE user_id=? OR direct_leader_id=? OR approver_id=?',(uid,uid,uid)); c.execute('DELETE FROM user_position WHERE user_id=?',(uid,)); c.execute('DELETE FROM delegate WHERE user_id=? OR delegate_user_id=?',(uid,uid)); c.execute('DELETE FROM login_session WHERE user_id=?',(uid,)); c.execute('DELETE FROM user WHERE id=?',(uid,)); audit(c,'user',uid,'delete','local',before=rowdict(old)); c.commit(); out={'id':uid,'status':'deleted'}
                 elif action=='update':
                     if not b.get('name'): return self.json(400,{'error':'name is required'})
                     if b.get('role','member') not in ('manager','pm','member'): return self.json(400,{'error':'invalid role'})
                     try: c.execute('UPDATE user SET name=?,department=?,role=?,wecom_userid=? WHERE id=?',(b['name'].strip(),b.get('department','').strip(),b.get('role','member'),b.get('wecom_userid') or None,uid))
                     except sqlite3.IntegrityError: return self.json(409,{'error':'wecom_userid already exists'})
-                    audit(c,'user',uid,'update','local',before=rowdict(old),after=b); c.commit(); out={'id':uid,'status':'updated'}
+                    if b.get('username') or b.get('password'):accounts.configure(c,uid,b.get('username'),b.get('password'),account_actor)
+                    audit(c,'user',uid,'update',str(account_actor or 'local'),before=rowdict(old),after={k:v for k,v in b.items() if 'password' not in k.lower()}); c.commit(); out={'id':uid,'status':'updated','reauthenticate':bool(getattr(self,'authenticated_user_id',None)==uid and (b.get('password') or (b.get('username') and b['username'].strip().lower()!=old_account['username'])))}
                 else: return self.json(400,{'error':'unsupported manage action'})
             elif p.path.startswith('/api/users/') and p.path.endswith('/reporting-line'):
                 uid=int(p.path.split('/')[3]); user=c.execute('SELECT id FROM user WHERE id=?',(uid,)).fetchone()
@@ -2115,6 +2214,7 @@ class Handler(BaseHTTPRequestHandler):
                     oid=c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,dotted_leader_id,effective_from) VALUES(?,?,?,?,?)',(uid,leader_id,leader_id,None,t)).lastrowid
                     audit(c,'reporting_line',oid,'set_from_member','local',before=rowdict(old) if old else None,after={'user_id':uid,'direct_leader_id':leader_id}); c.commit(); out={'id':oid,'status':'updated'}
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id/unbind'):
+                if getattr(self,'authenticated_user_id',None):self.management_user(c,b)
                 uid=int(p.path.split('/')[3])
                 user=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(uid,)).fetchone()
                 if not user: return self.json(404,{'error':'user not found'})
@@ -2125,6 +2225,7 @@ class Handler(BaseHTTPRequestHandler):
                 audit(c,'user',uid,'unbind_feishu','local',before={'bound':True},after={'bound':False})
                 c.commit(); out={'id':uid,'status':'unbound'}
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id'):
+                if getattr(self,'authenticated_user_id',None):self.management_user(c,b)
                 uid=int(p.path.split('/')[3])
                 if not b.get('feishu_open_id'): return self.json(400,{'error':'feishu_open_id is required'})
                 open_id=b['feishu_open_id'].strip()
@@ -2390,6 +2491,9 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path=='/api/notify': out=WeComAdapter().send(b.get('userid',''),b.get('text',''))
             else: return self.json(404,{'error':'not found'})
             self.json(response_code,out)
+        except accounts.Conflict as exc:return self.json(409,{'error':str(exc)})
+        except PermissionError as exc:return self.json(403,{'error':str(exc)})
+        except ValueError as exc:return self.json(400,{'error':str(exc)})
         finally: c.close()
     def handle_feishu_post(self):
         try:

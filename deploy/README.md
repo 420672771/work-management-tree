@@ -79,3 +79,10 @@ Environment=WMT_MONTHLY_DEMO=1
 ```
 
 执行 `systemctl --user daemon-reload` 和 `systemctl --user restart worktree.service` 后刷新页面。正式部署使用 `WMT_MONTHLY_DEMO=0`、`WMT_AUTH_MODE=feishu` 并完成飞书账号绑定；无需改动月报代码即可恢复真实登录隔离。飞书登录模式始终忽略演示开关和提交的演示身份，已有登录会话也始终优先于演示身份。
+
+
+## 账号密码与飞书登录
+
+先在测试模式的员工管理中配置负责人账号，或使用 `WMT_DB=<网站数据库> python3 scripts/set-user-account.py --user-id <ID> --username <账号>` 在服务器终端配置。随后将服务环境设置为 `WMT_AUTH_MODE=account`、`WMT_MONTHLY_DEMO=0`，重新加载服务环境，即可要求员工通过 `/login` 登录。`WMT_AUTH_MODE=feishu` 也兼容账号密码登录。
+
+飞书扫码登录和个人中心扫码绑定共用 `WMT_FEISHU_OAUTH_REDIRECT_URI`，或由 `WMT_PUBLIC_BASE_URL` 加 `/auth/feishu/callback` 构成回调地址。需在飞书应用后台登记完全一致的 URL，并配置现有 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`。缺少回调配置时，账号密码功能可正常运行，飞书扫码入口会提示配置状态。测试环境无需强制切换登录模式，可继续保留演示身份。
