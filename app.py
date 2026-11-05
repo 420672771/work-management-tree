@@ -1,9 +1,10 @@
-import base64, hashlib, io, json, mimetypes, os, re, secrets, sqlite3, struct, subprocess, tempfile, urllib.request, urllib.parse, zipfile
+import base64, gzip, hashlib, io, json, mimetypes, os, re, secrets, sqlite3, struct, subprocess, tempfile, urllib.request, urllib.parse, zipfile
 from base64 import b64decode
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
+import weekly_reports
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS performance_config (config_key TEXT PRIMARY KEY, conf
 CREATE TABLE IF NOT EXISTS performance_adjustment (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL, score_delta REAL NOT NULL DEFAULT 0, reason TEXT NOT NULL, created_by INTEGER, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_state (state_hash TEXT PRIMARY KEY, expire_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_session (session_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expire_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS test_issue (id INTEGER PRIMARY KEY AUTOINCREMENT, record_type TEXT NOT NULL DEFAULT 'issue', title TEXT NOT NULL, module TEXT NOT NULL DEFAULT '', severity TEXT NOT NULL DEFAULT 'normal', reporter TEXT NOT NULL DEFAULT '', steps TEXT DEFAULT '', expected_result TEXT DEFAULT '', actual_result TEXT NOT NULL DEFAULT '', task_ref TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL);
 """
 
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -51,11 +53,19 @@ def feishu_redirect_uri():
     base=os.getenv('WMT_PUBLIC_BASE_URL','').strip().rstrip('/')
     return base+'/auth/feishu/callback' if base else ''
 def db():
-    c = sqlite3.connect(DB_PATH, timeout=5); c.row_factory = sqlite3.Row; c.executescript(SCHEMA)
-    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''"):
+    c = sqlite3.connect(DB_PATH, timeout=10); c.row_factory = sqlite3.Row
+    c.execute('PRAGMA foreign_keys=ON')
+    c.execute('PRAGMA busy_timeout=10000')
+    return c
+
+def migrate(c):
+    """Schema work must run once at service startup, never on every request."""
+    c.executescript(SCHEMA + weekly_reports.SCHEMA)
+    for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''", "ALTER TABLE test_issue ADD COLUMN record_type TEXT NOT NULL DEFAULT 'issue'"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
-    return c
+    c.execute('PRAGMA journal_mode=WAL')
+    c.execute('PRAGMA synchronous=NORMAL')
 def rowdict(row): return dict(row) if row else None
 def audit(c, typ, oid, action, actor, before=None, after=None):
     c.execute("INSERT INTO audit_log(object_type,object_id,action,actor,before_json,after_json,created_at) VALUES(?,?,?,?,?,?,?)", (typ, oid, action, actor, json.dumps(before, ensure_ascii=False) if before else None, json.dumps(after, ensure_ascii=False) if after else None, now()))
@@ -86,12 +96,56 @@ def approver_for(c, user_id):
     if not approver:
         manager=c.execute("SELECT id FROM user WHERE role='manager' ORDER BY id LIMIT 1").fetchone()
         approver=manager[0] if manager else None
+    # The top-level manager must not be made their own approver.
+    if approver and int(approver)==int(user_id):
+        return None
     if approver:
         delegate=c.execute("SELECT delegate_user_id FROM delegate WHERE user_id=? AND scope IN ('approval','all') AND start_at<=? AND end_at>=? ORDER BY id DESC LIMIT 1",(approver,now(),now())).fetchone()
         if delegate: return delegate[0]
     return approver
 def create_approval(c, biz_type, biz_id, task_id, approver_id):
+    if not approver_id:
+        return None
     return c.execute("INSERT INTO approval_record(biz_type,biz_id,task_id,approver_id,due_at,created_at) VALUES(?,?,?,?,?,?)",(biz_type,biz_id,task_id,approver_id,now(),now())).lastrowid
+
+TASK_PRIORITIES={'P0','P1','P2'}
+TASK_TYPES={'ROUTINE','PROJECT','ADHOC'}
+
+def valid_due_at(value):
+    if not isinstance(value,str) or not value.strip():
+        return None
+    try:
+        parsed=datetime.fromisoformat(value.strip().replace('Z','+00:00'))
+        return parsed.isoformat()
+    except (ValueError, TypeError):
+        return None
+
+def validate_task_fields(c, payload, *, require_all=False):
+    """Validate data before it can enter the task table.
+
+    Returns a compact normalized dict or raises ValueError with an API-safe message.
+    """
+    title=str(payload.get('title','')).strip()
+    if require_all and not title: raise ValueError('任务标题不能为空')
+    if title and len(title)>200: raise ValueError('任务标题不能超过 200 个字符')
+    description=str(payload.get('description','') or '').strip()
+    if len(description)>20000: raise ValueError('任务详情不能超过 20000 个字符')
+    deliverable=str(payload.get('deliverable','') or '').strip()
+    if len(deliverable)>5000: raise ValueError('交付物/验收标准不能超过 5000 个字符')
+    priority=payload.get('priority','P1')
+    if priority not in TASK_PRIORITIES: raise ValueError('优先级仅支持 P0、P1、P2')
+    task_type=payload.get('task_type','PROJECT')
+    if task_type not in TASK_TYPES: raise ValueError('任务类型无效')
+    due=valid_due_at(payload.get('due_at')) if ('due_at' in payload or require_all) else None
+    if require_all and not due: raise ValueError('截止日期格式无效，请使用 YYYY-MM-DD')
+    owner_id=payload.get('owner_id')
+    if require_all and not owner_id: raise ValueError('任务责任人不能为空')
+    if owner_id and not c.execute('SELECT 1 FROM user WHERE id=?',(owner_id,)).fetchone():
+        raise ValueError('任务责任人不存在')
+    org_node_id=payload.get('org_node_id')
+    if org_node_id not in (None,'') and not c.execute('SELECT 1 FROM org_node WHERE id=? AND inactive_at IS NULL',(org_node_id,)).fetchone():
+        raise ValueError('挂载责任域不存在或已停用')
+    return {'title':title,'description':description,'deliverable':deliverable,'priority':priority,'task_type':task_type,'due_at':due,'owner_id':owner_id,'org_node_id':org_node_id}
 def generate_routines(c, instance_date=None):
     from datetime import date, timedelta
     day=date.fromisoformat(instance_date) if instance_date else datetime.now(timezone.utc).date(); created=[]
@@ -167,27 +221,187 @@ def run_daily_jobs(c, report_date=None, kind='all'):
             delivery=send_feishu_once(c,approval['task_id'],approval['approver_id'],'approval_reminder',day,'【待确认提醒】\n《'+title+'》等待您的'+('任务确认' if approval['biz_type']=='task_confirm' else '进度确认')+'，请在工作管理树确认中心处理。'); count_delivery(delivery)
     c.execute("INSERT OR REPLACE INTO job_run_log(job_name,run_key,result_json,created_at) VALUES(?,?,?,?)",('daily_'+kind,day,json.dumps(out,ensure_ascii=False),now()))
     return out
+def explicit_assignment_draft(text, owner_id=None, c=None):
+    """Extract the last explicit assignment from a long meeting/chat record.
+
+    Long materials commonly contain a background or a report first and a
+    manager's directive at the end.  In that situation the directive is more
+    reliable than a whole-document summary: only its assignee, deadline,
+    deliverable and priority are allowed to enter the task draft.
+    """
+    source=strip_decorative_emoji(text).strip()
+    if not source:
+        return None
+    own_connection=c is None; c=c or db()
+    try:
+        candidates=[]
+        for user in c.execute('SELECT id,name FROM user ORDER BY length(name) DESC,id'):
+            name=re.escape(user['name'])
+            # Covers both “请钱缘……” and “现需要汪文娟在……完成……”.
+            pattern=rf'(?:现(?:在)?需要|需要|请|安排|交由|由|委托)\s*(?:@|＠)?\s*{name}(?=\s|[，,。；;]|在|于|基于|负责|牵头|完成|推进|落实|组织|开展|协同)'
+            for match in re.finditer(pattern,source):
+                candidates.append((match.start(),match,user))
+        if not candidates:
+            return None
+        _, match, user=max(candidates,key=lambda item:item[0])
+        # Use the sentence that starts with the assignment; preceding text is
+        # context only and must never pollute the generated title/detail.
+        end=re.search(r'[。；;\n]',source[match.start():])
+        sentence=source[match.start():match.start()+end.start()] if end else source[match.start():]
+        if not re.search(r'(?:完成|负责|牵头|推进|落实|组织|开展|协同|提交|发出|发送|发布|编写|整理|评审|测试|部署|巡检|检查|跟进|处理)',sentence):
+            return None
+        work=re.search(r'(?:完成|负责|牵头|推进|落实|组织|开展|协同|提交|发出|发送|发布|编写|整理|评审|测试|部署|巡检|检查|跟进|处理)\s*(.+?)(?=(?:[，,、]\s*(?:输出物|交付物|产出|提交物|优先级))|$)',sentence)
+        if not work:
+            return None
+        title=concise_task_title(work.group(1))
+        title=re.sub(r'^(?:基于(?:以上|上述|前述)?背景[，,、]?\s*)','',title)
+        title=re.sub(r'^(?:相关|以上)\s*','',title).strip(' ，,。；;：:')[:40]
+        if not title:
+            return None
+        delivery=re.search(r'(?:输出物|交付物|产出|提交物)\s*(?:为|是|：|:)?\s*([^，。；;]+)',sentence)
+        deliverable=delivery.group(1).strip() if delivery else None
+        priority_match=re.search(r'优先级\s*[:：]?\s*(P[012])',sentence,re.I)
+        domain=detect_responsibility_domain(c,title) or detect_responsibility_domain(c,sentence)
+        task_type='PROJECT' if re.search(r'(?:项目|一期|二期|三期|roadmap|路线图)',sentence,re.I) else 'ADHOC'
+        description=title + (f'。交付物：{deliverable}。' if deliverable else '')
+        slots={'title':title,'description':description,'due_at':parse_due(sentence),
+               'priority':priority_match.group(1).upper() if priority_match else None,
+               'owner_id':user['id'],'org_node_id':domain['id'] if domain else None,
+               'domain_name':domain['name'] if domain else '', 'task_type':task_type,
+               'confidence':0.99,'extraction_mode':'explicit_assignment'}
+        return slots,[key for key in ('owner_id','due_at') if not slots.get(key)]
+    finally:
+        if own_connection: c.close()
+
 def draft_slots(text, owner_id=None, c=None):
     text=strip_decorative_emoji(text)
-    draft=ai_draft(text); own_connection=c is None; c=c or db()
+    own_connection=c is None; c=c or db()
     try:
+        explicit=explicit_assignment_draft(text,owner_id,c)
+        if explicit:
+            return explicit
+        draft=ai_draft(text,c)
         instruction=task_instruction_text(text)
         domain=detect_responsibility_domain(c,instruction)
+        if not domain and draft.get('suggested_domain'):
+            domain=c.execute("SELECT id,name FROM org_node WHERE node_type='domain' AND inactive_at IS NULL AND name=? ORDER BY id LIMIT 1",(draft['suggested_domain'],)).fetchone()
         # An explicitly named owner in the meeting item always takes precedence
         # over the sender/current web user used only as a fallback.
-        detected_owner=detect_task_owner(c,instruction) or owner_id
+        model_owner=None
+        if draft.get('owner_name'):
+            model_owner=c.execute('SELECT id FROM user WHERE name=? ORDER BY id LIMIT 1',(draft['owner_name'],)).fetchone()
+            model_owner=model_owner['id'] if model_owner else None
+        detected_owner=detect_task_owner(c,instruction) or model_owner or owner_id
         # Rule parsing is the stable fallback for an explicit date in meeting notes.
         # It also covers dates that a model may omit because of formatting whitespace.
-        slots={'title':draft['title'],'description':draft.get('description') or task_detail(text),'due_at':draft['due_at'] or parse_due(text),'priority':draft['priority'],'deliverable':draft['deliverable'],'owner_id':detected_owner,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':'PROJECT'}
+        priority=draft.get('priority') if draft.get('priority') in ('P0','P1','P2') else None
+        task_type=draft.get('task_type') if draft.get('task_type') in ('ROUTINE','PROJECT','ADHOC') else None
+        # An explicit date in the source (including “今天下班前”) is factual
+        # input and must always win over a model's inferred date.
+        source_due=parse_due(instruction) or parse_due(text)
+        slots={'title':draft['title'],'description':draft.get('description'),'due_at':source_due or draft.get('due_at'),'priority':priority,'owner_id':detected_owner,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':task_type}
         missing=[k for k in ('owner_id','due_at') if not slots.get(k)]
         return slots,missing
+    finally:
+        if own_connection: c.close()
+
+def fast_direct_draft(text, owner_id=None, c=None):
+    """Parse a short, explicit assignment without waiting for the LLM.
+
+    This deliberately narrow path is for one-line instructions that begin with
+    a configured person's name and contain both an actionable verb and a
+    concrete deadline. Meeting notes, pasted chats and ambiguous material keep
+    using the model-first extraction path below.
+    """
+    source=strip_decorative_emoji(text).strip()
+    if not source or len(source)>160 or '\n' in source or len(re.findall(r'[。；;！？!?]',source))>1:
+        return None
+    own_connection=c is None; c=c or db()
+    try:
+        due=parse_due(source)
+        owner=detect_task_owner(c,source)
+        if not due or not owner:
+            return None
+        user=c.execute('SELECT name FROM user WHERE id=?',(owner,)).fetchone()
+        if not user:
+            return None
+        # A mention buried in a discussion is not enough: the assignee must be
+        # named at the start of this compact instruction.
+        if not re.match(r'^\s*(?:请|由)?(?:@|＠)?'+re.escape(user['name']),source):
+            return None
+        if not re.search(r'(?:完成|发出|发送|提交|发布|编写|整理|评审|测试|部署|巡检|检查|跟进|推进|落实|处理|组织|开展|协同)',source):
+            return None
+        title=re.sub(r'^\s*(?:请|由)?(?:@|＠)?'+re.escape(user['name'])+r'\s*','',source)
+        # Dates already live in a structured field; retaining them in titles
+        # makes cards and list rows unnecessarily noisy.
+        title=re.sub(r'(?:今天|今日|明天|后天)(?:下班前|内|之前|完成|截止)?','',title)
+        title=re.sub(r'(?:(?:本|这|下)周|(?:星期|周))[一二三四五六日天](?:\s*\d{1,2}(?::|：)\d{2})?(?:前|之前|截止|完成)?','',title)
+        title=re.sub(r'(?:在|于)?\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日(?:前|之前|截止|完成)?','',title)
+        title=re.sub(r'(?:在|于)?\s*\d{1,2}月\s*\d{1,2}(?:日|号)?(?:前|之前|截止|完成)?','',title)
+        title=title.strip(' ，,。；;：:')[:40]
+        if not title:
+            return None
+        domain=detect_responsibility_domain(c,source)
+        slots={'title':title,'description':None,'due_at':due,'priority':None,
+               'owner_id':owner,'org_node_id':domain['id'] if domain else None,
+               'domain_name':domain['name'] if domain else '', 'task_type':None,
+               'confidence':0.98,'extraction_mode':'fast_rule'}
+        return slots,[]
+    finally:
+        if own_connection: c.close()
+
+def ai_drafts(text, owner_id=None, c=None):
+    """Extract one or more independently editable task drafts from a meeting note."""
+    own_connection=c is None; c=c or db(); text=strip_decorative_emoji(text)
+    try:
+        explicit=explicit_assignment_draft(text,owner_id,c)
+        if explicit:
+            return [explicit]
+        # Most day-to-day instructions are short and complete already. Parse
+        # those locally so users do not wait on a 10–30 second model call; keep
+        # the model for the meeting notes and materials where it adds value.
+        fast=fast_direct_draft(text,owner_id,c)
+        if fast:
+            return [fast]
+        if not ai_configured():
+            slots,missing=draft_slots(text,owner_id,c); return [(slots,missing)]
+        members='、'.join(row['name'] for row in c.execute('SELECT name FROM user ORDER BY name,id'))
+        domains='、'.join(row['name'] for row in c.execute("SELECT name FROM org_node WHERE node_type='domain' AND inactive_at IS NULL ORDER BY id"))
+        prompt=('将材料拆分为可独立创建的任务草稿。只输出 JSON 对象 {"tasks":[...]}，禁止 Markdown。每个 task 字段为 '
+                'title,owner_name,due_at,suggested_domain,priority,task_type,description,confidence。'
+                '一条 task 只能有一名最终责任人；按不同责任人、独立交付物、不同截止日期或可独立验收结果拆分。协同人不要成为责任人。'
+                '如果材料是多人聊天或会议记录，按每个发言人的语义分别判断：汇报结果、风险说明、背景和已完成事项不是新任务；只提取明确安排、请人推进或尚未完成的待办。'
+                '后续管理者的指令优先于前文汇报；责任人只能取该指令中被明确指派或 @ 的系统成员，不能把汇报人、被汇报人或不在成员表中的别名当作责任人。'
+                '未明确的字段返回 null，不得编造。owner_name 必须精确从成员中选择：'+members+'。'
+                'suggested_domain 必须精确从责任域中选择：'+domains+'。priority 仅 P0/P1/P2；task_type 仅 ROUTINE/PROJECT/ADHOC。'
+                '忽略已完成事项、背景和讨论过程。材料：'+text)
+        try:
+            raw=ai_chat_completion([
+                {'role':'system','content':'你是严谨的企业待办提炼器。仅输出合法 JSON，不输出 Markdown 或解释。'},
+                {'role':'user','content':prompt}
+            ], temperature=0.05, max_tokens=1800, timeout=30)
+            value=parse_model_json(raw); items=value.get('tasks',[]) if isinstance(value,dict) else value
+            if not isinstance(items,list) or not items: raise ValueError('no drafts')
+        except Exception:
+            slots,missing=draft_slots(text,owner_id,c); return [(slots,missing)]
+        out=[]
+        for item in items[:20]:
+            if not isinstance(item,dict) or not str(item.get('title') or '').strip(): continue
+            domain=c.execute("SELECT id,name FROM org_node WHERE node_type='domain' AND inactive_at IS NULL AND name=? LIMIT 1",(item.get('suggested_domain'),)).fetchone()
+            owner=c.execute('SELECT id FROM user WHERE name=? LIMIT 1',(item.get('owner_name'),)).fetchone()
+            item_source=str(item.get('source_text') or item.get('description') or item.get('title') or '')
+            source_due=parse_due(item_source) or parse_due(text)
+            slots={'title':str(item['title']).strip()[:40],'description':item.get('description'),'due_at':source_due or item.get('due_at'),'priority':item.get('priority') if item.get('priority') in ('P0','P1','P2') else None,'owner_id':owner['id'] if owner else owner_id,'org_node_id':domain['id'] if domain else None,'domain_name':domain['name'] if domain else '','task_type':item.get('task_type') if item.get('task_type') in ('ROUTINE','PROJECT','ADHOC') else None,'confidence':item.get('confidence',0.5)}
+            out.append((slots,[key for key in ('owner_id','due_at') if not slots.get(key)]))
+        if out: return out
+        slots,missing=draft_slots(text,owner_id,c); return [(slots,missing)]
     finally:
         if own_connection: c.close()
 
 # Internal storage keys must never be exposed in conversational or UI prompts.
 SLOT_LABELS={
     'title':'任务标题', 'description':'任务详情', 'owner_id':'任务责任人', 'due_at':'截止日期',
-    'deliverable':'交付物或验收标准', 'org_node_id':'责任域',
+    'org_node_id':'责任域',
     'priority':'优先级', 'task_type':'任务类型',
 }
 def friendly_slot_labels(keys):
@@ -273,6 +487,7 @@ def initialize_responsibility_domains(c):
 def initialize():
     c=db()
     try:
+        migrate(c)
         seed(c); c.execute("UPDATE user SET role='member' WHERE role='owner'"); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); normalize_legacy_conversation_tasks(c); c.commit()
     finally:
         c.close()
@@ -280,10 +495,31 @@ def initialize():
 def task_view(c, r):
     d=rowdict(r); owner=c.execute('SELECT name FROM user WHERE id=?',(d['owner_id'],)).fetchone(); d['owner_name']=owner[0] if owner else '未知责任人'
     approver=c.execute('SELECT name FROM user WHERE id=?',(d.get('approver_id'),)).fetchone() if d.get('approver_id') else None; d['approver_name']=approver[0] if approver else ''
-    due=datetime.fromisoformat(d['due_at'].replace('Z','+00:00')); current=datetime.now(timezone.utc)
-    d['time_status']='overdue' if due < current and d['work_status'] not in ('completed','cancelled') else ('due_soon' if (due-current).total_seconds()<86400 and d['work_status'] not in ('completed','cancelled') else 'normal')
+    try:
+        due=datetime.fromisoformat(str(d['due_at']).replace('Z','+00:00')); current=datetime.now(timezone.utc)
+        d['time_status']='overdue' if due < current and d['work_status'] not in ('completed','cancelled') else ('due_soon' if (due-current).total_seconds()<86400 and d['work_status'] not in ('completed','cancelled') else 'normal')
+    except (ValueError, TypeError):
+        # Legacy bad data must not make a task-list/detail response crash.
+        d['time_status']='invalid_due_date'
     progress=c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC LIMIT 1',(d['id'],)).fetchone()
     d['latest_progress']=rowdict(progress)
+    acceptance=c.execute('SELECT a.*,u.name AS acceptor_name FROM acceptance a LEFT JOIN user u ON u.id=a.acceptor_id WHERE a.task_id=? ORDER BY a.id DESC LIMIT 1',(d['id'],)).fetchone()
+    d['latest_acceptance']=rowdict(acceptance)
+    return d
+
+def approval_view(c, r):
+    """Return the evidence needed to make a confirmation decision."""
+    d=rowdict(r)
+    task=c.execute('SELECT * FROM task WHERE id=?',(d.get('task_id'),)).fetchone() if d.get('task_id') else None
+    d['task']=task_view(c,task) if task else None
+    approver=c.execute('SELECT name FROM user WHERE id=?',(d.get('approver_id'),)).fetchone() if d.get('approver_id') else None
+    d['approver_name']=approver['name'] if approver else '未配置'
+    if d.get('biz_type')=='progress_confirm' and d.get('biz_id'):
+        record=c.execute('SELECT * FROM progress_record WHERE id=?',(d['biz_id'],)).fetchone()
+        d['progress']=rowdict(record)
+        d['progress_history']=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? AND status=? ORDER BY reported_at DESC,id DESC LIMIT 10',(d['task_id'],'approved'))]
+    else:
+        d['progress']=None; d['progress_history']=[]
     return d
 
 # 绩效只对已确认生效的任务计算。标准工时用于衡量工作量，实际工时只用于负荷与估算偏差分析。
@@ -373,6 +609,11 @@ def parse_due(text):
     # Remove formatting whitespace first, while keeping the original text intact
     # for title and delivery extraction elsewhere.
     normalized=re.sub(r'\s+','',str(text or ''))
+    # “今天下班前/今日完成” is a deadline on the current China business day.
+    # Handle it before model inference and before generic weekday parsing.
+    if re.search(r'(?:今天|今日)(?:下班前|内|之前|完成|截止)?',normalized):
+        china_now=datetime.now(timezone(timedelta(hours=8)))
+        return china_now.date().isoformat()+'T17:00:00+08:00'
     m=re.search(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})',normalized)
     if m: return f'{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}T17:00:00+08:00'
     # Conversational task changes commonly omit the year: “改到10月28号”。
@@ -382,24 +623,74 @@ def parse_due(text):
     if not month_day:
         month_day=re.search(r'(?<!\d)(\d{1,2})[./](\d{1,2})(?!\d)',normalized)
     if month_day:
-        today=datetime.now(timezone.utc).date(); month,day=map(int,month_day.groups()); year=today.year
+        today=datetime.now(timezone(timedelta(hours=8))).date(); month,day=map(int,month_day.groups()); year=today.year
         try:
             target=datetime(year,month,day).date()
             if target<today: target=datetime(year+1,month,day).date()
             return target.isoformat()+'T17:00:00+08:00'
         except ValueError:
             return None
-    weekday=re.search(r'(本周|这周|下周)?(?:星期|周)([一二三四五六日天])',normalized)
+    # Both “本周五” and “本周周五” occur frequently in natural-language
+    # instructions.  Support the compact form as well as 星期/周五.
+    weekday=re.search(r'(?:(本周|这周|下周)([一二三四五六日天])|(?:星期|周)([一二三四五六日天]))',normalized)
     if weekday:
-        from datetime import timedelta
-        target_index={'一':0,'二':1,'三':2,'四':3,'五':4,'六':5,'日':6,'天':6}[weekday.group(2)]
-        today=datetime.now(timezone.utc).date(); target=today-timedelta(days=today.weekday())+timedelta(days=target_index)
-        if weekday.group(1)=='下周' or (not weekday.group(1) and target<today): target+=timedelta(days=7)
+        prefix=weekday.group(1) or ''
+        weekday_char=weekday.group(2) or weekday.group(3)
+        target_index={'一':0,'二':1,'三':2,'四':3,'五':4,'六':5,'日':6,'天':6}[weekday_char]
+        today=datetime.now(timezone(timedelta(hours=8))).date(); target=today-timedelta(days=today.weekday())+timedelta(days=target_index)
+        if prefix=='下周' or (not prefix and target<today): target+=timedelta(days=7)
         return target.isoformat()+'T17:00:00+08:00'
+    china_today=datetime.now(timezone(timedelta(hours=8))).date()
+    if '后天' in normalized:
+        return (china_today+timedelta(days=2)).isoformat()+'T17:00:00+08:00'
     if '明天' in normalized:
-        from datetime import timedelta
-        return (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
+        return (china_today+timedelta(days=1)).isoformat()+'T17:00:00+08:00'
+    days=re.search(r'(\d{1,3})\s*(?:天|日)后',normalized)
+    if days:
+        return (china_today+timedelta(days=int(days.group(1)))).isoformat()+'T17:00:00+08:00'
+    if re.search(r'(?:本月|这个月)底',normalized):
+        next_month=(china_today.replace(day=28)+timedelta(days=4)).replace(day=1)
+        return (next_month-timedelta(days=1)).isoformat()+'T17:00:00+08:00'
     return None
+
+def normalize_assistant_text(text):
+    """Normalise conversational punctuation without losing Chinese task titles."""
+    source=strip_decorative_emoji(str(text or ''))
+    source=source.replace('＃','#').replace('％','%').replace('：',':')
+    return re.sub(r'\s+',' ',source).strip()
+
+def task_title_tokens(title):
+    """Small, explainable token set for title references in short chat messages."""
+    source=re.sub(r'[\s，,。；;：:、（）()【】\[\]·—_\-]','',str(title or '')).lower()
+    return {source[i:i+2] for i in range(max(0,len(source)-1))} or ({source} if source else set())
+
+def task_reference_by_title(c, user_id, text, include_managed=True):
+    """Resolve a task named in ordinary language, returning None on ambiguity.
+
+    It deliberately requires a strong title overlap.  A fuzzy match is useful for
+    asking a clarification, but must never choose a target for a write operation.
+    """
+    source=normalize_assistant_text(text)
+    if not source or not user_id: return None
+    actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone()
+    can_manage=bool(actor and actor['role'] in ('manager','pm')) and include_managed
+    rows=c.execute("""SELECT t.id,t.title,t.owner_id,t.approver_id FROM task t
+                      WHERE t.approval_status='approved' AND t.work_status NOT IN ('completed','cancelled')
+                        AND (t.owner_id=? OR t.approver_id=? OR ?)
+                      ORDER BY t.due_at,t.id""",(user_id,user_id,1 if can_manage else 0)).fetchall()
+    source_compact=re.sub(r'[\s，,。；;：:、（）()【】\[\]·—_\-]','',source).lower()
+    scored=[]
+    for row in rows:
+        title_compact=re.sub(r'[\s，,。；;：:、（）()【】\[\]·—_\-]','',row['title']).lower()
+        if len(title_compact)>=3 and title_compact in source_compact:
+            scored.append((1.0,row)); continue
+        title_tokens=task_title_tokens(row['title']); source_tokens=task_title_tokens(source)
+        score=len(title_tokens & source_tokens)/max(1,len(title_tokens))
+        if score>=0.72 and len(title_tokens & source_tokens)>=2: scored.append((score,row))
+    if not scored: return None
+    scored.sort(key=lambda item:item[0],reverse=True)
+    if len(scored)>1 and abs(scored[0][0]-scored[1][0])<0.15: return None
+    return int(scored[0][1]['id'])
 
 def parse_progress_message(text):
     """Parse an explicit task-number progress message; never guesses a task."""
@@ -410,7 +701,7 @@ def parse_progress_message(text):
     blocked_match=re.search(r'(?:阻塞|风险)(?:原因)?\s*[：:]?\s*(.+)',text)
     return {'task_id':int(task_match.group(1)),'percent':percent,'comment':text.strip(),'blocked':bool(blocked_match),'block_reason':blocked_match.group(1).strip() if blocked_match else '','expected_finish':parse_due(text)}
 
-def resolve_progress_message(c, text, user_id):
+def resolve_progress_message(c, text, user_id, session_id=None):
     """Resolve a progress update safely, including a single-task conversational context.
 
     A vague phrase such as “此任务完成 80%” is only mapped automatically when the
@@ -421,14 +712,14 @@ def resolve_progress_message(c, text, user_id):
     if parsed is None:
         percent_match=re.search(r'(\d{1,3})\s*[%％]',text or '')
         parsed={'task_id':None,'percent':int(percent_match.group(1)) if percent_match else (100 if re.search(r'已完成|完成了|完成$',str(text or '').strip()) else None),'comment':str(text or '').strip(),'blocked':False,'block_reason':'','expected_finish':parse_due(text)}
-    progress_words=bool(re.search(r'进度|完成\s*\d{1,3}\s*[%％]|已完成|完成了|阻塞|风险',text or ''))
+    progress_words=bool(re.search(r'进度|进展|完成\s*\d{1,3}\s*[%％]|(?:当前|已经|已)?(?:完成|做到|达到)\s*\d{1,3}\s*[%％]|已完成|完成了|阻塞|风险',text or ''))
     if not progress_words:
         return None, None
     if not user_id:
         return None, '你的飞书账号尚未绑定系统成员，暂不能提交进度。'
     if parsed['percent'] is None:
         return None, '我理解你是在反馈进度，请补充完成比例，例如：任务#15 完成 80%。'
-    task_id=parsed['task_id']
+    task_id=parsed['task_id'] or referenced_task_id(c,session_id,user_id,text) or task_reference_by_title(c,user_id,text,include_managed=False)
     if not task_id and re.search(r'(此|这|当前|本)任务',text or ''):
         rows=c.execute("SELECT id,title FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id",(user_id,)).fetchall()
         if len(rows)==1:
@@ -439,7 +730,7 @@ def resolve_progress_message(c, text, user_id):
             choices='、'.join(f"#{row['id']} {row['title']}" for row in rows[:5])
             return None, '你有多条进行中的任务，请注明任务编号，例如：任务#15 完成 80%。可选：'+choices
     if not task_id:
-        return None, '请注明任务编号，例如：任务#15 完成 80%。'
+        return None, '我理解你是在反馈进度，但无法确定是哪一项。可直接说“本周需求池梳理完成 80%”，或回复任务编号。'
     task=c.execute('SELECT id,title,owner_id,approval_status FROM task WHERE id=?',(task_id,)).fetchone()
     if not task:
         return None, f'未找到任务#{task_id}，请确认编号。'
@@ -595,8 +886,14 @@ def save_bot_task_context(c, session_id, user_id, task_id):
         c.execute('INSERT INTO bot_task_context(session_id,user_id,task_id,updated_at) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET user_id=excluded.user_id,task_id=excluded.task_id,updated_at=excluded.updated_at',(session_id,user_id,task_id,now()))
 
 def referenced_task_id(c, session_id, user_id, text):
-    if not re.search(r'(?:该|这|此|上面|刚才|上一条)(?:个)?任务',str(text or '')):
-        return None
+    # Follow-up messages rarely repeat the noun exactly.  Treat “这条”“该项”
+    # and “上一个” as references only when a short-lived per-user context exists
+    # (or when the user has one and only one active task), never as a global guess.
+    reference_pattern=(r'(?:该|这|此)(?:个|条|项)?(?:任务|事项|工作)'
+                       r'|(?:上面|刚才|上一条|上一个)(?:个|条|项)?(?:任务|事项|工作)?'
+                       r'|(?:这|该|此)(?:条|项|个)(?=(?:的)?(?:截止|日期|责任人|负责人|进度|状态|标题|详情|验收|删除|开始|完成))')
+    if not re.search(reference_pattern,str(text or '')):
+        return task_reference_by_title(c,user_id,text)
     row=c.execute("SELECT task_id,updated_at FROM bot_task_context WHERE session_id=? AND user_id=?",(session_id,user_id)).fetchone()
     if row:
         try:
@@ -621,7 +918,7 @@ def is_task_query_request(text):
     if not source or re.search(r'(?:任务|事项)?#?\d+.*(?:完成|开始|删除|验收|改为|变更)|(?:完成|开始|删除|验收|改为|变更).*(?:任务|事项)?#?\d+',source):
         return False
     # Direct list expressions are always a query, with or without an explicit “我”.
-    if re.search(r'(?:任务|待办|事项|工作).{0,10}(?:清单|列表|查询|有哪些|有什么|多少|几条|全部|未完成|待处理|安排)|(?:有哪些|有什么|多少|几条|全部|未完成|待处理).{0,10}(?:任务|待办|事项|工作)',source):
+    if re.search(r'(?:任务|待办|事项|工作).{0,12}(?:清单|列表|查询|有哪些|有什么|多少|几条|全部|未完成|待处理|安排)|(?:有哪些|有什么|多少|几条|全部|未完成|待处理).{0,12}(?:任务|待办|事项|工作)',source):
         return True
     # First-person phrasing often omits “任务”, e.g. “我今天要做什么”.
     if re.search(r'(?:我|本人|手上|当前).{0,12}(?:任务|待办|事项|要做什么|该做什么|需要做什么|负责什么|忙什么|有什么安排|有哪些安排)',source):
@@ -629,6 +926,19 @@ def is_task_query_request(text):
     if re.search(r'(?:查|看|列|告诉).{0,8}(?:我|本人|手上|当前).{0,8}(?:任务|待办|事项|工作)',source):
         return True
     return bool(re.search(r'^(?:待办|任务|事项|工作)(?:清单|列表|查询)?$',source))
+
+def assistant_clarification(text):
+    """A useful fallback that reflects likely intent instead of a canned rejection."""
+    source=normalize_assistant_text(text)
+    if re.search(r'(?:截止|日期|延期|提前|推迟|改到|改为)',source):
+        return '我理解你想变更任务日期。请补充任务标题、任务编号，或先说“我的待办”后再说“该任务截止日期改到 10 月 28 日”。'
+    if re.search(r'(?:进度|进展|完成|做到|达到).*(?:%|％)|(?:%|％).*(?:进度|进展|完成)',source):
+        return '我理解你在反馈进度。请说明对应任务，例如“客户投诉工单闭环处理完成 80%”；如果刚查询过待办，也可以说“该任务完成 80%”。'
+    if re.search(r'(?:汇总|总结|概况|报表|情况)',source):
+        return '我可以汇总你的待办、团队或部门任务。可以直接说“我有哪些任务”“汇总团队任务进展”或“汇总部门所有任务进度”。'
+    if re.search(r'(?:删除|作废|移除|验收|责任人|代理|开始|提交)',source):
+        return '我理解你希望执行任务操作。请带上任务标题或编号；涉及修改、删除、验收和代理时，我会先回显操作内容，得到“确认”后才会执行。'
+    return '我可以查询任务、反馈进度、新建/修改/删除任务、提交或验收任务、变更责任人、设置确认代理，以及创建定时汇总。请直接说出目标和对象，例如“我有哪些任务”或“把客户投诉工单截止日期改到 10 月 28 日”。'
 
 def rule_bot_intent(text):
     """Fast, explainable intent recognition for the common assistant commands."""
@@ -654,13 +964,11 @@ def model_bot_intent(text):
         '不确定返回 unknown。不要执行操作，不要解释。用户输入：'+str(text or '')
     )
     try:
-        # Reasoning-capable providers may consume part of the budget before emitting
-        # the strict JSON response, so leave enough room for both phases.
-        payload=json.dumps({'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':prompt}],'temperature':0,'max_tokens':256}).encode()
-        req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
-        with urllib.request.urlopen(req,timeout=12) as response:
-            content=json.load(response)['choices'][0]['message']['content']
-        parsed=json.loads(str(content).removeprefix('```json').removesuffix('```').strip())
+        content=ai_chat_completion([
+            {'role':'system','content':'只输出合法 JSON，不输出解释。'},
+            {'role':'user','content':prompt}
+        ], temperature=0, max_tokens=256, timeout=12)
+        parsed=parse_model_json(content)
         return parsed.get('intent') if parsed.get('intent') in {'task_query','task_creation','progress_update','task_operation','help','unknown'} else 'unknown'
     except Exception:
         return 'unknown'
@@ -720,11 +1028,11 @@ def model_bot_operation_command(c, text, user_id, session_id=None):
         '。系统成员：'+json.dumps(people,ensure_ascii=False,separators=(',',':'))
     )
     try:
-        payload=json.dumps({'model':os.getenv('AI_MODEL'),'messages':[{'role':'user','content':prompt}],'temperature':0,'max_tokens':400}).encode()
-        req=urllib.request.Request(os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'})
-        with urllib.request.urlopen(req,timeout=15) as response: content=json.load(response)['choices'][0]['message']['content']
-        match=re.search(r'\{.*\}',str(content),re.S)
-        return model_action_to_command(json.loads(match.group(0))) if match else None
+        content=ai_chat_completion([
+            {'role':'system','content':'只输出合法 JSON，不执行操作，不解释。'},
+            {'role':'user','content':prompt}
+        ], temperature=0, max_tokens=400, timeout=15)
+        return model_action_to_command(parse_model_json(content))
     except Exception:
         return None
 
@@ -747,7 +1055,7 @@ def save_bot_action(c, session_id, user_id, action):
 
 def plan_bot_action(c, text, user_id, session_id, allow_model=True):
     """Create an explicit, reviewable plan for non-creation work actions."""
-    source=str(text or '').strip(); tid=task_number(source) or referenced_task_id(c,session_id,user_id,source); fallback_reply=None
+    source=normalize_assistant_text(text); tid=task_number(source) or referenced_task_id(c,session_id,user_id,source); fallback_reply=None
     if not user_id: return None,'你的飞书账号尚未绑定系统成员，暂不能执行管理操作。'
     report_schedule=parse_report_schedule(c,source,user_id)
     if report_schedule:
@@ -761,28 +1069,28 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         action={'type':'create_scheduled_report',**report_schedule}; save_bot_action(c,session_id,user_id,action)
         labels={'department':'部门','team':'团队','self':'个人'}
         return action,f'拟设置每日 {report_schedule["schedule_time"]} 向你发送{labels[report_schedule["scope"]]}任务进展汇总。回复“确认”生效，回复“取消”放弃。'
-    if tid and re.search(r'(?:开始|启动).*(?:任务|#)|(?:任务|#).*?(?:开始|启动)',source):
+    if tid and re.search(r'(?:开始|启动)(?:处理|执行)?|(?:任务|#).*?(?:开始|启动)',source):
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         if not task: return None,f'未找到任务#{tid}。'
         if int(task['owner_id'])!=int(user_id): return None,'只有任务责任人可以开始任务。'
         if task['work_status']!='assigned': return None,f'任务#{tid}当前不是待开始状态。'
         action={'type':'start_task','task_id':tid}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟开始任务#{tid}《{task["title"]}》。回复“确认”执行，回复“取消”放弃。'
-    if tid and re.search(r'(?:提交验收|完成并提交|完成任务).*(?:任务|#)|(?:任务|#).*?(?:提交验收|完成并提交|完成任务)',source):
+    if tid and re.search(r'(?:提交验收|完成并提交|完成任务|提请验收)',source):
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         if not task: return None,f'未找到任务#{tid}。'
         if int(task['owner_id'])!=int(user_id): return None,'只有任务责任人可以提交验收。'
         if task['work_status']!='in_progress': return None,f'任务#{tid}当前不是进行中状态。'
         action={'type':'submit_acceptance','task_id':tid}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟提交任务#{tid}《{task["title"]}》等待上级验收。回复“确认”执行，回复“取消”放弃。'
-    if re.search(r'(?:删除|移除|作废).*(?:任务|#)',source):
+    if re.search(r'(?:删除|移除|作废)',source):
         if not tid: return None,'请注明要删除的任务编号，例如：删除任务#15。'
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         if not task: return None,f'未找到任务#{tid}。'
         if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理PM或部门负责人可以删除任务。'
         action={'type':'delete_task','task_id':tid}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟删除任务#{tid}《{task["title"]}》及其确认、进度、验收记录。回复“确认”执行，回复“取消”放弃。'
-    if '验收' in source and re.search(r'(?:验收|通过|驳回).*(?:任务|#)|(?:任务|#).*?(?:验收|通过|驳回)',source):
+    if '验收' in source and re.search(r'(?:验收|通过|驳回)',source):
         if not tid: return None,'请注明要验收的任务编号，例如：验收任务#15 通过。'
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         if not task: return None,f'未找到任务#{tid}。'
@@ -799,7 +1107,9 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         if int(approval['approver_id'] or 0)!=int(user_id): return None,'只有指定确认人可以执行该确认。'
         action={'type':'confirm_approval','approval_id':approval['id'],'result':result}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟{("驳回" if result=="rejected" else "通过")}任务#{tid}的{("进度" if kind=="progress_confirm" else "任务")}确认。回复“确认”执行，回复“取消”放弃。'
-    owner_match=re.search(r'(?:责任人|负责人)(?:改为|变更为|调整为|为)\s*([\u4e00-\u9fffA-Za-z·]{2,20})',source)
+    owner_match=re.search(r'(?:责任人|负责人)(?:改为|变更为|调整为|改成|换成|为)\s*([\u4e00-\u9fffA-Za-z·]{2,20})',source)
+    if not owner_match and tid:
+        owner_match=re.search(r'(?:交给|转给|由)\s*([\u4e00-\u9fffA-Za-z·]{2,20})\s*(?:负责|处理|跟进|完成)',source)
     if owner_match and tid:
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone(); target=user_by_name(c,owner_match.group(1))
         if not task: return None,f'未找到任务#{tid}。'
@@ -818,7 +1128,7 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         action={'type':'edit_field','task_id':tid,'field':field,'value':value[:2000]}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟修改任务#{tid}《{task["title"]}》的{ {"title":"标题","description":"详情","deliverable":"交付物/验收标准"}[field] }。回复“确认”执行，回复“取消”放弃。'
     due=parse_due(source)
-    if due and re.search(r'(?:截止|延期|日期|时间).*(?:改|调|变|到|为)|(?:改|调|变).*(?:截止|日期|时间)',source):
+    if due and re.search(r'(?:截止(?:日期)?|完成时间|交付日期|到期).*(?:改|调|变|延|推|到|为)|(?:改|调|变|延|推).*(?:截止|日期|时间|到期)|(?:该|这|此)(?:任务|事项)?.{0,12}(?:到|为)\s*(?:\d{1,2}[./月]|今天|明天|后天|下周)',source):
         if not tid:
             active=c.execute("SELECT * FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id",(user_id,)).fetchall()
             if len(active)==1:
@@ -917,6 +1227,42 @@ def extract_document_text(data, filename=''):
 def ai_configured():
     return all(os.getenv(key) for key in ('AI_API_BASE','AI_API_KEY','AI_MODEL'))
 
+def ai_chat_completion(messages, temperature=0, max_tokens=800, timeout=20):
+    """Call the configured OpenAI-compatible model through one guarded path.
+
+    Every AI feature shares the same transport, response normalisation and
+    timeout behaviour.  A model answer is always a suggestion: downstream
+    identity, field and permission checks remain deterministic.
+    """
+    if not ai_configured():
+        raise RuntimeError('AI model is not configured')
+    payload={'model':os.getenv('AI_MODEL'),'messages':messages,'temperature':temperature,'max_tokens':max_tokens}
+    req=urllib.request.Request(
+        os.getenv('AI_API_BASE').rstrip('/')+'/chat/completions',
+        json.dumps(payload,ensure_ascii=False).encode(),
+        {'Authorization':'Bearer '+os.getenv('AI_API_KEY'),'Content-Type':'application/json'}
+    )
+    with urllib.request.urlopen(req,timeout=timeout) as response:
+        result=json.load(response)
+    choices=result.get('choices') or []
+    if not choices: raise ValueError('AI response has no choices')
+    content=(choices[0].get('message') or {}).get('content','')
+    if isinstance(content,list):
+        content=''.join(str(item.get('text','')) if isinstance(item,dict) else str(item) for item in content)
+    content=str(content or '').strip()
+    if not content: raise ValueError('AI response is empty')
+    return content
+
+def parse_model_json(content):
+    """Tolerate harmless code fences but reject narrative model responses."""
+    source=str(content or '').strip()
+    source=re.sub(r'^```(?:json)?\s*|\s*```$','',source,flags=re.I).strip()
+    try: return json.loads(source)
+    except json.JSONDecodeError:
+        match=re.search(r'(\{.*\}|\[.*\])',source,re.S)
+        if not match: raise
+        return json.loads(match.group(1))
+
 def strip_decorative_emoji(text):
     """Remove decorative emoji from extracted materials without touching @mentions."""
     cleaned=re.sub(r'[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]','',str(text or ''))
@@ -991,7 +1337,16 @@ def concise_task_title(text):
     """Extract a manageable task title from a meeting note without losing the source note."""
     source=task_instruction_text(text)
     source=re.sub(r'\s+',' ',source)
+    # Screenshot/OCR material often puts the speaker before a space rather than
+    # a colon.  It is context, not part of the task title.
+    source=re.sub(r'^[\u4e00-\u9fff]{2,8}\s+(?=(?:请|由|今天|明天|后天|本周|下周|完成|推进|落实|组织|协调))','',source)
     source=re.sub(r'[@＠][\w\-\u4e00-\u9fff]+','',source).strip()
+    # A meeting is a concrete, independently checkable next action.  Prefer it
+    # over the policy/background wording that often appears before it.
+    meeting=re.search(r'(?:我们)?(?:先)?(?:和|与)\s*([^，。；；]+?)\s*(?:开个会|开会|召开(?:沟通)?会)',source)
+    if meeting:
+        counterpart=meeting.group(1).strip(' ，,。；;')
+        return ('与'+counterpart+'召开沟通会')[:40]
     coordinated=re.search(r'由\s*(?:公司)?\s*协调\s*([^，。；\n]+)',source)
     if coordinated:
         candidate='协调'+coordinated.group(1).strip()
@@ -1007,11 +1362,24 @@ def concise_task_title(text):
 def task_instruction_text(text):
     """Prefer the final actionable speaker turn over earlier status updates."""
     source=re.sub(r'【[^】]*】','',str(text or '')).strip()
-    parts=re.split(r'(?:^|\n)\s*[\u4e00-\u9fff]{2,5}\s*(?=\n)',source)
-    if len(parts)>1:
-        actionable=[part.strip() for part in parts if re.search(r'(?:[@＠]|请|由|完成|推进|推动|落实|组织|开展|协同|本周|下周|截止)',part)]
+    # Chat screenshots usually put a speaker name on a separate line.  Preserve
+    # turns instead of treating the complete screenshot as one sentence, then
+    # use the last actionable turn so an earlier report cannot become a task.
+    turns=re.split(r'(?:^|\n)\s*[\u4e00-\u9fff]{2,8}\s*(?=\n)',source)
+    if len(turns)>1:
+        actionable=[turn.strip() for turn in turns if re.search(r'(?:[@＠]|请|由|完成|推进|推动|落实|组织|开展|协同|本周|下周|截止|安排)',turn)]
         if actionable:
             return actionable[-1]
+    # A pasted chat may use normal punctuation rather than separate speaker
+    # rows.  Select the latest explicit instruction instead of summarising the
+    # complete thread (which would otherwise turn an earlier report into a task).
+    # A chat OCR export often omits punctuation before an @mention. Treat that
+    # mention as the beginning of a new semantic clause, otherwise an earlier
+    # background sentence can hide the actual assignment that follows it.
+    sentences=[part.strip() for part in re.split(r'(?<=[。！？；;])|\n|(?=[@＠])',source) if part.strip()]
+    actionable=[part for part in sentences if re.search(r'(?:请|由|安排|需要).{0,30}(?:负责|牵头|完成|推进|推动|落实|组织|开展|协同|协调)|(?:今天|明天|后天|本周|下周).{0,28}(?:完成|推进|落实|处理)|[@＠].{0,40}(?:开个会|开会|召开|沟通|完成|推进|落实|处理)',part)]
+    if actionable:
+        return actionable[-1]
     return source
 
 def task_detail(text):
@@ -1019,9 +1387,22 @@ def task_detail(text):
     source=task_instruction_text(text)
     source=re.sub(r'\s+',' ',source)
     source=re.sub(r'[@＠][\w\-\u4e00-\u9fff]+','',source).strip()
+    meeting=re.search(r'(?:我们)?(?:先)?(?:和|与)\s*([^，。；；]+?)\s*(?:开个会|开会|召开(?:沟通)?会)',source)
+    if meeting:
+        # Chat OCR frequently drops punctuation between the business objective,
+        # @mentions and "我们先…开会".  Stop at a mention or a run of spaces,
+        # rather than letting the objective swallow the actual next action.
+        before=source[:meeting.start()]
+        objectives=re.findall(r'(?:协调|推动)[^，。；；@＠]*?(?=\s{2,}|$)',before)
+        objective=(objectives[-1].strip(' ，,。；;') if objectives else '')
+        counterpart=meeting.group(1).strip(' ，,。；;')
+        if objective:
+            return f'{objective}；与{counterpart}召开沟通会'[:240]
     # In multi-speaker records preserve the final instruction as the scope,
     # while date/owner stay in their structured fields.
-    if source != re.sub(r'【[^】]*】','',str(text or '')).strip():
+    raw_without_header=re.sub(r'【[^】]*】','',str(text or '')).strip()
+    is_multi_turn=len(re.findall(r'(?:^|\n)\s*[\u4e00-\u9fff]{2,8}\s*(?=\n)',raw_without_header))>=2
+    if is_multi_turn:
         source=re.sub(r'(?:本|下)周[一二三四五六日天][之前前]?\s*(?:完成)?','',source)
         return source.strip(' ，,。；;')[:240] or '待补充任务范围'
     action=re.search(r'(?:请[^，。；]{1,20}?负责)?(?:完成|推进|落实|组织|开展|协同)([^。；]+)',source)
@@ -1043,12 +1424,63 @@ def similar_tasks(c, title, limit=5):
         if score>=0.42: candidates.append((score,task))
     return [dict(rowdict(task),similarity=round(score,2)) for score,task in sorted(candidates,key=lambda item:item[0],reverse=True)[:limit]]
 
+def normalized_task_title(value):
+    """Canonical form used only for duplicate detection, never for display."""
+    return re.sub(r'\s|[，,。；;：:、（）()【】\[\]·—-]', '', str(value or '')).lower()
+
+def task_duplicate_candidates(c, slots, exclude_draft_id=None):
+    """Return exact blocks and softer same-owner/same-date similarity warnings.
+
+    A draft is not a task until confirmed, so duplicate detection must include
+    both stored tasks and still-live drafts.  This prevents two clicks (or two
+    pasted copies of the same meeting note) from silently creating duplicates.
+    """
+    title = normalized_task_title(slots.get('title'))
+    owner_id = slots.get('owner_id')
+    due_date = str(slots.get('due_at') or '')[:10]
+    if not title or not owner_id or not due_date:
+        return {'exact': [], 'similar': []}
+
+    exact, similar = [], []
+    source_chars = set(title)
+
+    def consider(item, source, item_id):
+        candidate_title = normalized_task_title(item.get('title'))
+        if not candidate_title or str(item.get('owner_id')) != str(owner_id) or str(item.get('due_at') or '')[:10] != due_date:
+            return
+        payload = {
+            'source': source, 'id': item_id, 'title': item.get('title') or '未命名任务',
+            'owner_id': item.get('owner_id'), 'due_at': item.get('due_at'),
+        }
+        if candidate_title == title:
+            exact.append(payload)
+            return
+        score = 1.0 if title in candidate_title or candidate_title in title else len(source_chars & set(candidate_title)) / max(1, len(source_chars | set(candidate_title)))
+        # Same owner and due date substantially narrow the candidate set.  A
+        # 0.55 threshold catches common action-word variations ("完成…" vs
+        # "…处理") while keeping this as a warning rather than a hard block.
+        if score >= 0.55:
+            payload['similarity'] = round(score, 2)
+            similar.append(payload)
+
+    for row in c.execute("SELECT id,title,owner_id,due_at FROM task WHERE approval_status<>'rejected' ORDER BY updated_at DESC"):
+        consider(rowdict(row), 'task', row['id'])
+    for row in c.execute("SELECT id,slots_json FROM conversation_draft WHERE status IN ('collecting','preview') AND expire_at>?", (now(),)):
+        if exclude_draft_id is not None and int(row['id']) == int(exclude_draft_id):
+            continue
+        try:
+            draft_slots = json.loads(row['slots_json'] or '{}')
+        except (TypeError, json.JSONDecodeError):
+            continue
+        consider(draft_slots, 'draft', row['id'])
+    return {'exact': exact, 'similar': similar}
+
 def detect_task_owner(c, text):
     """Recognize an explicit assignee, including a system-member @mention."""
     source=str(text or '')
     for user in c.execute('SELECT id,name FROM user ORDER BY length(name) DESC'):
         name=re.escape(user['name'])
-        if re.search(rf'(?:请|由)\s*{name}\s*(?:负责|牵头|完成|推进|落实|组织|开展|协同)',source):
+        if re.search(rf'(?:请|由)\s*{name}\s*(?:负责|牵头|完成|推进|落实|组织|开展|协同)',source) or re.search(rf'(?:任务)?责任人\s*[:：]\s*{name}(?![\u4e00-\u9fffA-Za-z0-9_])',source):
             return user['id']
     # Materials pasted from chat/screenshots commonly use @姓名 instead of a
     # full "请某某负责" sentence.  An exact mention of a configured member is
@@ -1057,6 +1489,13 @@ def detect_task_owner(c, text):
     for user in c.execute('SELECT id,name FROM user ORDER BY length(name) DESC'):
         name=re.escape(user['name'])
         if re.search(rf'[@＠]\s*{name}(?![\u4e00-\u9fffA-Za-z0-9_])',source):
+            return user['id']
+    # Short operational messages often omit “请/由”，e.g. “刘明今天下班前
+    # 完成客户投诉工单闭环处理”。 Treat it as an assignment only when the name
+    # starts the instruction and no other explicit assignee exists.
+    for user in c.execute('SELECT id,name FROM user ORDER BY length(name) DESC'):
+        name=re.escape(user['name'])
+        if re.search(rf'^\s*{name}\s*(?:今天|明天|后天|本周|下周|在|于)?[^。；\n]{{0,24}}(?:完成|发出|发送|提交|发布|编写|整理|评审|测试|部署|巡检|检查|跟进|推进|落实|处理|组织|开展|协同)',source):
             return user['id']
     return None
 
@@ -1077,35 +1516,59 @@ def normalize_legacy_conversation_tasks(c):
         else:
             c.execute('UPDATE task SET title=?,description=?,updated_at=? WHERE id=?',(title,task_detail(source),now(),row['id']))
 
-def ai_draft(text):
+def ai_draft(text, c=None):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
     text=strip_decorative_emoji(text)
     api_base, api_key, model = os.getenv('AI_API_BASE'), os.getenv('AI_API_KEY'), os.getenv('AI_MODEL')
     raw_without_header=re.sub(r'【[^】]*】','',str(text or '')).strip()
     instruction=task_instruction_text(text)
     if api_base and api_key and model:
-        prompt = ('从以下材料中仅提炼明确待办，输出 JSON，不要输出解释。字段为 title,description,due_at,priority,deliverable,owner_id,confidence。'
-                  '忽略会议标题、参会信息、背景数据、讨论过程、已完成事项和与待办无关的内容。title 为简洁工作标题（不超过40字）；'
-                  'description 只保留工作范围、关键动作和交付要求，不能重复标题，不能重复责任人和截止日期；'
-                  'owner_id 必须为 null；无法确定的截止时间为 null；不得编造验收标准。材料：' + text)
-        payload=json.dumps({'model':model,'messages':[{'role':'user','content':prompt}],'temperature':0.1}).encode()
-        req=urllib.request.Request(api_base.rstrip('/')+'/chat/completions',payload,{'Authorization':'Bearer '+api_key,'Content-Type':'application/json'})
+        own_connection=c is None; c=c or db()
         try:
-            with urllib.request.urlopen(req,timeout=20) as f:
-                content=json.load(f)['choices'][0]['message']['content']
-            draft=json.loads(content.removeprefix('```json').removesuffix('```').strip())
+            domains=[rowdict(row) for row in c.execute("SELECT name,boundary FROM org_node WHERE node_type='domain' AND inactive_at IS NULL ORDER BY id")]
+            members=[row['name'] for row in c.execute('SELECT name FROM user ORDER BY name,id')]
+        finally:
+            if own_connection: c.close()
+        domain_text='；'.join(f"{row['name']}：{row['boundary']}" for row in domains) or '无可选责任域'
+        member_text='、'.join(members) or '无可选成员'
+        prompt = ('你是工作管理树的任务草稿提炼助手。只提炼材料中明确提出、尚未完成、需要后续推进的工作事项；忽略会议标题、称呼、参会人员、背景说明、讨论过程、已完成事项和无关信息。'
+                  '若材料包含多人对话或多段发言，必须区分“前文汇报/结论”和“后文安排”：仅后者的明确待办可生成草稿，后续指令优先于前文汇报。'
+                  '责任人只能从该待办指令中明确指定或 @ 的成员识别，绝不可把汇报人、被汇报对象、未知简称或上下文出现的人名当作责任人。'
+                  '只输出一个 JSON 对象（禁止使用数组或 Markdown 代码块），不要输出解释。字段为 title,owner_name,due_at,suggested_domain,priority,task_type,description,confidence。'
+                  'title 为不超过40字的简洁工作标题，不包含责任人、日期、优先级或背景；无明确待办时为 null。'
+                  'owner_name 仅在材料明确指定责任人时填写，且必须从以下系统成员中精确选择：'+member_text+'；否则为 null，不得猜测。'
+                  'due_at 使用 YYYY-MM-DD；只能填写明确或可准确换算的截止日期，否则为 null。'
+                  'suggested_domain 只能从以下已有责任域中精确选择：'+domain_text+'；无法判断或有歧义时为 null。'
+                  'priority 只能为 P0、P1、P2；task_type 只能为 ROUTINE（例行）、PROJECT（专项）、ADHOC（临时）；无法判断时均为 null。'
+                  'description 仅提炼任务范围、关键动作、约束和必要上下文，不重复标题、责任人或日期；信息不足时为 null。'
+                  '上述字段均为可编辑草稿建议，允许为空；confidence 为 0 到 1 的数字。材料：' + text)
+        try:
+            content=ai_chat_completion([
+                {'role':'system','content':'你是企业任务提炼助手。必须只输出合法 JSON；宁可留空，也不得把汇报、背景或已完成事项当作新任务。'},
+                {'role':'user','content':prompt}
+            ], temperature=0.05, max_tokens=900, timeout=20)
+            draft=parse_model_json(content)
+            # Some otherwise compatible providers return a one-item JSON array
+            # despite being asked for an object. Accept that shape explicitly,
+            # but reject every other non-object response so the safe fallback
+            # remains in effect for malformed model output.
+            if isinstance(draft,list):
+                draft=draft[0] if len(draft)==1 else None
+            if not isinstance(draft,dict):
+                raise ValueError('model draft must be a JSON object')
             title=(draft.get('title') or '').strip()
             # A later speaker's instruction takes precedence over an earlier
             # report, even when a model tries to summarize the whole thread.
-            if instruction!=raw_without_header or not title or len(title)>40 or title in text:
+            multi_turn=len(re.findall(r'(?:^|\n)\s*[\u4e00-\u9fff]{2,8}\s*(?=\n)',raw_without_header))>=2
+            if multi_turn or not title or len(title)>40 or title in text:
                 title=concise_task_title(text)
-            description=task_detail(text) if instruction!=raw_without_header else task_detail(draft.get('description') or text)
-            return {'title':title, 'description':description, 'due_at':draft.get('due_at'), 'priority':draft.get('priority','P1'), 'deliverable':draft.get('deliverable') or '待补充验收标准', 'owner_id':None, 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
+            description=task_detail(text) if multi_turn else (task_detail(draft['description']) if draft.get('description') else None)
+            return {'title':title, 'owner_name':draft.get('owner_name'), 'description':description, 'due_at':draft.get('due_at') or parse_due(instruction), 'suggested_domain':draft.get('suggested_domain'), 'priority':draft.get('priority'), 'task_type':draft.get('task_type'), 'confidence':draft.get('confidence',0.5), 'requires_human_confirmation':True, 'mode':'model'}
         except Exception:
             # Safe fallback: a model outage must never block a human-created task.
             pass
-    due=parse_due(text)
-    return {'title':concise_task_title(text), 'description':task_detail(text), 'due_at': due, 'priority':'P1', 'deliverable':'待补充验收标准', 'owner_id':None, 'confidence':0.35 if not due else 0.65, 'requires_human_confirmation':True, 'mode':'rule'}
+    due=parse_due(instruction) or parse_due(text)
+    return {'title':concise_task_title(text), 'owner_name':None, 'description':task_detail(text), 'due_at': due, 'suggested_domain':None, 'priority':None, 'task_type':None, 'confidence':0.35 if not due else 0.65, 'requires_human_confirmation':True, 'mode':'rule'}
 
 class WeComAdapter:
     def __init__(self): self.configured=all(os.getenv(k) for k in ('WECOM_CORP_ID','WECOM_AGENT_ID','WECOM_SECRET'))
@@ -1196,6 +1659,8 @@ class WeComCallback:
         return {'userid':userid,'msg_type':msg_type,'content':content,'task_id':task_id}
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
     def cookie(self, name):
         for value in self.headers.get('Cookie','').split(';'):
             key,sep,item=value.strip().partition('=')
@@ -1211,6 +1676,47 @@ class Handler(BaseHTTPRequestHandler):
             return rowdict(row)
         finally: c.close()
     def actor_id(self, submitted=None): return getattr(self,'authenticated_user_id',None) or submitted
+    def handle_weekly_reports(self, path, query=None):
+        c=db()
+        try:
+            query=query or {}
+            if self.command=='GET':
+                user_id=self.actor_id(query.get('actor_id',[None])[0])
+                if path=='/api/weekly-reports':
+                    out=weekly_reports.list_reports(c,user_id,query.get('year',[None])[0],query.get('month',[None])[0],query.get('week',[None])[0])
+                else:
+                    match=re.fullmatch(r'/api/weekly-reports/(\d+)(/text|/changes)?',path)
+                    if not match: return self.json(404,{'error':'周报接口不存在'})
+                    out=weekly_reports.get_report(c,int(match[1]),user_id)
+                    if match[2]=='/text': out={'text':weekly_reports.meeting_text(out)}
+                    elif match[2]=='/changes': out=weekly_reports.report_changes(c,int(match[1]),user_id)
+            else:
+                body=self.body()
+                if not isinstance(body,dict): raise ValueError('请求须为 JSON 对象')
+                user_id=self.actor_id(body.pop('actor_id',None))
+                if path=='/api/weekly-reports/current':
+                    if body: raise ValueError('本周周报请求不接受额外参数')
+                    out=weekly_reports.generate_report(c,user_id,create_if_missing=True)
+                elif path=='/api/weekly-reports/generate':
+                    if set(body)-{'date'}: raise ValueError('生成请求只接受报告日期')
+                    out=weekly_reports.generate_report(c,user_id,body.get('date'))
+                else:
+                    match=re.fullmatch(r'/api/weekly-reports/(\d+)(/refresh|/revise)?',path)
+                    if not match: return self.json(404,{'error':'周报接口不存在'})
+                    if match[2]=='/refresh':
+                        if set(body)-{'edit_revision'}: raise ValueError('任务数据更新请求只接受版本标识')
+                        out=weekly_reports.refresh_report(c,int(match[1]),user_id,body.get('edit_revision'))
+                    elif match[2]=='/revise':
+                        if body: raise ValueError('修订请求不接受额外参数')
+                        out=weekly_reports.revise_report(c,int(match[1]),user_id)
+                    else: out=weekly_reports.update_report(c,int(match[1]),user_id,body)
+                c.commit()
+            return self.json(200,out)
+        except PermissionError as exc: return self.json(403,{'error':str(exc)})
+        except LookupError as exc: return self.json(404,{'error':str(exc)})
+        except weekly_reports.ReportConflict as exc: return self.json(409,{'error':str(exc)})
+        except (ValueError,TypeError) as exc: return self.json(400,{'error':str(exc)})
+        finally: c.close()
     def authorized(self):
         if feishu_login_enabled(): return bool(self.session_user())
         # Local-only mode remains frictionless; public/tunnel mode must set both values.
@@ -1274,9 +1780,28 @@ class Handler(BaseHTTPRequestHandler):
         finally: c.close()
         self.redirect('/', 'wmt_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
     def json(self, code, payload):
-        data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+        data=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Cache-Control','no-store, no-cache, must-revalidate'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def body(self):
-        n=int(self.headers.get('Content-Length','0')); return json.loads(self.rfile.read(n) or '{}')
+        try: n=int(self.headers.get('Content-Length','0'))
+        except ValueError: raise ValueError('Content-Length 无效')
+        if n<0 or n>1024*1024: raise ValueError('请求内容不能超过 1MB')
+        return json.loads(self.rfile.read(n) or '{}')
+    def send_bytes(self, code, content_type, data, cache_control=None):
+        """Serve static content with HTTP/1.1 compression when the client supports it."""
+        use_gzip=('gzip' in self.headers.get('Accept-Encoding','').lower() and len(data)>1024)
+        payload=gzip.compress(data,compresslevel=6) if use_gzip else data
+        self.send_response(code); self.send_header('Content-Type',content_type)
+        if cache_control: self.send_header('Cache-Control',cache_control)
+        if use_gzip:
+            self.send_header('Content-Encoding','gzip'); self.send_header('Vary','Accept-Encoding')
+        self.send_header('Content-Length',str(len(payload))); self.end_headers()
+        if self.command!='HEAD': self.wfile.write(payload)
+    def do_HEAD(self):
+        p=urllib.parse.urlparse(self.path)
+        if p.path.startswith('/wecom/callback'): return self.send_bytes(200,'text/plain; charset=utf-8',b'')
+        if p.path not in ('/api/session','/auth/feishu/start','/auth/feishu/callback','/auth/logout') and not self.require_auth(): return
+        # A lightweight health response also supports common load-balancer probes.
+        return self.send_bytes(200,'text/plain; charset=utf-8',b'')
     def multipart(self):
         """Small multipart reader for task-source uploads; other APIs stay JSON-only."""
         content_type=self.headers.get('Content-Type','')
@@ -1307,16 +1832,62 @@ class Handler(BaseHTTPRequestHandler):
         return fields,files
     def do_GET(self):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
+        if p.path=='/static/weekly-reports.js':
+            return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'weekly-reports.js').read_bytes(),'no-cache')
         if p.path=='/auth/feishu/start': return self.start_feishu_login()
         if p.path=='/auth/feishu/callback': return self.finish_feishu_login(q)
         if p.path=='/auth/logout': return self.logout()
         if p.path=='/api/session': return self.json(200,self.session_payload())
+        if p.path=='/static/task-create-feedback.js':
+            data=(ROOT/'static'/'task-create-feedback.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p.path=='/static/multi-draft.js':
+            data=(ROOT/'static'/'multi-draft.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p.path=='/static/phase1-refinement.js':
+            data=(ROOT/'static'/'phase1-refinement.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p.path=='/static/stale-approval-guard.js':
+            data=(ROOT/'static'/'stale-approval-guard.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p.path=='/static/pending-approval-manage.js':
+            data=(ROOT/'static'/'pending-approval-manage.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p.path=='/static/layout-guard.js':
+            data=(ROOT/'static'/'layout-guard.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        manual_assets={
+            '/static/manual-assets/task-lifecycle.svg':'task-lifecycle.svg',
+            '/static/manual-assets/home-guide.svg':'home-guide.svg',
+            '/static/manual-assets/ai-draft-flow.svg':'ai-draft-flow.svg',
+            '/static/manual-assets/manual-task-create.svg':'manual-task-create.svg',
+            '/static/manual-assets/draft-review.svg':'draft-review.svg',
+            '/static/manual-assets/confirmation-guide.svg':'confirmation-guide.svg',
+            '/static/manual-assets/feishu-guide.svg':'feishu-guide.svg',
+            '/static/manual-assets/feedback-guide.svg':'feedback-guide.svg',
+        }
+        if p.path in manual_assets:
+            data=(ROOT/'static'/'manual-assets'/manual_assets[p.path]).read_bytes(); self.send_response(200); self.send_header('Content-Type','image/svg+xml'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/' or p.path=='/index.html':
             if not feishu_login_enabled() and not self.require_auth(): return
-            data=(ROOT/'static'/'index.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261104-layout2"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261104-layout1"></script><script defer src="/static/layout-guard.js?v=20261104-layout3"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
+        if p.path=='/manual' or p.path=='/manual.html':
+            if not self.require_auth(): return
+            data=(ROOT/'static'/'manual.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p.path=='/manual.md':
+            if not self.require_auth(): return
+            data=(ROOT/'docs'/'工作管理树测试人员操作手册.md').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/markdown; charset=utf-8'); self.send_header('Content-Disposition','inline; filename="work-management-tree-test-manual.md"'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if p.path=='/test-issues' or p.path=='/test-issues.html':
+            if not self.require_auth(): return
+            data=(ROOT/'static'/'test-issues.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path.startswith('/wecom/callback'):
             self.handle_wecom_get(); return
         if not self.require_auth(): return
+        if p.path=='/weekly-report-demo':
+            c=db()
+            try:
+                weekly_reports.actor(c,self.actor_id(q.get('actor_id',[None])[0]))
+                preview=ROOT/'artifacts'/'weekly-report-demo'/'index.html'
+                if not preview.is_file(): return self.json(404,{'error':'演示周报尚未生成'})
+                return self.send_bytes(200,'text/html; charset=utf-8',preview.read_bytes(),'no-cache')
+            except PermissionError as exc: return self.json(403,{'error':str(exc)})
+            finally: c.close()
+        if p.path.startswith('/api/weekly-reports'):
+            return self.handle_weekly_reports(p.path,q)
         c=db()
         if p.path=='/api/bootstrap':
             task_rows=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
@@ -1327,8 +1898,17 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
         elif p.path=='/api/tasks/similar':
             out=similar_tasks(c,q.get('title',[''])[0])
+        elif re.fullmatch(r'/api/tasks/\d+',p.path):
+            task=c.execute('SELECT * FROM task WHERE id=?',(int(p.path.rsplit('/',1)[1]),)).fetchone()
+            if not task: return self.json(404,{'error':'task not found'})
+            out=task_view(c,task)
         elif p.path=='/api/approvals':
-            out=[rowdict(x) for x in c.execute("SELECT a.*,t.title,u.name AS approver_name,p.reported_percent,p.report_text,p.is_blocked,p.block_reason,p.expected_finish FROM approval_record a LEFT JOIN task t ON t.id=a.task_id LEFT JOIN user u ON u.id=a.approver_id LEFT JOIN progress_record p ON a.biz_type='progress_confirm' AND p.id=a.biz_id WHERE a.status=? ORDER BY a.created_at",(q.get('status',['pending'])[0],))]
+            rows=c.execute("SELECT * FROM approval_record WHERE status=? ORDER BY created_at",(q.get('status',['pending'])[0],)).fetchall()
+            out=[approval_view(c,x) for x in rows]
+        elif re.fullmatch(r'/api/approvals/\d+',p.path):
+            approval=c.execute('SELECT * FROM approval_record WHERE id=?',(int(p.path.rsplit('/',1)[1]),)).fetchone()
+            if not approval: return self.json(404,{'error':'approval not found'})
+            out=approval_view(c,approval)
         elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]
         elif p.path=='/api/org/departments': out=[rowdict(x) for x in c.execute('SELECT * FROM org_department WHERE status=? ORDER BY name',('active',))]
         elif p.path=='/api/org/positions': out=[rowdict(x) for x in c.execute("SELECT p.*,d.name AS department_name FROM org_position p LEFT JOIN org_department d ON d.id=p.dept_id WHERE p.status='active' ORDER BY d.name,p.name")]
@@ -1370,6 +1950,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/ops/daily-preview': out={'date':q.get('date',[None])[0] or datetime.now(timezone.utc).date().isoformat(),'targets':daily_targets(c,q.get('date',[None])[0])}
         elif p.path=='/api/dashboard':
             tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; today=datetime.now(timezone.utc).date().isoformat(); out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]}
+        elif p.path=='/api/test-issues': out=[rowdict(x) for x in c.execute("SELECT * FROM test_issue ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END,id DESC")]
         elif p.path=='/api/performance/config': out=performance_config(c)
         elif p.path=='/api/performance/personal':
             actor=self.actor_id(q.get('actor_id',[None])[0]); target=int(q.get('user_id',[actor])[0] or actor or 0)
@@ -1408,13 +1989,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith('/im/callback/feishu'):
             self.handle_feishu_post(); return
         if not self.require_auth(): return
-        c=db(); p=urllib.parse.urlparse(self.path)
+        p=urllib.parse.urlparse(self.path)
+        if p.path.startswith('/api/weekly-reports'):
+            return self.handle_weekly_reports(p.path)
+        c=db()
         try:
             fields,files=self.multipart() if p.path=='/api/task/input/extract' else ({},[])
             b=fields if p.path=='/api/task/input/extract' else self.body()
         except (ValueError,json.JSONDecodeError) as exc:
             c.close(); return self.json(400,{'error':str(exc) or '请求格式不正确'})
-        t=now()
+        t=now(); response_code=200
         try:
             if p.path=='/api/task/input/extract':
                 if not files: return self.json(400,{'error':'请选择要识别的文件'})
@@ -1551,39 +2135,99 @@ class Handler(BaseHTTPRequestHandler):
                 generated=generate_routines(c,b.get('instance_date')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/ops/daily-run':
                 out=run_daily_jobs(c,b.get('report_date'),b.get('kind','all')); c.commit()
+            elif p.path=='/api/task/drafts/parse':
+                if not b.get('text'): return self.json(400,{'error':'text is required'})
+                from datetime import timedelta
+                batch_id=b.get('session_id') or f"web:{b.get('user_id','anonymous')}:{secrets.token_hex(6)}"; expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat(); drafts=[]; duplicates=[]
+                for slots,missing in ai_drafts(b['text'],b.get('user_id'),c):
+                    matches=task_duplicate_candidates(c,slots)
+                    if matches['exact']:
+                        duplicates.extend([{**item,'kind':'exact'} for item in matches['exact']])
+                        continue
+                    oid=c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(batch_id,b.get('user_id'),b.get('source_type','text'),b['text'],json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,t,t)).lastrowid
+                    drafts.append({'id':oid,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','similar_tasks':matches['similar']})
+                    duplicates.extend([{**item,'kind':'similar'} for item in matches['similar']])
+                c.commit(); out={'session_id':batch_id,'drafts':drafts,'duplicates':duplicates,'expire_at':expire}
             elif p.path=='/api/task/draft/parse':
                 if not b.get('text'): return self.json(400,{'error':'text is required'})
                 from datetime import timedelta
                 slots,missing=draft_slots(b['text'],b.get('user_id'),c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+                matches=task_duplicate_candidates(c,slots)
+                if matches['exact']:
+                    return self.json(409,{'error':'已存在相同任务，未生成重复草稿','duplicates':matches['exact']})
                 oid=c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(b.get('session_id') or f"web:{b.get('user_id','anonymous')}",b.get('user_id'),b.get('source_type','text'),b['text'],json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,t,t)).lastrowid; c.commit(); out={'id':oid,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','expire_at':expire}
             elif p.path.startswith('/api/task/draft/') and p.path.endswith('/complete'):
                 did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
                 if not draft or draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
-                slots=json.loads(draft['slots_json']); slots.update({k:v for k,v in b.items() if v not in (None,'')}); missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
-                c.execute('UPDATE conversation_draft SET slots_json=?,missing_slots=?,status=?,updated_at=? WHERE id=?',(json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',t,did)); c.commit(); out={'id':did,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview'}
+                slots=json.loads(draft['slots_json'])
+                optional_fields=('description','org_node_id','priority','task_type')
+                for key,value in b.items():
+                    if key in optional_fields and value in (None,''):
+                        slots[key]=None
+                    elif value not in (None,''):
+                        slots[key]=value
+                if slots.get('priority') not in ('P0','P1','P2'): slots['priority']=None
+                if slots.get('task_type') not in ('ROUTINE','PROJECT','ADHOC'): slots['task_type']=None
+                missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
+                matches=task_duplicate_candidates(c,slots,exclude_draft_id=did)
+                if matches['exact']:
+                    return self.json(409,{'error':'已存在相同任务，请修改草稿后再保存','duplicates':matches['exact']})
+                c.execute('UPDATE conversation_draft SET slots_json=?,missing_slots=?,status=?,updated_at=? WHERE id=?',(json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',t,did)); c.commit(); out={'id':did,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','similar_tasks':matches['similar']}
             elif p.path.startswith('/api/task/draft/') and p.path.endswith('/confirm'):
                 did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
                 if not draft or draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
                 slots=json.loads(draft['slots_json']); missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
                 if missing: return self.json(400,{'error':'missing slots','fields':missing})
-                approver_id=approver_for(c,slots['owner_id']); oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(slots.get('org_node_id'),slots['title'],slots.get('description',''),slots['owner_id'],slots['due_at'],slots.get('priority','P1'),'normal',slots.get('deliverable') or '待明确','conversation',slots.get('task_type','PROJECT'),'pending',approver_id,t,t)).lastrowid; aid=create_approval(c,'task_confirm',oid,oid,approver_id); c.execute("UPDATE conversation_draft SET status='generated',updated_at=? WHERE id=?",(t,did)); audit(c,'task',oid,'create_from_draft',str(draft['user_id'] or 'local'),after=slots); c.commit(); out={'task_id':oid,'approval_id':aid,'status':'pending'}
+                try: fields=validate_task_fields(c,{**slots,'priority':slots.get('priority') or 'P1','task_type':slots.get('task_type') or 'PROJECT'},require_all=True)
+                except ValueError as exc: return self.json(400,{'error':str(exc)})
+                matches=task_duplicate_candidates(c,fields,exclude_draft_id=did)
+                if matches['exact']:
+                    return self.json(409,{'error':'已存在相同任务，未重复创建','duplicates':matches['exact']})
+                approver_id=approver_for(c,fields['owner_id']); approval_status='pending' if approver_id else 'approved'
+                oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fields['org_node_id'],fields['title'],fields['description'],fields['owner_id'],fields['due_at'],fields['priority'],'normal',fields['deliverable'],'conversation',fields['task_type'],approval_status,approver_id,t,t)).lastrowid
+                aid=create_approval(c,'task_confirm',oid,oid,approver_id)
+                c.execute("UPDATE conversation_draft SET status='generated',updated_at=? WHERE id=?",(t,did)); audit(c,'task',oid,'create_from_draft',str(draft['user_id'] or 'local'),after=slots); c.commit(); out={'task_id':oid,'approval_id':aid,'status':approval_status}
             elif p.path.startswith('/api/task/draft/') and p.path.endswith('/discard'):
                 did=int(p.path.split('/')[4])
                 if not discard_draft(c,did,'local'): return self.json(404,{'error':'draft is no longer available'})
                 c.commit(); out={'id':did,'status':'discarded'}
             elif p.path=='/api/tasks':
-                required=['title','owner_id','due_at','deliverable']; missing=[x for x in required if not b.get(x)]
+                required=['title','owner_id','due_at']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
-                if not c.execute('SELECT 1 FROM user WHERE id=?',(b['owner_id'],)).fetchone(): return self.json(400,{'error':'owner_id does not exist'})
-                approver_id=approver_for(c,b['owner_id'])
-                task_type=b.get('task_type','PROJECT')
-                if task_type not in ('ROUTINE','PROJECT','ADHOC'): return self.json(400,{'error':'invalid task_type'})
+                try: fields=validate_task_fields(c,b,require_all=True)
+                except ValueError as exc: return self.json(400,{'error':str(exc)})
+                matches=task_duplicate_candidates(c,fields)
+                if matches['exact']:
+                    return self.json(409,{'error':'已存在相同任务，未重复创建','duplicates':matches['exact']})
+                approver_id=approver_for(c,fields['owner_id'])
+                task_type=fields['task_type']
                 complexity=b.get('complexity','general')
                 if complexity not in PERFORMANCE_DEFAULTS['complexity']: return self.json(400,{'error':'invalid complexity'})
                 # 兼容历史接口：未填写时按类型带出待校准的默认标准工时；网页端会要求专项、临时任务补充口径。
                 estimated_hours=float(b.get('estimated_hours') or {'ROUTINE':2,'PROJECT':8,'ADHOC':4}[task_type])
-                oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,estimated_hours,actual_hours,complexity,business_impact,urgent_source,urgent_level,plan_impact,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(b.get('org_node_id'),b['title'],b.get('description',''),b['owner_id'],b['due_at'],b.get('priority','P1'),b.get('risk_status','normal'),b['deliverable'],b.get('source','manual'),task_type,'pending',approver_id,estimated_hours,float(b.get('actual_hours') or 0),complexity,b.get('business_impact',''),b.get('urgent_source',''),b.get('urgent_level',''),b.get('plan_impact',''),t,t)).lastrowid
-                aid=create_approval(c,'task_confirm',oid,oid,approver_id); audit(c,'task',oid,'create_pending','local',after=b); c.commit(); out={'id':oid,'approval_id':aid,'approval_status':'pending'}
+                approval_status='pending' if approver_id else 'approved'
+                oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,estimated_hours,actual_hours,complexity,business_impact,urgent_source,urgent_level,plan_impact,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fields['org_node_id'],fields['title'],fields['description'],fields['owner_id'],fields['due_at'],fields['priority'],b.get('risk_status','normal'),fields['deliverable'],b.get('source','manual'),task_type,approval_status,approver_id,estimated_hours,float(b.get('actual_hours') or 0),complexity,b.get('business_impact',''),b.get('urgent_source',''),b.get('urgent_level',''),b.get('plan_impact',''),t,t)).lastrowid
+                aid=create_approval(c,'task_confirm',oid,oid,approver_id); audit(c,'task',oid,'create_pending','local',after=b); c.commit(); out={'id':oid,'approval_id':aid,'approval_status':approval_status}
+                response_code=201
+            elif p.path=='/api/test-issues':
+                if not str(b.get('title','')).strip(): return self.json(400,{'error':'问题描述必填'})
+                record_type=str(b.get('record_type','issue')).strip()
+                if record_type not in ('issue','requirement'): return self.json(400,{'error':'记录类型无效'})
+                oid=c.execute('INSERT INTO test_issue(record_type,title,module,severity,reporter,steps,expected_result,actual_result,task_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(record_type,str(b['title']).strip(),str(b.get('module','')).strip(),str(b.get('severity','normal')).strip(),str(b.get('reporter','')).strip(),str(b.get('steps','')).strip(),str(b.get('expected_result','')).strip(),str(b.get('actual_result') or b['title']).strip(),str(b.get('task_ref','')).strip(),t)).lastrowid; audit(c,'test_issue',oid,'create','manual',after=b); c.commit(); out={'id':oid,'status':'open'}
+            elif p.path.startswith('/api/test-issues/'):
+                iid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM test_issue WHERE id=?',(iid,)).fetchone()
+                if not old: return self.json(404,{'error':'问题记录不存在'})
+                action=b.get('action')
+                if action=='delete':
+                    c.execute('DELETE FROM test_issue WHERE id=?',(iid,)); audit(c,'test_issue',iid,'delete','manual',before=rowdict(old)); c.commit(); out={'id':iid,'status':'deleted'}
+                elif action=='close':
+                    c.execute("UPDATE test_issue SET status='closed' WHERE id=?",(iid,)); audit(c,'test_issue',iid,'close','manual',before=rowdict(old)); c.commit(); out={'id':iid,'status':'closed'}
+                elif action=='update':
+                    if not str(b.get('title','')).strip(): return self.json(400,{'error':'问题描述必填'})
+                    record_type=str(b.get('record_type',old['record_type'] or 'issue')).strip()
+                    if record_type not in ('issue','requirement'): return self.json(400,{'error':'记录类型无效'})
+                    c.execute('UPDATE test_issue SET record_type=?,title=?,module=?,severity=?,reporter=?,task_ref=? WHERE id=?',(record_type,str(b['title']).strip(),str(b.get('module','')).strip(),str(b.get('severity','normal')).strip(),str(b.get('reporter','')).strip(),str(b.get('task_ref',old['task_ref'] or '')).strip(),iid)); audit(c,'test_issue',iid,'update','manual',before=rowdict(old),after=b); c.commit(); out={'id':iid,'status':'updated'}
+                else: return self.json(400,{'error':'不支持的操作'})
             elif p.path=='/api/ai/draft': out=ai_draft(b.get('text',''))
             elif p.path=='/api/performance/config':
                 operator=self.actor_id(b.get('operator_id')); user=c.execute('SELECT role FROM user WHERE id=?',(operator,)).fetchone() if operator else None
@@ -1601,7 +2245,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not approval or approval['status']!='pending': return self.json(404,{'error':'pending approval not found'})
                 result=b.get('result'); operator=self.actor_id(b.get('operator_id'))
                 if result not in ('approved','rejected'): return self.json(400,{'error':'result must be approved or rejected'})
-                if approval['approver_id'] and operator and int(operator)!=approval['approver_id']: return self.json(403,{'error':'only assigned approver may confirm'})
+                if not operator: return self.json(403,{'error':'operator_id is required'})
+                if approval['approver_id'] and int(operator)!=approval['approver_id']: return self.json(403,{'error':'only assigned approver may confirm'})
                 c.execute('UPDATE approval_record SET status=?,result_reason=?,operated_by=?,operated_at=? WHERE id=?',(result,b.get('reason',''),operator,t,aid))
                 if approval['biz_type']=='task_confirm': c.execute("UPDATE task SET approval_status=?,work_status=?,confirmed_by=?,confirmed_at=?,confirm_source='manual',updated_at=? WHERE id=?",('approved' if result=='approved' else 'rejected','assigned' if result=='approved' else 'draft',operator,t,t,approval['task_id']))
                 elif approval['biz_type']=='progress_confirm' and result=='approved':
@@ -1613,21 +2258,30 @@ class Handler(BaseHTTPRequestHandler):
                 percent=b.get('percent');
                 if not isinstance(percent,int) or percent<0 or percent>100 or not b.get('comment'): return self.json(400,{'error':'percent (0-100 integer) and comment are required'})
                 reporter=self.actor_id(b.get('reporter_id',task['owner_id']))
+                if not reporter: return self.json(403,{'error':'reporter_id is required'})
                 if int(reporter)!=int(task['owner_id']): return self.json(403,{'error':'only task owner may report progress'})
                 rid,aid,_=submit_progress(c,tid,reporter,percent,b['comment'],b.get('blocked',False),b.get('block_reason',''),b.get('expected_finish'),b.get('source','web')); c.commit(); out={'id':rid,'approval_id':aid,'status':'pending'}
             elif p.path.startswith('/api/tasks/'):
                 tid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone();
                 if not old: return self.json(404,{'error':'task not found'})
-                actor=self.actor_id(b.get('operator_id'))
+                # Each action carries its accountable actor under its own field.
+                # Never fall back to an anonymous caller: destructive edits still
+                # require operator_id, while acceptance/feedback use their named actor.
+                action_actor=(b.get('operator_id')
+                              or (b.get('acceptor_id') if p.path.endswith('/accept') else None)
+                              or (b.get('user_id') if p.path.endswith('/feedback') else None))
+                actor=self.actor_id(action_actor)
                 actor_row=c.execute('SELECT role FROM user WHERE id=?',(actor,)).fetchone() if actor else None
-                can_manage=not actor or int(actor)==int(old['owner_id']) or (actor_row and actor_row['role'] in ('manager','pm'))
+                if not actor: return self.json(403,{'error':'operator_id is required'})
+                can_manage=int(actor)==int(old['owner_id']) or (actor_row and actor_row['role'] in ('manager','pm'))
                 if b.get('action')=='delete':
                     if not can_manage: return self.json(403,{'error':'only the task owner or manager may delete a task'})
                     c.execute('DELETE FROM approval_record WHERE task_id=?',(tid,)); c.execute('DELETE FROM progress_record WHERE task_id=?',(tid,)); c.execute('DELETE FROM feedback WHERE task_id=?',(tid,)); c.execute('DELETE FROM acceptance WHERE task_id=?',(tid,)); c.execute('DELETE FROM task WHERE id=?',(tid,)); action='delete'
                 elif p.path.endswith('/feedback'):
                     if not b.get('content'): return self.json(400,{'error':'content is required'})
                     feedback_user=self.actor_id(b.get('user_id'))
-                    if feedback_user and int(feedback_user)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may submit feedback'})
+                    if not feedback_user: return self.json(403,{'error':'user_id is required'})
+                    if int(feedback_user)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may submit feedback'})
                     c.execute('INSERT INTO feedback(task_id,user_id,content,parsed_due_at,progress,risk,created_at) VALUES(?,?,?,?,?,?,?)',(tid,feedback_user,b.get('content',''),parse_due(b.get('content','')),b.get('progress',''),b.get('risk',''),t)); c.execute("UPDATE task SET risk_status=?,updated_at=? WHERE id=?",('blocked' if b.get('risk') else old['risk_status'],t,tid)); action='feedback'
                 elif p.path.endswith('/accept'):
                     result=b.get('result');
@@ -1638,7 +2292,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not acceptor_id or int(acceptor_id)!=int(approver_id): return self.json(403,{'error':'only the task owner\'s approver may accept'})
                     c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,b.get('acceptor_id'),result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
                 else:
-                    allowed={'title','description','org_node_id','task_type','work_status','risk_status','due_at','priority','owner_id','deliverable','estimated_hours','actual_hours','complexity','business_impact','urgent_source','urgent_level','plan_impact'}; changes={k:v for k,v in b.items() if k in allowed};
+                    allowed={'title','description','deliverable','org_node_id','task_type','work_status','risk_status','due_at','priority','owner_id','estimated_hours','actual_hours','complexity','business_impact','urgent_source','urgent_level','plan_impact'}; changes={k:v for k,v in b.items() if k in allowed};
                     if not changes: return self.json(400,{'error':'no editable fields'})
                     if 'work_status' in changes:
                         operator_id=actor
@@ -1647,15 +2301,31 @@ class Handler(BaseHTTPRequestHandler):
                         if transition not in {('assigned','in_progress'),('in_progress','awaiting_acceptance')}:
                             return self.json(400,{'error':'invalid task status transition'})
                     elif not can_manage: return self.json(403,{'error':'only the task owner or manager may edit a task'})
-                    if 'title' in changes and not str(changes['title']).strip(): return self.json(400,{'error':'task title is required'})
+                    try:
+                        validated=validate_task_fields(c,{**rowdict(old),**changes},require_all=True)
+                    except ValueError as exc: return self.json(400,{'error':str(exc)})
+                    for key in ('title','description','deliverable','priority','task_type','due_at','owner_id','org_node_id'):
+                        if key in changes: changes[key]=validated[key]
                     if 'owner_id' in changes:
-                        if not c.execute('SELECT id FROM user WHERE id=?',(changes['owner_id'],)).fetchone(): return self.json(400,{'error':'owner does not exist'})
+                        # A task that is still waiting for confirmation must keep its
+                        # confirmation chain in sync with the responsible person.
+                        # Otherwise changing the owner in a draft leaves the approval
+                        # assigned to the previous owner's manager.
                         changes['approver_id']=approver_for(c,changes['owner_id'])
                     changes['updated_at']=t; c.execute('UPDATE task SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',(*changes.values(),tid)); action='update'
+                    if 'owner_id' in changes and old['approval_status']=='pending':
+                        next_approver=changes.get('approver_id')
+                        if next_approver:
+                            c.execute("UPDATE approval_record SET approver_id=? WHERE task_id=? AND biz_type='task_confirm' AND status='pending'",(next_approver,tid))
+                        else:
+                            # The department top owner has no higher-level approver.
+                            # Do not leave an unprocessable confirmation item behind.
+                            c.execute("UPDATE approval_record SET status='approved',operated_at=?,operated_by=? WHERE task_id=? AND biz_type='task_confirm' AND status='pending'",(t,actor,tid))
+                            c.execute("UPDATE task SET approval_status='approved',updated_at=? WHERE id=?",(t,tid))
                 audit(c,'task',tid,action,'local',before=rowdict(old),after=b); c.commit(); out={'id':tid,'status':'ok'}
             elif p.path=='/api/notify': out=WeComAdapter().send(b.get('userid',''),b.get('text',''))
             else: return self.json(404,{'error':'not found'})
-            self.json(200,out)
+            self.json(response_code,out)
         finally: c.close()
     def handle_feishu_post(self):
         try:
@@ -1691,7 +2361,7 @@ class Handler(BaseHTTPRequestHandler):
                     c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status='pending'",(now(),session_id,uid)); reply='已取消待执行操作。'
                 else:
                     action,action_reply=plan_bot_action(c,text,uid,session_id)
-                    progress,error=resolve_progress_message(c,text,uid) if not action and not action_reply else (None,None)
+                    progress,error=resolve_progress_message(c,text,uid,session_id) if not action and not action_reply else (None,None)
                     if action: reply=action_reply
                     elif action_reply: reply=action_reply
                     elif progress:
@@ -1711,7 +2381,7 @@ class Handler(BaseHTTPRequestHandler):
                             domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
                             reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
                         elif intent=='help': reply='我可以查询你的待办、填报进度、新建或修改任务、提交/执行验收、变更责任人和设置确认代理。涉及变更、删除和验收时，我会先回显，回复“确认”后才执行。'
-                        else: reply='我暂未理解这句话。你可以直接说“我今天要做什么”“查看我负责的事项”，或说明具体任务编号，例如“任务#15 完成80%”。'
+                        else: reply=assistant_clarification(text)
             if sender and reply: adapter.send_text(sender,reply)
             c.commit(); c.close(); self.json(200,{'code':0})
         except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})
@@ -1726,4 +2396,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc: self.json(400,{'error':'callback processing failed','detail':str(exc)})
 
 if __name__=='__main__':
+    if (ROOT/'data'/'.auto-reload-enabled').is_file() and os.getenv('WMT_RELOAD_CHILD')!='1':
+        from dev_server import run
+        raise SystemExit(run(ROOT))
     initialize(); port=int(os.getenv('PORT','8080')); print(f'Work Management Tree listening on http://127.0.0.1:{port}'); ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()

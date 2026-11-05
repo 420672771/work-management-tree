@@ -3,19 +3,79 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 os.environ['WMT_DB']=str(Path(tempfile.mkdtemp())/'test.db')
 import sys; sys.path.insert(0,str(Path(__file__).parents[1]))
 import app
 
 class WorkTreeTests(unittest.TestCase):
-    def setUp(self): app.initialize()
+    def setUp(self):
+        # Unit/API fixtures use deterministic rules. Model-specific tests below
+        # provide their own configuration and mock the external response.
+        ai_environment=patch.dict(os.environ,{'AI_API_BASE':'','AI_API_KEY':'','AI_MODEL':''})
+        ai_environment.start(); self.addCleanup(ai_environment.stop)
+        app.initialize()
     def test_seed_and_ai_draft_requires_confirmation(self):
         c=app.db(); self.assertGreater(c.execute('select count(*) from org_node').fetchone()[0],0); c.close()
         x=app.ai_draft('请在2026-10-20前完成产品方案'); self.assertTrue(x['requires_human_confirmation']); self.assertEqual(x['due_at'][:10],'2026-10-20')
+    def test_ai_draft_accepts_single_item_model_array(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self,*_): return False
+            def read(self): return json.dumps({'choices':[{'message':{'content':json.dumps([{'title':'完成模型验证','description':'验证模型建单能力','due_at':'2030-01-02','priority':'P1','deliverable':'验证记录','confidence':0.9}],ensure_ascii=False)}}]},ensure_ascii=False).encode()
+        saved={key:os.environ.get(key) for key in ('AI_API_BASE','AI_API_KEY','AI_MODEL')}
+        os.environ.update({'AI_API_BASE':'https://example.invalid','AI_API_KEY':'test-key','AI_MODEL':'test-model'})
+        try:
+            with patch.object(app.urllib.request,'urlopen',return_value=Response()):
+                draft=app.ai_draft('请在2030年1月2日前完成模型验证')
+            self.assertEqual(draft['mode'],'model')
+            self.assertEqual(draft['title'],'模型验证')
+            self.assertEqual(draft['due_at'],'2030-01-02')
+        finally:
+            for key,value in saved.items():
+                if value is None: os.environ.pop(key,None)
+                else: os.environ[key]=value
+    def test_draft_slots_maps_model_owner_domain_and_optional_fields(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self,*_): return False
+            def read(self):
+                result={'title':'模型评测环境搭建','owner_name':'部门管理PM','due_at':'2030-01-02','suggested_domain':'AI 平台与技术能力域','priority':None,'task_type':None,'description':None,'deliverable':None,'confidence':0.9}
+                return json.dumps({'choices':[{'message':{'content':json.dumps(result,ensure_ascii=False)}}]},ensure_ascii=False).encode()
+        saved={key:os.environ.get(key) for key in ('AI_API_BASE','AI_API_KEY','AI_MODEL')}
+        os.environ.update({'AI_API_BASE':'https://example.invalid','AI_API_KEY':'test-key','AI_MODEL':'test-model'})
+        c=app.db()
+        try:
+            with patch.object(app.urllib.request,'urlopen',return_value=Response()):
+                slots,missing=app.draft_slots('请在2030年1月2日前搭建模型评测环境',c=c)
+            self.assertEqual(slots['owner_id'],c.execute("select id from user where name='部门管理PM'").fetchone()[0])
+            self.assertEqual(slots['domain_name'],'AI 平台与技术能力域')
+            self.assertIsNone(slots['priority']); self.assertIsNone(slots['task_type'])
+            self.assertIsNone(slots['description']); self.assertEqual(missing,[])
+        finally:
+            c.close()
+            for key,value in saved.items():
+                if value is None: os.environ.pop(key,None)
+                else: os.environ[key]=value
     def test_task_requires_owner_and_deliverable(self):
         c=app.db();
         try:
             with self.assertRaises(Exception): c.execute('insert into task(title,owner_id,due_at) values(?,?,?)',('x',1,'2026-10-20'))
+        finally: c.close()
+    def test_duplicate_detection_blocks_exact_and_warns_similar_for_same_owner_due_date(self):
+        c=app.db()
+        try:
+            owner=c.execute('select id from user order by id limit 1').fetchone()[0]
+            due='2030-12-31T17:00:00+08:00'
+            c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,created_at,updated_at) values(?,?,?,?,?,?,?)",('完成客户投诉闭环',owner,due,'闭环记录','pending',app.now(),app.now()))
+            c.commit()
+            exact=app.task_duplicate_candidates(c,{'title':'完成客户投诉闭环','owner_id':owner,'due_at':due})
+            self.assertEqual(len(exact['exact']),1)
+            similar=app.task_duplicate_candidates(c,{'title':'客户投诉闭环处理','owner_id':owner,'due_at':due})
+            self.assertFalse(similar['exact'])
+            self.assertEqual(len(similar['similar']),1)
+            other_day=app.task_duplicate_candidates(c,{'title':'完成客户投诉闭环','owner_id':owner,'due_at':'2031-01-01T17:00:00+08:00'})
+            self.assertFalse(other_day['exact'])
         finally: c.close()
     def test_time_status(self):
         c=app.db(); c.execute("insert into task(title,owner_id,due_at,deliverable,created_at,updated_at) values(?,?,?,?,?,?)",('late',1,'2020-01-01T00:00:00+00:00','x',app.now(),app.now())); c.commit(); x=app.task_view(c,c.execute("select * from task where title='late' order by id desc").fetchone()); self.assertEqual(x['time_status'],'overdue'); c.close()
@@ -85,6 +145,80 @@ class WorkTreeTests(unittest.TestCase):
             today=app.datetime.now(app.timezone.utc).date(); expected=f"{today.year + (1 if (10,28)<(today.month,today.day) else 0)}-10-28"
             self.assertEqual(action['due_at'][:10],expected)
             self.assertIn('回复“确认”',reply)
+            action,reply=app.plan_bot_action(c,'这条截止日期调整到10.28',owner,'feishu:context-test')
+            self.assertEqual(action['type'],'change_due')
+            self.assertEqual(action['task_id'],tid)
+        finally: c.close()
+    def test_bot_understands_title_references_and_natural_updates(self):
+        c=app.db()
+        try:
+            manager=c.execute("select id from user where role='manager' limit 1").fetchone()[0]
+            owner=c.execute("insert into user(name,department,role) values(?,?,?)",('自然语言测试员','测试','member')).lastrowid
+            tid=c.execute("insert into task(title,owner_id,due_at,deliverable,approval_status,approver_id,created_at,updated_at) values(?,?,?,?,?,?,?,?)",('客户投诉工单闭环处理',owner,'2030-01-01T17:00:00+08:00','闭环记录','approved',manager,app.now(),app.now())).lastrowid
+            c.commit()
+            action,reply=app.plan_bot_action(c,'把客户投诉工单闭环处理的截止日期改到10月28日',owner,'feishu:natural-update')
+            self.assertEqual(action['type'],'change_due'); self.assertEqual(action['task_id'],tid)
+            progress,error=app.resolve_progress_message(c,'客户投诉工单闭环处理进展到80%',owner,'feishu:natural-update')
+            self.assertIsNone(error); self.assertEqual(progress['task_id'],tid); self.assertEqual(progress['percent'],80)
+            self.assertIn('变更任务日期',app.assistant_clarification('把日期调整一下'))
+        finally: c.close()
+    def test_parse_due_understands_relative_days_and_month_end(self):
+        today=app.datetime.now(app.timezone(app.timedelta(hours=8))).date()
+        self.assertEqual(app.parse_due('后天前完成')[:10],(today+app.timedelta(days=2)).isoformat())
+        self.assertEqual(app.parse_due('3天后完成')[:10],(today+app.timedelta(days=3)).isoformat())
+        month_end=(today.replace(day=28)+app.timedelta(days=4)).replace(day=1)-app.timedelta(days=1)
+        self.assertEqual(app.parse_due('本月底前完成')[:10],month_end.isoformat())
+    def test_meeting_note_uses_later_instruction_not_earlier_report(self):
+        c=app.db()
+        try:
+            qian=c.execute("select id from user where name='钱缘' limit 1").fetchone()
+            if not qian:
+                qian=c.execute("insert into user(name,department,role) values(?,?,?)",('钱缘','科技产品中心','member')).lastrowid
+            else: qian=qian[0]
+            note=('钱缘\n@李康宁 已完成法务风险评估，反馈如上。\n\n'
+                  '李康宁\n那就请示总办，由公司协调业务部门推动约立创签约 @LM @钱缘 '
+                  '我们先和对口业务部门开个会，下周三前完成。')
+            instruction=app.task_instruction_text(note)
+            self.assertNotIn('法务风险评估',instruction)
+            self.assertEqual(app.detect_task_owner(c,instruction),qian)
+            self.assertEqual(app.concise_task_title(note),'与对口业务部门召开沟通会')
+            self.assertIn('协调业务部门推动约立创签约',app.task_detail(note))
+            self.assertIn('召开沟通会',app.task_detail(note))
+        finally: c.close()
+    def test_ai_rule_extraction_handles_short_assignment_and_ignores_report(self):
+        c=app.db()
+        try:
+            liu=c.execute("select id from user where name='刘明' limit 1").fetchone()
+            if not liu:
+                liu=c.execute("insert into user(name,department,role) values(?,?,?)",('刘明','科技产品中心','pm')).lastrowid
+            else: liu=liu[0]
+            short='刘明 今天下班前完成客户投诉工单闭环处理'
+            slots,missing=app.draft_slots(short,c=c)
+            self.assertEqual(slots['owner_id'],liu)
+            self.assertEqual(slots['title'],'客户投诉工单闭环处理')
+            self.assertEqual(slots['due_at'][:10],app.datetime.now(app.timezone(app.timedelta(hours=8))).date().isoformat())
+            self.assertEqual(missing,[])
+            note=('钱缘：法务已完成对独立创数据风险评估，结论为中风险。\n'
+                  '李康宁：请钱缘牵头协调业务部门，先与对口部门召开沟通会，下周三前形成签约推进方案。')
+            instruction=app.task_instruction_text(note)
+            self.assertNotIn('风险评估',instruction)
+            self.assertIn('召开沟通会',instruction)
+            self.assertEqual(app.detect_task_owner(c,instruction),c.execute("select id from user where name='钱缘'").fetchone()[0])
+        finally: c.close()
+    def test_fast_direct_draft_skips_model_for_complete_one_line_assignment(self):
+        c=app.db()
+        try:
+            huang=c.execute("select id from user where name='黄敏' limit 1").fetchone()
+            huang=huang[0] if huang else c.execute("insert into user(name,department,role) values(?,?,?)",('黄敏','科技产品中心','member')).lastrowid
+            c.commit()
+            with patch.object(app,'ai_chat_completion',side_effect=AssertionError('short instruction must not call model')):
+                drafts=app.ai_drafts('黄敏本周五17:00前发出本周项目周报',c=c)
+            slots,missing=drafts[0]
+            self.assertEqual(slots['owner_id'],huang)
+            self.assertEqual(slots['title'],'发出本周项目周报')
+            self.assertEqual(slots['due_at'][:10],app.parse_due('本周五')[:10])
+            self.assertEqual(slots['confidence'],0.98)
+            self.assertEqual(missing,[])
         finally: c.close()
     def test_management_bot_can_summarize_department_progress(self):
         c=app.db()
@@ -204,6 +338,10 @@ class WorkTreeTests(unittest.TestCase):
         due=app.parse_due('本周四之前完成部门总结报告')
         self.assertIsNotNone(due)
         self.assertEqual(datetime.fromisoformat(due).weekday(),3)
+    def test_parse_due_understands_today_before_end_of_day(self):
+        from datetime import timezone, timedelta
+        expected=datetime.now(timezone(timedelta(hours=8))).date().isoformat()+'T17:00:00+08:00'
+        self.assertEqual(app.parse_due('刘明今天下班前完成客户投诉工单闭环处理'),expected)
     def test_parse_due_understands_spaced_chinese_date_in_meeting_notes(self):
         text='请钱缘负责完成采购审批 Agent 的方案评审，并于 2026 年 10 月 30 日前提交上线验证记录。'
         self.assertEqual(app.parse_due(text),'2026-10-30T17:00:00+08:00')
@@ -243,7 +381,7 @@ class WorkTreeTests(unittest.TestCase):
     def test_multispeaker_material_uses_latest_instruction_not_prior_report(self):
         text='钱缘\n@李康宁 法务那边评估了爬取立创数据的风险，反馈如上。\n综合下来就是：未经授权批量采集公开商品页面字段存在风险。\n李康宁\n那就请示总办，由公司协调业务部门推动约立创签约。@LM @钱缘 我们先和对口业务部门开个会，下周三前完成'
         self.assertEqual(app.task_instruction_text(text),'那就请示总办，由公司协调业务部门推动约立创签约。@LM @钱缘 我们先和对口业务部门开个会，下周三前完成')
-        self.assertEqual(app.concise_task_title(text),'协调业务部门推动约立创签约')
+        self.assertEqual(app.concise_task_title(text),'与对口业务部门召开沟通会')
         self.assertNotIn('法务',app.task_detail(text))
         c=app.db()
         try:
@@ -367,7 +505,7 @@ class WorkTreeTests(unittest.TestCase):
                 data=None if body is None else json.dumps(body).encode()
                 request=Request(base+path,data=data,headers={'Content-Type':'application/json'} if data else {})
                 with urlopen(request,timeout=5) as response:
-                    self.assertEqual(response.status,200)
+                    self.assertIn(response.status,(200,201))
                     return json.loads(response.read())
 
             def call_status(path, body):
@@ -419,6 +557,14 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(manual['approval_status'],'pending')
             from urllib.parse import quote
             self.assertTrue(any(row['id']==manual['id'] for row in call('/api/tasks/similar?title='+quote('接口测试手工任务'))))
+            similar_detail=call(f"/api/tasks/{manual['id']}")
+            self.assertEqual(similar_detail['id'],manual['id'])
+            self.assertEqual(similar_detail['approval_status'],'pending')
+            self.assertTrue(similar_detail['owner_name'])
+            approval_detail=call(f"/api/approvals/{manual['approval_id']}")
+            self.assertEqual(approval_detail['id'],manual['approval_id'])
+            self.assertEqual(approval_detail['task']['id'],manual['id'])
+            self.assertEqual(approval_detail['task']['title'],'接口测试手工任务')
             self.assertFalse(any(row['id']==manual['id'] for row in call('/api/tasks')))
             self.assertFalse(any(row['id']==manual['id'] for row in call('/api/bootstrap')['tasks']))
             self.assertEqual(call(f"/api/approvals/{manual['approval_id']}/confirm",{'result':'approved','operator_id':manager['id']})['status'],'approved')
@@ -426,6 +572,12 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(call(f"/api/tasks/{manual['id']}",{'work_status':'in_progress','operator_id':owner['id']})['status'],'ok')
             self.assertEqual(call(f"/api/tasks/{manual['id']}",{'work_status':'awaiting_acceptance','operator_id':owner['id']})['status'],'ok')
             self.assertEqual(call_status(f"/api/tasks/{manual['id']}/accept",{'result':'passed','acceptor_id':owner['id']}),403)
+            self.assertEqual(call(f"/api/tasks/{manual['id']}/accept",{'result':'rejected','acceptor_id':manager['id'],'reason':'验收记录需要补充测试结论'})['status'],'ok')
+            manual_rejected=next(row for row in call('/api/tasks') if row['id']==manual['id'])
+            self.assertEqual(manual_rejected['work_status'],'in_progress')
+            self.assertEqual(manual_rejected['latest_acceptance']['result'],'rejected')
+            self.assertEqual(manual_rejected['latest_acceptance']['reason'],'验收记录需要补充测试结论')
+            self.assertEqual(call(f"/api/tasks/{manual['id']}",{'work_status':'awaiting_acceptance','operator_id':owner['id']})['status'],'ok')
             self.assertEqual(call(f"/api/tasks/{manual['id']}/accept",{'result':'passed','acceptor_id':manager['id']})['status'],'ok')
             manual_done=next(row for row in call('/api/tasks') if row['id']==manual['id'])
             self.assertEqual(manual_done['work_status'],'completed')
@@ -451,7 +603,7 @@ class WorkTreeTests(unittest.TestCase):
             self.assertTrue(call(f"/api/progress?task_id={created['task_id']}"))
 
             self.assertEqual(call(f"/api/tasks/{created['task_id']}/feedback",{'content':'验收通过','user_id':owner['id']})['status'],'ok')
-            self.assertEqual(call(f"/api/tasks/{created['task_id']}",{'priority':'P0'})['status'],'ok')
+            self.assertEqual(call(f"/api/tasks/{created['task_id']}",{'priority':'P0','operator_id':owner['id']})['status'],'ok')
             discarded=call('/api/task/draft/parse',{'text':'无需立项的测试信息','session_id':'discard-e2e'})
             self.assertEqual(call(f"/api/task/draft/{discarded['id']}/discard",{})['status'],'discarded')
 
@@ -467,6 +619,14 @@ class WorkTreeTests(unittest.TestCase):
             self.assertEqual(call(f"/api/users/{new_user['id']}/feishu-open-id/unbind",{})['status'],'unbound')
             history=call('/api/feishu/binding-history')
             self.assertTrue(any(x['user_id']==new_user['id'] and x['action']=='unbind' for x in history))
+            issue=call('/api/test-issues',{'record_type':'requirement','module':'任务管理','title':'接口测试需求','reporter':'接口测试成员','task_ref':'任务#1','severity':'high'})
+            self.assertEqual(issue['status'],'open')
+            listed=call('/api/test-issues')
+            self.assertTrue(any(x['id']==issue['id'] and x['title']=='接口测试需求' and x['record_type']=='requirement' for x in listed))
+            self.assertEqual(call(f"/api/test-issues/{issue['id']}",{'action':'update','record_type':'issue','module':'AI 会话建单','title':'接口测试问题已更新','reporter':'接口测试成员','task_ref':'草稿#1','severity':'normal'})['status'],'updated')
+            self.assertEqual(call(f"/api/test-issues/{issue['id']}",{'action':'close'})['status'],'closed')
+            self.assertEqual(call(f"/api/test-issues/{issue['id']}",{'action':'delete'})['status'],'deleted')
+            self.assertFalse(any(x['id']==issue['id'] for x in call('/api/test-issues')))
             self.assertIn('requires_human_confirmation',call('/api/ai/draft',{'text':'请在2031年1月3日前完成接口测试'}))
             self.assertIn('total',call('/api/dashboard'))
             self.assertIn('targets',call('/api/ops/daily-preview?date=2031-01-01'))

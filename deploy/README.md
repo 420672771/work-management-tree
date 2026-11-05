@@ -8,6 +8,48 @@
 
 不要使用 `trycloudflare.com` Quick Tunnel 或 LocalTunnel 作为生产入口，它们没有固定连接和可用性保证，连接进程退出就会出现 1033/503。
 
+## 测试服务一次启用自动重载
+
+当前 `worktree.service` 使用常驻 Python 进程，后端修改需要重新加载。测试阶段可在服务器上以运行该服务的用户执行一次：
+
+```bash
+bash /home/admin/work-management-tree/scripts/configure-auto-reload.sh
+```
+
+脚本先检查服务访问权限和源码，再启用项目本地开关并重启一次。原 systemd unit、5100 端口、数据库及认证环境配置保持不变。以后后端 Python 文件修改并稳定 2 秒后，会先进行语法及隔离导入检查，通过后自动重载；检查失败时保留原进程。页面、CSS、JavaScript 修改无需重载后端，刷新浏览器即可。
+
+此模式适合当前试点开发，重载期间会有短暂中断；正式上线建议关闭自动重载，验证后统一发布。关闭命令：
+
+```bash
+bash /home/admin/work-management-tree/scripts/configure-auto-reload.sh --disable
+```
+
+源码检查也可单独执行，不会启动服务：
+
+```bash
+python3 /home/admin/work-management-tree/scripts/run-dev-server.py --check
+```
+
+该开关默认关闭，不监听数据库、附件、前端资源或测试文件。启用脚本须在有权管理服务的服务器终端执行，不能由受限执行环境代替 systemd 授权。
+
+## 部门周报定时生成
+
+应用启动时自动建立周报表。部署新版后重启应用，使新接口与页面生效；数据库仍使用 `WMT_DB` 指定的路径。
+
+本机用户级 systemd 定时器配置如下：
+
+```bash
+systemctl --user link /home/admin/work-management-tree/deploy/worktree-weekly-report.service
+systemctl --user link /home/admin/work-management-tree/deploy/worktree-weekly-report.timer
+systemctl --user daemon-reload
+systemctl --user enable --now worktree-weekly-report.timer
+systemctl --user list-timers worktree-weekly-report.timer --no-pager
+```
+
+定时器明确使用 `Asia/Shanghai`，默认周日 18:00 执行。`Persistent=true` 支持机器恢复后的补生成。部署在其他目录时同步调整 service 中的目录；若网站使用自定义数据库，须让此 service 使用相同的 `WMT_DB`。也可通过 `scripts/install-daily-timers.sh` 安装全部现有定时任务和周报任务。
+
+服务执行 `scripts/generate-weekly-report.py`，生成待发布快照并记入审计日志，不自动发布、不发送外部消息。若本周草稿已提前补生成，则更新其任务快照并保留人工内容；已发布版本保持不变。同一周期重复执行不会覆盖编辑内容。负责人在首页收到提示后查看并发布，日常编辑自动保存；任务数据更新位于页面的“更多操作”。
+
 ## VPS/公网主机
 
 将项目放到 `/opt/work-management-tree`，创建 `worktree` 用户，把 `worktree.service` 安装到 `/etc/systemd/system/`，再执行：

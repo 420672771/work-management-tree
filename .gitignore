@@ -6,3 +6,5 @@ logs/
 worktree.pid
 .env
 bin/
+artifacts/weekly-report-demo/*.db*
+data/.auto-reload-enabled
