@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS test_issue (id INTEGER PRIMARY KEY AUTOINCREMENT, rec
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def feishu_login_enabled(): return os.getenv('WMT_AUTH_MODE','').lower()=='feishu'
+def monthly_demo_enabled():
+    return (os.getenv('WMT_AUTH_MODE','demo').lower()=='demo' and
+            os.getenv('WMT_MONTHLY_DEMO','').lower() in ('1','true','yes'))
 def feishu_redirect_uri():
     configured=os.getenv('WMT_FEISHU_OAUTH_REDIRECT_URI','').strip()
     if configured: return configured
@@ -1678,15 +1681,26 @@ class Handler(BaseHTTPRequestHandler):
         finally: c.close()
     def actor_id(self, submitted=None): return getattr(self,'authenticated_user_id',None) or submitted
     def handle_monthly_reports(self, path, query=None):
-        # Monthly privacy requires a verified per-person session. The shared
-        # Basic Auth password and the demo identity selector are not identities.
+        # Test-only identity switching is opt-in; real login sessions always win.
         user=self.session_user()
-        if not user:
+        demo=not user and monthly_demo_enabled()
+        if not user and not demo:
             return self.json(401,{'error':'monthly_login_required','message':'个人月报需要员工本人登录，演示身份不能访问私人月报。',
                                   'login_url':'/auth/feishu/start' if feishu_login_enabled() else None})
         c=db()
         try:
-            query=query or {}; uid=int(user['id'])
+            query=query or {}; body=None
+            if self.command!='GET':
+                body=self.body()
+                if not isinstance(body,dict):raise ValueError('请求须为 JSON 对象')
+                submitted=body.pop('actor_id',None)
+            else:submitted=query.get('actor_id',[None])[0]
+            if user:uid=int(user['id'])
+            else:
+                if type(submitted) is bool or submitted is None:raise ValueError('请选择演示员工身份')
+                try:uid=int(submitted)
+                except (TypeError,ValueError):raise ValueError('演示员工身份无效')
+                monthly_reports.actor(c,uid)
             if self.command=='GET':
                 if path=='/api/monthly-reports':
                     out=monthly_reports.list_reports(c,uid,query.get('month',[None])[0],query.get('scope',['mine'])[0],query.get('user_id',[None])[0])
@@ -1697,10 +1711,6 @@ class Handler(BaseHTTPRequestHandler):
                     if match[2]=='/text':out={'text':monthly_reports.text_export(out)}
                     elif match[2]=='/export':out={'month':out['month'],'owner':out['snapshot']['owner'],'outline':out['editorial']['outline']}
             else:
-                body=self.body()
-                if not isinstance(body,dict):raise ValueError('请求须为 JSON 对象')
-                # A submitted actor ID never overrides the authenticated user.
-                body.pop('actor_id',None)
                 if path=='/api/monthly-reports/generate':
                     if set(body)-{'month'}:raise ValueError('只能生成登录员工本人的月报')
                     out=monthly_reports.generate(c,uid,body.get('month'))
@@ -1783,7 +1793,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length','0'); self.end_headers()
     def session_payload(self):
         user=self.session_user()
-        return {'authenticated':bool(user),'mode':'feishu' if feishu_login_enabled() else 'demo','user':user}
+        return {'authenticated':bool(user),'mode':'feishu' if feishu_login_enabled() else 'demo','user':user,
+                'monthly_demo':monthly_demo_enabled()}
     def start_feishu_login(self):
         adapter=FeishuAdapter()
         if not feishu_login_enabled(): return self.redirect('/?login_error=disabled')

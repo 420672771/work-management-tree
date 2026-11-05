@@ -65,3 +65,17 @@ sudo systemctl status worktree
 ## Cloudflare Named Tunnel
 
 在 Cloudflare 账号中创建固定 tunnel 和 DNS hostname，将 `cloudflared-config.yml` 中的 UUID、凭据路径、域名替换后安装为 systemd 服务。Named Tunnel 的 connector 由 systemd 自动重启；不要再次生成 Quick Tunnel 链接。
+
+## 测试环境个人月报身份切换
+
+在测试服务环境中设置 `WMT_AUTH_MODE=demo` 和 `WMT_MONTHLY_DEMO=1`，重启服务使环境变量生效。页面顶部的演示身份即可用于月报全部操作，保存到当前测试数据库；切换员工前会完成最后一次自动保存，保存失败时保持原身份。
+
+当前用户级服务可在 `~/.config/systemd/user/worktree.service.d/monthly-demo.conf` 中配置：
+
+```ini
+[Service]
+Environment=WMT_AUTH_MODE=demo
+Environment=WMT_MONTHLY_DEMO=1
+```
+
+执行 `systemctl --user daemon-reload` 和 `systemctl --user restart worktree.service` 后刷新页面。正式部署使用 `WMT_MONTHLY_DEMO=0`、`WMT_AUTH_MODE=feishu` 并完成飞书账号绑定；无需改动月报代码即可恢复真实登录隔离。飞书登录模式始终忽略演示开关和提交的演示身份，已有登录会话也始终优先于演示身份。

@@ -51,7 +51,10 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   if(typeof document==='undefined')return;
   const $=selector=>document.querySelector(selector),esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const svgNS='http://www.w3.org/2000/svg';
-  let user=null,report=null,active=false,busy=false,scope='mine',selected='root',collapsed=new Set(),zoom=null,layout=null,loadVersion=0,identityId=null;
+  let user=null,report=null,active=false,busy=false,scope='mine',selected='root',collapsed=new Set(),zoom=null,layout=null,loadVersion=0,identityId=null,demoMode=false,identityVersion=0;
+  const idleWaiters=new Set();
+  function finishBusy(){busy=false;for(const done of idleWaiters)done();idleWaiters.clear();}
+  function whenIdle(){return busy?new Promise(resolve=>idleWaiters.add(resolve)):Promise.resolve();}
   const style=document.createElement('style');
   style.textContent=`#monthlyPage main{max-width:1680px}#monthlyPage .monthly-tabs{display:flex;gap:8px;margin:16px 0}#monthlyPage .monthly-tabs button{background:#eef3fb;color:#47617e}#monthlyPage .monthly-tabs button.active{background:#245dcc;color:#fff}#monthlyPage .monthly-toolbar{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin:16px 0}#monthlyPage button{width:auto;margin:0}#monthlyPage input,#monthlyPage select{width:auto;min-width:140px}#monthlyPage label{margin:0}#monthlyPage [hidden]{display:none!important}.monthly-workspace{display:block}.monthly-workspace.editing{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start}.monthly-canvas{border:1px solid #dce5f2;border-radius:10px;overflow:hidden;background:#fff}.monthly-map-tools{padding:10px 12px;display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid #e6ecf4;background:#fff}.monthly-canvas svg{display:block;max-width:none;touch-action:pan-x pan-y;cursor:grab}#monthlyMap{height:clamp(520px,74vh,900px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.monthly-zoom{align-self:center;min-width:46px;text-align:center;color:#667085;font-size:13px}.monthly-canvas.is-fullscreen{position:fixed;inset:0;z-index:10000;border:0;border-radius:0;background:#fff;display:flex;flex-direction:column}.monthly-canvas.is-fullscreen #monthlyMap{height:auto;min-height:0;flex:1}.monthly-canvas.is-fullscreen .monthly-map-tools{flex-shrink:0}.monthly-workspace.fullscreen .monthly-panel{position:fixed;right:20px;top:90px;z-index:10001;width:min(320px,calc(100vw - 40px));max-height:calc(100dvh - 110px);overflow:auto;box-shadow:0 8px 32px #16304b25}.monthly-node{cursor:pointer;outline:none}.monthly-node:focus-visible>rect{stroke:#008a49;stroke-width:2.5}.monthly-node:focus .monthly-underline,.monthly-node.selected .monthly-underline{stroke:#009f55;stroke-width:2.5}.monthly-node text{font-family:-apple-system,BlinkMacSystemFont,'Microsoft YaHei',sans-serif;user-select:none}.monthly-node .monthly-toggle{cursor:pointer;font-size:16px}.monthly-panel{padding:16px;border:1px solid #dce5f2;border-radius:10px;background:#fbfdff;min-width:0}.monthly-panel h3{font-size:16px;margin:0 0 12px}.monthly-panel textarea{width:100%;box-sizing:border-box;min-height:160px;font:inherit;font-size:14px;line-height:1.6}.monthly-panel textarea:disabled{color:#52627a;background:#f2f5f9}.monthly-panel .monthly-node-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.monthly-panel .monthly-source{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.7;color:#667085;margin-top:16px}.monthly-help{font-size:12px;color:#7888a0;margin:10px 0}.monthly-list{overflow:auto;margin-top:18px}.monthly-list table{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}.monthly-list th,.monthly-list td{padding:10px;border-bottom:1px solid #e5eaf2;text-align:left}.monthly-list th{background:#f7faff;color:#6b7f98}.monthly-meta{display:flex;gap:10px 16px;flex-wrap:wrap;align-items:center;margin:10px 0 16px;color:#667085;font-size:13px}.monthly-login{padding:25px;border:1px solid #d9e5f5;background:#f5f9ff;border-radius:10px}.monthly-error{color:#b42318}.monthly-list button{padding:5px 12px}#monthlyPage .monthly-meta .tag{margin:0}#monthlyPage .monthly-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}@media(max-width:1100px){.monthly-workspace.editing{grid-template-columns:minmax(0,1fr)}.monthly-panel textarea{min-height:100px}}@media(max-width:600px){.monthly-workspace.fullscreen .monthly-panel{top:auto;bottom:12px;right:12px;width:calc(100vw - 24px);max-height:50dvh}#monthlyMap{height:65vh;min-height:420px}.monthly-toolbar>*{max-width:100%}}`;
   document.head.append(style);
@@ -64,8 +67,9 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   $('#monthlyMonth').value=monthNow();
   function message(text,error=false){$('#monthlyMessage').textContent=text;$('#monthlyMessage').className=error?'monthly-error':'muted';}
   async function api(path='',body){
-    const identity=identityId,response=await fetch('/api/monthly-reports'+path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{cache:'no-store'}),data=await response.json();
-    if(identity!==identityId)throw new Error('登录身份已变化，请重新打开月报');
+    const identity=identityId,epoch=identityVersion,url='/api/monthly-reports'+path+(!body&&demoMode?(path.includes('?')?'&':'?')+'actor_id='+identity:'');
+    const response=await fetch(url,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(demoMode?{...body,actor_id:identity}:body)}:{cache:'no-store'}),data=await response.json();
+    if(identity!==identityId||epoch!==identityVersion){const error=new Error('登录身份已变化，请重新打开月报');error.cancelled=true;throw error;}
     if(!response.ok){const error=new Error(data.message||data.error||'月报操作失败');error.status=response.status;throw error;}return data;
   }
   function saveState(state,error){
@@ -175,16 +179,27 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
     const data=await api('?'+q);$('#monthlyTeam').hidden=!data.can_view_all;$('#monthlyEmployeeField').hidden=scope!=='all';$('#monthlyGenerate').hidden=scope!=='mine';
     const chosen=$('#monthlyEmployee').value;$('#monthlyEmployee').innerHTML='<option value="">全部员工</option>'+data.people.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');$('#monthlyEmployee').value=chosen;
     $('#monthlyList').innerHTML=data.items.length?`<table><thead><tr><th>月份</th>${scope==='all'?'<th>员工</th>':''}<th>版本</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${data.items.map(r=>`<tr><td>${esc(r.month)}</td>${scope==='all'?`<td>${esc(r.owner_name)}</td>`:''}<td>V${r.version}</td><td>${r.status==='archived'?'已归档':'草稿'}</td><td>${esc(r.updated_at.replace('T',' ').slice(0,16))}</td><td><button type="button" class="secondary" data-report="${r.id}">查看导图</button></td></tr>`).join('')}</tbody></table>`:'<p class="muted">该查询范围内暂无月报。</p>';
+    return data;
   }
+  function selectedActor(){return typeof currentActorId==='function'?Number(currentActorId()):null;}
   async function identity(){
-    const response=await fetch('/api/session',{cache:'no-store'}),profile=await response.json();user=profile.user||null;identityId=user?.id||null;
-    $('#monthlyBody').hidden=!user;$('#monthlyAuth').innerHTML=user?'':`<div class="monthly-login"><h3>请先登录本人账号</h3><p>员工月报仅本人、部门负责人和管理 PM 可查看。演示身份不能用于访问私人月报。</p>${profile.mode==='feishu'?'<a href="/auth/feishu/start">飞书扫码登录</a>':'<p class="muted">当前站点尚未启用员工登录，请联系管理员配置已有的飞书扫码登录。</p><p><a href="/monthly-report-demo" target="_blank" rel="noopener">查看 5 位虚构员工的月报演示 →</a></p>'}</div>`;
+    const version=++identityVersion,response=await fetch('/api/session',{cache:'no-store'}),profile=await response.json();
+    if(version!==identityVersion)return false;
+    demoMode=!!profile.monthly_demo&&!profile.user;
+    const chosen=profile.user||(demoMode&&typeof currentUsers!=='undefined'?currentUsers.find(u=>Number(u.id)===selectedActor()):null)||null;
+    if(identityId!==chosen?.id){loadVersion++;setReport(null);}
+    user=chosen;identityId=user?.id||null;
+    $('#monthlyBody').hidden=!user;
+    $('#monthlyAuth').innerHTML=demoMode?`<p class="muted">测试环境 · 当前演示身份：${esc(user?.name||'正在加载成员')}。可通过页面顶部切换员工，体验月报全部操作；修改保存在测试数据库中。</p>`:user?'':`<div class="monthly-login"><h3>请先登录本人账号</h3><p>员工月报仅本人、部门负责人和管理 PM 可查看。</p>${profile.mode==='feishu'?'<a href="/auth/feishu/start">飞书扫码登录</a>':'<p class="muted">当前站点未启用月报演示操作，请登录员工账号或启用测试环境演示开关。</p><p><a href="/monthly-report-demo" target="_blank" rel="noopener">查看 5 位虚构员工的月报演示 →</a></p>'}</div>`;
     return !!user;
   }
-  async function load(id){if(busy||!await flush())return;const version=++loadVersion;busy=true;try{const value=await api('/'+id);if(version===loadVersion)setReport(value);}finally{busy=false;if(report){renderMeta();renderEditor();}}}
-  async function generate(){if(busy||!await flush())return;busy=true;try{const value=await api('/generate',{month:$('#monthlyMonth').value||monthNow()});setReport(value);await list();message('月报已打开，点击导图节点可编辑。');}finally{busy=false;if(report){renderMeta();renderEditor();}}}
+  async function showIdentityReports(){
+    if(await identity()){const data=await list();if(data.items.length)await load(data.items[0].id);}
+  }
+  async function load(id){if(busy||!await flush())return;const version=++loadVersion;busy=true;try{const value=await api('/'+id);if(version===loadVersion)setReport(value);}finally{finishBusy();if(report){renderMeta();renderEditor();}}}
+  async function generate(){if(busy||!await flush())return;busy=true;try{const value=await api('/generate',{month:$('#monthlyMonth').value||monthNow()});setReport(value);await list();message('月报已打开，点击导图节点可编辑。');}finally{finishBusy();if(report){renderMeta();renderEditor();}}}
   function download(name,data,type){const url=URL.createObjectURL(new Blob([data],{type})),link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-  function fail(error){message(error.message,true);if(error.status===401){setReport(null);user=null;identity();}}
+  function fail(error){if(error.cancelled)return;message(error.message,true);if(error.status===401){setReport(null);user=null;identity();}}
   $('#monthlyGenerate').onclick=()=>generate().catch(fail);$('#monthlyQuery').onclick=()=>list().catch(fail);
   $('#monthlyMine').onclick=async()=>{if(busy||!await flush())return;scope='mine';$('#monthlyMine').classList.add('active');$('#monthlyTeam').classList.remove('active');setReport(null);list().catch(fail);};
   $('#monthlyTeam').onclick=async()=>{if(busy||!await flush())return;scope='all';$('#monthlyMine').classList.remove('active');$('#monthlyTeam').classList.add('active');setReport(null);list().catch(fail);};
@@ -207,7 +222,7 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
       else if(action==='svg'){const {svg,map}=makeSVG(report.editorial.outline,new Set(),false);svg.setAttribute('width',map.bounds.width);svg.setAttribute('height',map.bounds.height);download(report.snapshot.title+'.svg',new XMLSerializer().serializeToString(svg),'image/svg+xml;charset=utf-8');}
       else if(action==='json'){const data=await api('/'+report.id+'/export');download(report.snapshot.title+'.json',JSON.stringify(data,null,2),'application/json;charset=utf-8');}
       else if(action==='text'){const data=await api('/'+report.id+'/text');try{await navigator.clipboard.writeText(data.text);message('月报文本已复制。');}catch(_){download(report.snapshot.title+'.txt',data.text,'text/plain;charset=utf-8');}}
-    }catch(error){fail(error);}finally{busy=false;if(report){renderMeta();renderEditor();}}
+    }catch(error){fail(error);}finally{finishBusy();if(report){renderMeta();renderEditor();}}
   };
   $('.monthly-map-tools').onclick=event=>{
     const button=event.target.closest('[data-map]');if(!button||!report)return;const action=button.dataset.map,holder=$('#monthlyMap');
@@ -227,9 +242,24 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
     if(active)return;
     await baseOpen(name);if($('#weeklyPage')&&!$('#weeklyPage').classList.contains('hidden'))return;
     active=true;page.classList.remove('hidden');document.querySelectorAll('.nav-tabs button').forEach(b=>b.classList.toggle('active',b===tab));
-    try{if(await identity()){await list();}}catch(error){fail(error);}
+    try{await showIdentityReports();}catch(error){fail(error);}
   };
   tab.onclick=()=>openPage('monthly');window.openPersonalMonthlyReport=tab.onclick;
   window.addEventListener('beforeunload',event=>{if(autosave.dirty){event.preventDefault();event.returnValue='';}});
-  window.addEventListener('wmt:identity-changed',()=>{const current=typeof sessionUser!=='undefined'?sessionUser?.id||null:null;if(identityId!==null&&current!==identityId){loadVersion++;setReport(null);user=null;identityId=null;if(active)identity();}});
+  const baseSetActor=window.setDemoActor;
+  if(baseSetActor)window.setDemoActor=async function(id){
+    if(demoMode&&identityId!==null&&Number(id)!==identityId){
+      await whenIdle();
+      if(!await flush()){const control=$('#demoActor');if(control)control.value=String(identityId);return;}
+    }
+    return baseSetActor(id);
+  };
+  window.addEventListener('wmt:identity-changed',()=>{
+    const current=typeof sessionUser!=='undefined'&&sessionUser?Number(sessionUser.id):demoMode?selectedActor():null;
+    if(active&&current!==identityId){
+      identityVersion++;loadVersion++;setReport(null);user=null;identityId=null;scope='mine';
+      $('#monthlyMine').classList.add('active');$('#monthlyTeam').classList.remove('active');$('#monthlyEmployee').value='';$('#monthlyList').textContent='';$('#monthlyBody').hidden=true;
+      showIdentityReports().catch(fail);
+    }
+  });
 })();

@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,9 @@ import monthly_reports as reports
 
 class MonthlyReportTests(unittest.TestCase):
     def setUp(self):
+        self.environment = patch.dict(os.environ, {'WMT_AUTH_MODE':'demo','WMT_MONTHLY_DEMO':'0'})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, 'DB_PATH', Path(self.temp.name) / 'monthly.db')
         self.db_patch.start()
@@ -161,3 +165,47 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(self.api('/api/monthly-reports/'+str(own['id']),method='POST',user=self.pm,body={'edit_revision':0,'action':'archive'})[0],403)
         self.assertEqual(self.api('/api/monthly-reports/'+str(own['id']),method='POST',body={'edit_revision':77,'action':'archive'})[0],409)
         self.assertEqual(self.api('/api/monthly-reports/generate',method='POST',session=False,body={'actor_id':self.manager})[0],401)
+
+    def test_demo_switching_supports_generation_edit_archive_revise_and_exports(self):
+        with patch.dict(os.environ,{'WMT_AUTH_MODE':'demo','WMT_MONTHLY_DEMO':'1'}):
+            code,own=self.api('/api/monthly-reports/generate',method='POST',session=False,body={'month':'2026-10','actor_id':self.member})
+            self.assertEqual(code,200);self.assertEqual(own['user_id'],self.member)
+            code,other=self.api('/api/monthly-reports/generate',method='POST',session=False,body={'month':'2026-10','actor_id':self.other})
+            self.assertEqual(code,200);self.assertEqual(other['user_id'],self.other)
+            code,listing=self.api('/api/monthly-reports?actor_id='+str(self.member),session=False)
+            self.assertEqual(code,200);self.assertEqual([r['id'] for r in listing['items']],[own['id']])
+            for actor,report in ((self.member,own),(self.other,other)):
+                outline=copy.deepcopy(report['editorial']['outline'])
+                outline['children'][-1]['children'][0]['text']='演示员工 '+str(actor)+' 的总结'
+                base='/api/monthly-reports/'+str(report['id'])
+                self.assertEqual(self.api(base,method='POST',session=False,body={'actor_id':actor,'edit_revision':0,'outline':outline})[0],200)
+                for suffix in ('/text','/export'):
+                    self.assertEqual(self.api(base+suffix+'?actor_id='+str(actor),session=False)[0],200)
+                code,archived=self.api(base,method='POST',session=False,body={'actor_id':actor,'action':'archive','edit_revision':1})
+                self.assertEqual(code,200);self.assertEqual(archived['status'],'archived')
+                code,revised=self.api(base+'/revise',method='POST',session=False,body={'actor_id':actor})
+                self.assertEqual(code,200);self.assertEqual(revised['version'],2)
+                self.assertEqual(revised['editorial']['outline'],outline)
+            self.assertEqual(len(self.api('/api/monthly-reports?scope=all&actor_id='+str(self.pm),session=False)[1]['items']),4)
+
+    def test_demo_gate_is_off_by_default_disabled_for_feishu_and_cannot_override_session(self):
+        self.assertFalse(app.monthly_demo_enabled())
+        self.assertEqual(self.api('/api/monthly-reports?actor_id='+str(self.member),session=False)[0],401)
+        with patch.dict(os.environ,{'WMT_AUTH_MODE':'feishu','WMT_MONTHLY_DEMO':'1'}):
+            self.assertFalse(app.monthly_demo_enabled())
+            self.assertEqual(self.api('/api/monthly-reports?actor_id='+str(self.member),session=False)[0],401)
+        with patch.dict(os.environ,{'WMT_AUTH_MODE':'demo','WMT_MONTHLY_DEMO':'1'}):
+            self.assertEqual(self.api('/api/monthly-reports',session=False)[0],400)
+            self.assertEqual(self.api('/api/monthly-reports?actor_id=bad',session=False)[0],400)
+            self.assertEqual(self.api('/api/monthly-reports?actor_id=9999999',session=False)[0],403)
+            code,report=self.api('/api/monthly-reports/generate',method='POST',user=self.member,body={'actor_id':self.other,'month':'2026-10'})
+            self.assertEqual(code,200);self.assertEqual(report['user_id'],self.member)
+        self.assertEqual(self.api('/api/monthly-reports?actor_id='+str(self.member),session=False)[0],401)
+
+    def test_session_payload_reports_demo_capability_without_claiming_login(self):
+        handler=object.__new__(app.Handler);handler.headers={}
+        with patch.dict(os.environ,{'WMT_AUTH_MODE':'demo','WMT_MONTHLY_DEMO':'1'}):
+            state=handler.session_payload()
+            self.assertTrue(state['monthly_demo']);self.assertFalse(state['authenticated']);self.assertIsNone(state['user'])
+        with patch.dict(os.environ,{'WMT_AUTH_MODE':'feishu','WMT_MONTHLY_DEMO':'1'}):
+            self.assertFalse(handler.session_payload()['monthly_demo'])
