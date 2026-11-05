@@ -1923,6 +1923,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth(): return
         if p.path.startswith('/api/monthly-reports'):
             return self.handle_monthly_reports(p.path,q)
+        if p.path=='/monthly-report-demo':
+            # Only the prebuilt fictional fixture is served; never read live reports.
+            preview=ROOT/'artifacts'/'monthly-report-demo'/'index.html'
+            if not preview.is_file(): return self.json(404,{'error':'演示月报尚未生成'})
+            return self.send_bytes(200,'text/html; charset=utf-8',preview.read_bytes(),'no-cache')
         if p.path=='/weekly-report-demo':
             c=db()
             try:

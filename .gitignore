@@ -7,4 +7,5 @@ worktree.pid
 .env
 bin/
 artifacts/weekly-report-demo/*.db*
+artifacts/monthly-report-demo/*.db*
 data/.auto-reload-enabled

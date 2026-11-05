@@ -1,0 +1,85 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>员工个人月报 · 多员工演示</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6fb;color:#243d5a;font:14px/1.6 -apple-system,BlinkMacSystemFont,'Microsoft YaHei',sans-serif}header{padding:20px 28px;color:white;background:#14365f}h1{font-size:24px;margin:0 0 10px}header p{margin:4px 0;color:#d2e0f3}.header-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap}nav{display:flex;gap:8px}button,input,select,textarea{font:inherit;padding:8px 12px;border:1px solid #d7e2f0;border-radius:7px}button{cursor:pointer;background:#245dcc;color:#fff}button:disabled{opacity:.5;cursor:default}button.secondary{background:#f4f7fc;color:#365476}nav button.active{background:#fff;color:#245dcc}header select{background:white;color:#243d5a}main{max-width:1680px;margin:20px auto;padding:0 20px}.card{padding:24px;background:white;border:1px solid #e0e7f1;border-radius:14px}h2{font-size:23px;margin:0 0 12px}h3{font-size:18px}p{margin:10px 0}.muted{color:#73859d;font-size:13px}.hidden,[hidden]{display:none!important}.tag{display:inline-block;border-radius:20px;padding:2px 9px;background:#edf2f9;font-size:12px}.demo-banner{max-width:1640px;margin:16px auto;padding:12px 18px;background:#fff7e5;border:1px solid #edd8a7;border-radius:10px;color:#785721}.demo-banner a{color:#245dcc}.scenario-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.scenario{padding:18px;border:1px solid #dce5f2;border-radius:10px}.scenario h3{margin:0 0 8px}.scenario b{color:#245dcc}.events{padding-left:22px}.events li{padding:4px}label{display:block;font-weight:500}textarea{display:block}#demoHint{color:#d2e0f3}#demoReset{margin-left:auto}#monthlyPage main{margin-top:16px}a{color:#245dcc}@media(max-width:600px){header{padding:16px}main{padding:0 10px}.card{padding:14px}.demo-banner{margin:12px}}
+</style></head><body>
+<header><h1>个人月报 · 多员工操作演示</h1><div class="header-controls"><nav class="nav-tabs"><button id="homeTab" onclick="openPage('home')">场景与操作记录</button><button id="monthlyTab">个人月报</button><button id="orgTab" hidden>组织配置</button></nav><label>模拟身份 <select id="demoViewer"></select></label><button type="button" id="demoReset" class="secondary">恢复初始演示</button></div><p id="demoHint"></p></header>
+<div class="demo-banner">虚构员工与任务 · <strong id="demoMonth"></strong> · 这里的编辑、归档与修订仅保存到本浏览器标签页，关闭后结束演示。<a href="/">返回工作管理树</a></div>
+<section id="homePage"><main><section class="card"><h2>5 位员工，6 份月报版本</h2><p class="muted">初始数据由真实月报程序在独立演示数据库中生成、编辑、归档和修订。下方记录来自该次模拟；在个人月报页还可以继续体验操作。</p><div class="scenario-grid" id="demoScenarios"></div><h3>已模拟的员工操作</h3><ol class="events" id="demoEvents"></ol><h3>校验结果</h3><ul id="demoChecks"></ul></section></main></section>
+<script id="demoData" type="application/json">__DEMO_DATA__</script>
+<script>__AUTOSAVE__</script>
+<script>
+const demoBundle=JSON.parse(document.getElementById('demoData').textContent),demoKey='wmt-monthly-demo:'+demoBundle.month+':v1';
+let demoReports=structuredClone(demoBundle.reports);
+try{const saved=JSON.parse(sessionStorage.getItem(demoKey));if(Array.isArray(saved))demoReports=saved;}catch(_){}
+let sessionUser=demoBundle.users.find(u=>u.id===Number(new URLSearchParams(location.search).get('viewer')))||demoBundle.users[0];
+window.openPage=async function(name){document.getElementById('homePage').classList.toggle('hidden',name!=='home');document.getElementById('homeTab').classList.toggle('active',name==='home');};
+const demoEsc=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const allAllowed=()=>['manager','pm'].includes(sessionUser.role);
+const stored=()=>{try{sessionStorage.setItem(demoKey,JSON.stringify(demoReports));}catch(_){}};
+const reportView=report=>({...structuredClone(report),can_edit:report.user_id===sessionUser.id&&report.status==='draft',can_revise:report.user_id===sessionUser.id&&report.status==='archived',status_label:report.status==='archived'?'已归档':'草稿'});
+function reportFor(id){const r=demoReports.find(r=>r.id===Number(id));if(!r||r.user_id!==sessionUser.id&&!allAllowed())throw {status:404,error:'月报不存在或无权查看'};return r;}
+// Every demo API stays inside this page and has no connection to employee records.
+window.fetch=async function(resource,options={}){
+ try{
+  const url=new URL(String(resource),location.href),path=url.pathname,query=url.searchParams,body=options.body?JSON.parse(options.body):null;let result;
+  if(url.origin!==location.origin)throw {status:404,error:'演示不访问外部接口'};
+  if(path==='/api/session')result={authenticated:true,mode:'demo',user:sessionUser};
+  else if(path==='/api/monthly-reports'){
+   const scope=query.get('scope')||'mine',owner=query.get('user_id'),month=query.get('month');
+   if(scope==='all'&&!allAllowed())throw {status:403,error:'仅负责人和管理 PM 可查看全部月报'};
+   result={can_view_all:allAllowed(),people:allAllowed()?demoBundle.users:[sessionUser],user:sessionUser,
+    items:demoReports.filter(r=>(scope==='all'||r.user_id===sessionUser.id)&&(!month||r.month===month)&&(!owner||r.user_id===Number(owner)))
+    .sort((a,b)=>b.version-a.version||a.user_id-b.user_id).map(r=>({...reportView(r),owner_name:r.snapshot.owner.name}))};
+  }else if(path==='/api/monthly-reports/generate'){
+   if(body.month!==demoBundle.month)throw {status:400,error:'本次演示准备的是 '+demoBundle.month+'，请选择该月份'};
+   const current=demoReports.filter(r=>r.user_id===sessionUser.id&&r.month===body.month).sort((a,b)=>b.version-a.version)[0];
+   if(!current)throw {status:400,error:'请切换到某位演示员工体验本人月报；负责人和 PM 可查看部门月报'};
+   result=reportView(current);
+  }else{
+   const match=path.match(/^\/api\/monthly-reports\/(\d+)(\/revise|\/text|\/export)?$/);
+   if(!match)throw {status:404,error:'演示接口不存在'};
+   const r=reportFor(match[1]);
+   if(options.method==='POST'){
+    if(r.user_id!==sessionUser.id)throw {status:403,error:'只能编辑和归档自己的月报'};
+    if(match[2]==='/revise'){
+     if(r.status!=='archived')throw {status:409,error:'只能修订已归档版本'};
+     let next=demoReports.find(x=>x.user_id===r.user_id&&x.month===r.month&&x.status==='draft');
+     const latest=demoReports.filter(x=>x.user_id===r.user_id&&x.month===r.month).sort((a,b)=>b.version-a.version)[0];
+     if(!next&&latest.id!==r.id)throw {status:409,error:'请从最新归档版本建立修订稿'};
+     if(!next){next={...structuredClone(r),id:Math.max(...demoReports.map(x=>x.id))+1,version:latest.version+1,status:'draft',edit_revision:0,revision_of:r.id,archived_at:null,updated_at:new Date().toISOString()};demoReports.push(next);}
+     result=reportView(next);
+    }else{
+     if(r.status!=='draft'||body.edit_revision!==r.edit_revision)throw {status:409,error:'版本已归档或已更新，请重新加载'};
+     if(body.outline)r.editorial.outline=structuredClone(body.outline);
+     r.edit_revision++;r.updated_at=new Date().toISOString();
+     if(body.action==='archive'){r.status='archived';r.archived_at=r.updated_at;}
+     result=reportView(r);
+    }
+    stored();
+   }else if(match[2]==='/export')result={month:r.month,owner:r.snapshot.owner,outline:r.editorial.outline};
+   else if(match[2]==='/text'){
+    const lines=[r.snapshot.title];function walk(n,depth){lines.push('  '.repeat(depth)+'- '+n.text);n.children.forEach(c=>walk(c,depth+1));}walk(r.editorial.outline,0);result={text:lines.join('\n')};
+   }else result=reportView(r);
+  }
+  return new Response(JSON.stringify(result),{status:200,headers:{'Content-Type':'application/json'}});
+ }catch(error){return new Response(JSON.stringify({error:error.error||error.message||'演示操作失败'}),{status:error.status||400,headers:{'Content-Type':'application/json'}});}
+};
+document.getElementById('demoMonth').textContent=demoBundle.month;
+document.getElementById('demoViewer').innerHTML=demoBundle.users.map(u=>`<option value="${u.id}">${demoEsc(u.name)}${u.role==='member'?'':' · 可查看全部'}</option>`).join('');
+document.getElementById('demoViewer').value=sessionUser.id;
+document.getElementById('demoHint').textContent=allAllowed()?'当前模拟管理视角：可查看全部员工月报，他人月报只读。':demoBundle.users.find(u=>u.id===sessionUser.id).description+'。当前仅展示本人的月报。';
+document.getElementById('demoScenarios').innerHTML=demoBundle.users.filter(u=>u.role==='member').map(u=>{const r=demoReports.filter(r=>r.user_id===u.id).sort((a,b)=>b.version-a.version)[0],m=r.snapshot.metrics;return `<article class="scenario"><h3>${demoEsc(u.name)}</h3><b>${demoEsc(u.scenario)}</b><p>${demoEsc(u.description)}</p><p class="muted">完成 ${m.completed} 项 · 进行中 ${m.in_progress} 项 · 逾期 ${m.overdue} 项 · 待验收 ${m.awaiting_acceptance} 项</p><a href="?viewer=${u.id}">查看此员工的月报 →</a></article>`;}).join('');
+document.getElementById('demoEvents').innerHTML=demoBundle.events.map(e=>`<li>${demoEsc(e.employee)}：${demoEsc(e.action)}</li>`).join('');
+document.getElementById('demoChecks').innerHTML=demoBundle.checks.map(text=>`<li>已通过：${demoEsc(text)}</li>`).join('');
+document.getElementById('demoViewer').onchange=async event=>{await openPage('home');if(!document.getElementById('monthlyPage').classList.contains('hidden'))return;location.search='?viewer='+event.target.value;};
+document.getElementById('demoReset').onclick=()=>{sessionStorage.removeItem(demoKey);location.reload();};
+</script>
+<script src="/static/monthly-reports.js?v=20261105-1"></script>
+<script>
+window.addEventListener('load',async()=>{
+ await openPage('monthly');document.getElementById('monthlyMonth').value=demoBundle.month;
+ if(allAllowed()){
+  document.getElementById('monthlyTeam').click();
+  for(let i=0;i<60;i++){await new Promise(resolve=>setTimeout(resolve,25));const button=document.querySelector('#monthlyList [data-report]');if(button){button.click();break;}}
+ }else document.getElementById('monthlyGenerate').click();
+});
+</script></body></html>

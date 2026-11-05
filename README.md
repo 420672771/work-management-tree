@@ -131,3 +131,7 @@ FEISHU_APP_SECRET=xxx
 启用后，页面仅展示飞书扫码登录入口；飞书授权返回的 `open_id` 必须已在“组织配置 → 飞书成员绑定”中绑定到系统成员，否则会拒绝登录。会话有效期为 8 小时，服务端通过 HttpOnly Cookie 保存会话标识。飞书网页扫码登录基于 OAuth 2.0 授权回调流程。 
 
 如使用 Cloudflare Quick Tunnel：先启动带认证的本地服务，再运行 `scripts/start-cloudflare-preview.sh`。Quick Tunnel 适合临时验证，无固定域名和 uptime 保证。
+
+### 多员工个人月报演示
+
+运行 `python3 scripts/demo-monthly-report.py` 后访问 `/monthly-report-demo`（“个人月报”登录提示内也提供入口）。演示包含 5 位虚构员工、6 份月报版本及负责人/管理 PM 视角，覆盖完成、进行中、逾期阻塞、待验收、无任务、归档及修订。生成程序使用独立演示数据库；网页复用实际月报界面，后续编辑只保存在当前浏览器标签页，不访问线上个人月报。

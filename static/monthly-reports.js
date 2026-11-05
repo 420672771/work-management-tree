@@ -112,7 +112,7 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   }
   async function identity(){
     const response=await fetch('/api/session',{cache:'no-store'}),profile=await response.json();user=profile.user||null;identityId=user?.id||null;
-    $('#monthlyBody').hidden=!user;$('#monthlyAuth').innerHTML=user?'':`<div class="monthly-login"><h3>请先登录本人账号</h3><p>员工月报仅本人、部门负责人和管理 PM 可查看。演示身份不能用于访问私人月报。</p>${profile.mode==='feishu'?'<a href="/auth/feishu/start">飞书扫码登录</a>':'<p class="muted">当前站点尚未启用员工登录，请联系管理员配置已有的飞书扫码登录。</p>'}</div>`;
+    $('#monthlyBody').hidden=!user;$('#monthlyAuth').innerHTML=user?'':`<div class="monthly-login"><h3>请先登录本人账号</h3><p>员工月报仅本人、部门负责人和管理 PM 可查看。演示身份不能用于访问私人月报。</p>${profile.mode==='feishu'?'<a href="/auth/feishu/start">飞书扫码登录</a>':'<p class="muted">当前站点尚未启用员工登录，请联系管理员配置已有的飞书扫码登录。</p><p><a href="/monthly-report-demo" target="_blank" rel="noopener">查看 5 位虚构员工的月报演示 →</a></p>'}</div>`;
     return !!user;
   }
   async function load(id){if(busy||!await flush())return;const version=++loadVersion;busy=true;try{const value=await api('/'+id);if(version===loadVersion)setReport(value);}finally{busy=false;if(report){renderMeta();renderEditor();}}}
