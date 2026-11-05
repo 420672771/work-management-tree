@@ -77,19 +77,22 @@ def department_nodes(c):
     return nodes, included
 
 
-def build_snapshot(c, start, end, generated_at):
+def build_snapshot(c, start, end, generated_at, owner_id=None):
     week_start = datetime.combine(start, time.min, CHINA)
     week_end = datetime.combine(end + timedelta(days=1), time.min, CHINA)
     cutoff = min(generated_at, week_end - timedelta(microseconds=1))
     next_end = week_end + timedelta(days=7)
     nodes, included = department_nodes(c)
     tasks = []
-    for r in c.execute("""SELECT t.*,u.name AS owner_name,u.department AS owner_department
+    query = """SELECT t.*,u.name AS owner_name,u.department AS owner_department
                          FROM task t LEFT JOIN user u ON u.id=t.owner_id
                          WHERE t.approval_status='approved'
-                         AND t.work_status NOT IN ('draft','cancelled','deleted') ORDER BY t.id"""):
+                         AND t.work_status NOT IN ('draft','cancelled','deleted')"""
+    if owner_id is not None:
+        query += ' AND t.owner_id=?'
+    for r in c.execute(query + ' ORDER BY t.id', () if owner_id is None else (owner_id,)):
         t = dict(r)
-        if t['org_node_id'] not in included and not (t['org_node_id'] is None and t['owner_department'] == DEPARTMENT):
+        if owner_id is None and t['org_node_id'] not in included and not (t['org_node_id'] is None and t['owner_department'] == DEPARTMENT):
             continue
         created = local_time(t['created_at'])
         confirmed = local_time(t['confirmed_at']) if t.get('confirmed_at') else None

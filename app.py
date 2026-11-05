@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from xml.etree import ElementTree as ET
 import weekly_reports
+import monthly_reports
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
@@ -60,7 +61,7 @@ def db():
 
 def migrate(c):
     """Schema work must run once at service startup, never on every request."""
-    c.executescript(SCHEMA + weekly_reports.SCHEMA)
+    c.executescript(SCHEMA + weekly_reports.SCHEMA + monthly_reports.SCHEMA)
     for statement in ("ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''", "ALTER TABLE test_issue ADD COLUMN record_type TEXT NOT NULL DEFAULT 'issue'"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
@@ -1676,6 +1677,47 @@ class Handler(BaseHTTPRequestHandler):
             return rowdict(row)
         finally: c.close()
     def actor_id(self, submitted=None): return getattr(self,'authenticated_user_id',None) or submitted
+    def handle_monthly_reports(self, path, query=None):
+        # Monthly privacy requires a verified per-person session. The shared
+        # Basic Auth password and the demo identity selector are not identities.
+        user=self.session_user()
+        if not user:
+            return self.json(401,{'error':'monthly_login_required','message':'个人月报需要员工本人登录，演示身份不能访问私人月报。',
+                                  'login_url':'/auth/feishu/start' if feishu_login_enabled() else None})
+        c=db()
+        try:
+            query=query or {}; uid=int(user['id'])
+            if self.command=='GET':
+                if path=='/api/monthly-reports':
+                    out=monthly_reports.list_reports(c,uid,query.get('month',[None])[0],query.get('scope',['mine'])[0],query.get('user_id',[None])[0])
+                else:
+                    match=re.fullmatch(r'/api/monthly-reports/(\d+)(/text|/export)?',path)
+                    if not match: return self.json(404,{'error':'月报接口不存在'})
+                    out=monthly_reports.get_report(c,int(match[1]),uid)
+                    if match[2]=='/text':out={'text':monthly_reports.text_export(out)}
+                    elif match[2]=='/export':out={'month':out['month'],'owner':out['snapshot']['owner'],'outline':out['editorial']['outline']}
+            else:
+                body=self.body()
+                if not isinstance(body,dict):raise ValueError('请求须为 JSON 对象')
+                # A submitted actor ID never overrides the authenticated user.
+                body.pop('actor_id',None)
+                if path=='/api/monthly-reports/generate':
+                    if set(body)-{'month'}:raise ValueError('只能生成登录员工本人的月报')
+                    out=monthly_reports.generate(c,uid,body.get('month'))
+                else:
+                    match=re.fullmatch(r'/api/monthly-reports/(\d+)(/revise)?',path)
+                    if not match:return self.json(404,{'error':'月报接口不存在'})
+                    if match[2]:
+                        if body:raise ValueError('修订请求不接受额外参数')
+                        out=monthly_reports.revise(c,int(match[1]),uid)
+                    else:out=monthly_reports.update(c,int(match[1]),uid,body)
+                c.commit()
+            return self.json(200,out)
+        except PermissionError as exc:return self.json(403,{'error':str(exc)})
+        except LookupError as exc:return self.json(404,{'error':str(exc)})
+        except monthly_reports.Conflict as exc:return self.json(409,{'error':str(exc)})
+        except (ValueError,TypeError,RecursionError) as exc:return self.json(400,{'error':str(exc) or '导图内容无效'})
+        finally:c.close()
     def handle_weekly_reports(self, path, query=None):
         c=db()
         try:
@@ -1832,6 +1874,8 @@ class Handler(BaseHTTPRequestHandler):
         return fields,files
     def do_GET(self):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
+        if p.path=='/static/monthly-reports.js':
+            return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'monthly-reports.js').read_bytes(),'no-cache')
         if p.path=='/static/weekly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'weekly-reports.js').read_bytes(),'no-cache')
         if p.path=='/auth/feishu/start': return self.start_feishu_login()
@@ -1877,6 +1921,8 @@ class Handler(BaseHTTPRequestHandler):
         if p.path.startswith('/wecom/callback'):
             self.handle_wecom_get(); return
         if not self.require_auth(): return
+        if p.path.startswith('/api/monthly-reports'):
+            return self.handle_monthly_reports(p.path,q)
         if p.path=='/weekly-report-demo':
             c=db()
             try:
@@ -1990,6 +2036,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_feishu_post(); return
         if not self.require_auth(): return
         p=urllib.parse.urlparse(self.path)
+        if p.path.startswith('/api/monthly-reports'):
+            return self.handle_monthly_reports(p.path)
         if p.path.startswith('/api/weekly-reports'):
             return self.handle_weekly_reports(p.path)
         c=db()

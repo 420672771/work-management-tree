@@ -1,4 +1,4 @@
-function createWeeklyAutosave({save,onState=()=>{},delay=700}) {
+function createWeeklyAutosave({save,onState=()=>{},delay=700,canEdit=value=>['pending','reviewing'].includes(value.status)}) {
   let current=null,dirty=false,sequence=0,epoch=0,timer=null,flight=null,error=null;
   const clone=value=>JSON.parse(JSON.stringify(value));
   function reset(value) {
@@ -6,7 +6,7 @@ function createWeeklyAutosave({save,onState=()=>{},delay=700}) {
     onState('saved');
   }
   function edit() {
-    if(!current || !['pending','reviewing'].includes(current.status))return;
+    if(!current || !canEdit(current))return;
     sequence++;dirty=true;clearTimeout(timer);
     if(error?.status===409){onState('error',error);return;}
     onState('saving');timer=setTimeout(flush,delay);
