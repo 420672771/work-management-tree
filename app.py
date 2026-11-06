@@ -1973,6 +1973,8 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query)
         if p.path in ('/login','/login.html'):
             return self.send_bytes(200,'text/html; charset=utf-8',(ROOT/'static'/'login.html').read_bytes(),'no-store')
+        if p.path=='/static/brand/unifortune-logo.png':
+            return self.send_bytes(200,'image/png',(ROOT/'static'/'brand'/'unifortune-logo.png').read_bytes(),'public, max-age=86400')
         if p.path=='/static/accounts.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'accounts.js').read_bytes(),'no-cache')
         if p.path in ('/api/auth/options','/api/me'):return self.handle_account_api(p.path)
