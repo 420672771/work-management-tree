@@ -157,3 +157,22 @@ class AccountTests(unittest.TestCase):
     def test_hashes_use_independent_salts(self):
         first=accounts.hash_password('SameTest2026!');second=accounts.hash_password('SameTest2026!')
         self.assertNotEqual(first,second);self.assertTrue(accounts.verify_password('SameTest2026!',first));self.assertFalse(accounts.verify_password('wrong',first))
+
+    def test_new_accounts_use_initial_password_and_existing_passwords_remain_unchanged(self):
+        manager=self.login()
+        status,created,_=self.request('/api/users',{'name':'默认密码测试员','role':'member','username':'default.staff'},manager)
+        self.assertEqual(status,200)
+        staff=self.login('default.staff','123456')
+        self.assertEqual(self.request('/api/me',jar=staff)[1]['user']['id'],created['id'])
+        self.assertEqual(self.request('/api/me/password',{'current_password':'123456','new_password':'PersonalNew2026!'},staff)[0],200)
+        self.assertEqual(self.request('/api/users/'+str(created['id'])+'/manage',{'action':'update','name':'默认密码测试员','role':'member','username':'default.staff','password':''},manager)[0],200)
+        self.assertEqual(self.request('/api/me',jar=staff)[0],200)
+        self.login('default.staff','PersonalNew2026!')
+        self.assertEqual(self.request('/api/auth/login',{'username':'default.staff','password':'123456'})[0],401)
+        # First-time account configuration for an existing employee also gets the default.
+        c=app.db();other=c.execute("SELECT id,name FROM user WHERE role='member' AND id<>? LIMIT 1",(self.member,)).fetchone();c.close()
+        self.assertEqual(self.request('/api/users/'+str(other['id'])+'/manage',{'action':'update','name':other['name'],'role':'member','username':'default.existing','password':''},manager)[0],200)
+        self.login('default.existing','123456')
+        self.assertEqual(self.request('/api/users/'+str(created['id'])+'/password-reset',{'new_password':'123456'},manager)[0],200)
+        self.login('default.staff','123456')
+        with self.assertRaises(ValueError):accounts.hash_password('12345')

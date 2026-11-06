@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS account_login_attempt (
 );
 """
 ITERATIONS = 600000
+DEFAULT_INITIAL_PASSWORD = '123456'
 
 
 class Conflict(ValueError):
@@ -39,8 +40,8 @@ def username(value):
 
 
 def check_password(value):
-    if not isinstance(value,str) or not 8<=len(value)<=128:
-        raise ValueError('密码长度须为 8—128 个字符')
+    if not isinstance(value,str) or not 6<=len(value)<=128:
+        raise ValueError('密码长度须为 6—128 个字符')
     try:value.encode('utf-8')
     except UnicodeError:raise ValueError('密码包含无效字符')
     return value
@@ -81,7 +82,9 @@ def configure(c,user_id,login_name,password,actor):
     login_name=username(login_name)
     if not c.execute('SELECT 1 FROM user WHERE id=?',(user_id,)).fetchone():raise LookupError('员工不存在')
     previous=c.execute('SELECT username,password_hash FROM user_account WHERE user_id=?',(user_id,)).fetchone()
-    if previous is None and not password:raise ValueError('首次配置账号时请设置初始密码')
+    if password is None:password=''
+    if not isinstance(password,str):raise ValueError('密码格式无效')
+    if previous is None and password=='':password=DEFAULT_INITIAL_PASSWORD
     encoded=hash_password(password) if password else previous['password_hash']
     stamp=now()
     try:
