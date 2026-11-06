@@ -134,7 +134,6 @@ class MonthlyReportTests(unittest.TestCase):
         report = self.generate(); base = report['editorial']['outline']
         variants = []
         value = copy.deepcopy(base); value['children'][0]['children'][0]['text']='新增任务：999 项'; variants.append(value)
-        value = copy.deepcopy(base); value['children'].pop(0); variants.append(value)
         value = copy.deepcopy(base); value['children'][-1]['children'].append({'id':'foreign','kind':'task','text':'窃取','children':[],'task_id':foreign}); variants.append(value)
         value = copy.deepcopy(base); value['children'][-1]['children'][0]['html']='<script>'; variants.append(value)
         value = copy.deepcopy(base); value['children'][-1]['children'][0]['text']='x'*4001; variants.append(value)
@@ -143,6 +142,64 @@ class MonthlyReportTests(unittest.TestCase):
             with self.subTest(outline=str(outline)[:80]), self.assertRaises(ValueError):
                 reports.validate_outline(outline, report['snapshot'])
         with self.assertRaises(ValueError): reports.update(self.c,report['id'],self.member,{'edit_revision':0,'snapshot':{}})
+
+    def test_all_generated_nodes_allow_children_deletion_and_sibling_order_saved_via_http(self):
+        self.task()
+        report = self.generate()
+        original_snapshot = copy.deepcopy(report['snapshot'])
+        outline = copy.deepcopy(report['editorial']['outline'])
+        overview = outline['children'][0]
+        overview['children'][0]['children'].append(reports.node('custom:metric-note','统计补充说明','custom'))
+        overview['children'][0], overview['children'][1] = overview['children'][1], overview['children'][0]
+        del overview['children'][2]
+        outline['children'].reverse()
+        del outline['children'][1]
+        outline['children'].append(reports.node('custom:title-note','标题补充说明','custom'))
+        status, saved = self.api('/api/monthly-reports/'+str(report['id']), method='POST',
+                                body={'edit_revision':0,'outline':outline})
+        self.assertEqual(status, 200)
+        self.assertEqual(saved['editorial']['outline'], outline)
+        self.assertEqual(saved['snapshot'], original_snapshot)
+        status, loaded = self.api('/api/monthly-reports/'+str(report['id']))
+        self.assertEqual(status, 200)
+        self.assertEqual(loaded['editorial'], saved['editorial'])
+
+    def test_delete_title_clear_rebuild_archive_and_revise_preserve_custom_structure(self):
+        report = self.generate()
+        path = '/api/monthly-reports/'+str(report['id'])
+        empty = reports.node('monthly:outline','','container')
+        status, saved = self.api(path, method='POST', body={'edit_revision':0,'outline':empty})
+        self.assertEqual(status, 200)
+        self.assertEqual(saved['editorial']['outline'], empty)
+        self.assertEqual(saved['snapshot'], report['snapshot'])
+        status, archived = self.api(path, method='POST', body={'edit_revision':1,'action':'archive'})
+        self.assertEqual(status, 200)
+        self.assertFalse(archived['can_edit'])
+        status, revised = self.api(path+'/revise', method='POST')
+        self.assertEqual(status, 200)
+        rebuilt = reports.node('monthly:outline','','container',[
+            reports.node('custom:plan','下月安排','custom',[
+                reports.node('custom:child','新增工作','custom')]),
+            reports.node('custom:summary','总结','custom')])
+        status, saved = self.api('/api/monthly-reports/'+str(revised['id']), method='POST',
+                                body={'edit_revision':0,'outline':rebuilt})
+        self.assertEqual(status, 200)
+        self.assertEqual(saved['editorial']['outline'], rebuilt)
+        self.assertEqual(saved['snapshot'], report['snapshot'])
+        self.assertIn('- 下月安排\n  - 新增工作\n- 总结', reports.text_export(saved))
+        self.assertNotIn('\n- \n', reports.text_export(saved))
+
+    def test_container_accepts_legacy_title_and_rejects_nested_or_malformed_containers(self):
+        report = self.generate()
+        legacy = report['editorial']['outline']
+        container = reports.node('monthly:outline','','container',[legacy])
+        reports.validate_outline(container,report['snapshot'])
+        invalid = [reports.node('monthly:outline','','container',[copy.deepcopy(container)]),
+                   reports.node('bad','','container'),
+                   reports.node('monthly:outline','visible','container')]
+        for outline in invalid:
+            with self.subTest(outline=outline), self.assertRaises(ValueError):
+                reports.validate_outline(outline,report['snapshot'])
 
     def test_month_validation_leap_and_empty_report(self):
         self.assertEqual(reports.period('2024-02')[2].isoformat(),'2024-02-29')

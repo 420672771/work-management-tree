@@ -2,14 +2,13 @@ services:
   worktree:
     build: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./data:/app/data
+    env_file:
+      - .env
     environment:
       PORT: "8080"
       WMT_DB: /app/data/worktree.db
-      WECOM_CORP_ID: ""
-      WECOM_AGENT_ID: ""
-      WECOM_SECRET: ""
-      WECOM_TOKEN: ""
-      WECOM_AES_KEY: ""
+      WMT_AUTH_MODE: account
+      WMT_MONTHLY_DEMO: "0"

@@ -63,38 +63,7 @@ def receive(data):
                     reply='已收取'+kind+'并生成待解析草稿。请在工作管理树的确认中心补充任务内容和截止日期后确认。'
             if not material:
                 uid=user[0] if user else None; session_id=f'feishu:{sender}'
-                if text.strip() in ('确认','确认执行','好的确认','好的，确认','是'):
-                    pending=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='pending' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,uid,app.now())).fetchone()
-                    if not pending: reply='没有待确认的操作。请先告诉我需要执行什么。'
-                    else:
-                        try:
-                            reply=app.execute_bot_action(c,json.loads(pending['action_json']),uid); c.execute("UPDATE bot_pending_action SET status='executed',confirmed_at=? WHERE id=?",(app.now(),pending['id']))
-                        except (ValueError,PermissionError) as exc:
-                            reply='操作未执行：'+str(exc); c.execute("UPDATE bot_pending_action SET status='failed',confirmed_at=? WHERE id=?",(app.now(),pending['id']))
-                elif text.strip() in ('取消','取消操作','不确认','否'):
-                    c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status='pending'",(app.now(),session_id,uid)); reply='已取消待执行操作。'
-                else:
-                    action,planned_reply=app.plan_bot_action(c,text,uid,session_id)
-                    progress,error=app.resolve_progress_message(c,text,uid) if not action and not planned_reply else (None,None)
-                    if action: reply=planned_reply
-                    elif planned_reply: reply=planned_reply
-                    elif progress:
-                        try:
-                            _,_,task=app.submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
-                            reply=f"已记录《{task['title']}》进度 {progress['percent']}%，已提交上级确认。"
-                        except (ValueError,PermissionError) as exc: reply='进度提交未成功：'+str(exc)
-                    elif error: reply=error
-                    else:
-                        intent=app.classify_bot_intent(text)
-                        if app.is_department_progress_query(text): reply=app.feishu_department_progress(c,uid)
-                        elif app.is_team_progress_query(text): reply=app.feishu_team_progress(c,uid)
-                        elif intent=='task_query': reply=app.feishu_task_list(c,uid,session_id)
-                        elif intent=='task_creation':
-                            slots,missing=save_draft(c,sender,user,text,'feishu',event_id)
-                            domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-                            reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+app.friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
-                        elif intent=='help': reply='我可以查询你的待办、填报进度、新建或修改任务、提交/执行验收、变更责任人和设置确认代理。涉及变更、删除和验收时，我会先回显，回复“确认”后才执行。'
-                        else: reply='我暂未理解这句话。你可以直接说“我今天要做什么”“查看我负责的事项”，或说明具体任务编号，例如“任务#15 完成80%”。'
+                reply=app.process_bot_message(c,text,uid,session_id)
             # Persist the event and draft before calling the remote send API. A transient
             # Feishu send failure must not cause the event receiver to fail or retry-create.
             c.commit()
@@ -106,7 +75,12 @@ def receive(data):
             c.commit()
     finally: c.close()
 
-if not os.getenv('FEISHU_APP_ID') or not os.getenv('FEISHU_APP_SECRET'):
-    raise SystemExit('FEISHU_APP_ID and FEISHU_APP_SECRET are required')
-handler=lark.EventDispatcherHandler.builder('', '').register_p2_im_message_receive_v1(receive).build()
-lark.ws.Client(os.environ['FEISHU_APP_ID'],os.environ['FEISHU_APP_SECRET'],event_handler=handler).start()
+def main():
+    if not os.getenv('FEISHU_APP_ID') or not os.getenv('FEISHU_APP_SECRET'):
+        raise SystemExit('FEISHU_APP_ID and FEISHU_APP_SECRET are required')
+    handler=lark.EventDispatcherHandler.builder('', '').register_p2_im_message_receive_v1(receive).build()
+    lark.ws.Client(os.environ['FEISHU_APP_ID'],os.environ['FEISHU_APP_SECRET'],event_handler=handler).start()
+
+
+if __name__=='__main__':
+    main()

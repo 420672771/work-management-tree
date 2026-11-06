@@ -16,8 +16,38 @@ function monthlyMapLines(text,width,maxLines=Infinity,fontSize=18){
   }
   lines.push(line);return lines;
 }
+function monthlyEntries(root){
+  const result=[];
+  function visit(node,parent){if(node.kind!=='container')result.push({node,parent});node.children.forEach(child=>visit(child,node));}
+  visit(root,null);return result;
+}
+function monthlyNodeAction(outline,selected,action){
+  const entry=monthlyEntries(outline).find(item=>item.node.id===selected);
+  if(action!=='top'&&!entry)return {outline,selected,changed:false};
+  const custom=()=>({id:'custom:'+Date.now().toString(36)+Math.random().toString(36).slice(2),text:'补充内容',kind:'custom',children:[]});
+  if(action==='add'){
+    const node=custom();entry.node.children.push(node);return {outline,selected:node.id,changed:true};
+  }
+  if(!['top','remove','up','down'].includes(action))return {outline,selected,changed:false};
+  const parent=entry?.parent||{id:'monthly:outline',text:'',kind:'container',children:[outline]};
+  if(action==='top'){
+    const container=outline.kind==='container'?outline:{id:'monthly:outline',text:'',kind:'container',children:[outline]},node=custom();
+    container.children.push(node);return {outline:container,selected:node.id,changed:true};
+  }
+  const siblings=parent.children,index=siblings.indexOf(entry.node);
+  if(action==='remove'){
+    siblings.splice(index,1);
+    return {outline:entry.parent?outline:parent,selected:parent.kind==='container'?(siblings[Math.min(index,siblings.length-1)]?.id||null):parent.id,changed:true};
+  }
+  const target=index+(action==='up'?-1:1);
+  if(target<0||target>=siblings.length)return {outline,selected,changed:false};
+  [siblings[index],siblings[target]]=[siblings[target],siblings[index]];
+  return {outline,selected,changed:true};
+}
 function layoutMonthlyMap(root,collapsed=new Set()){
   const nodes=[],edges=[],cache=new Map(),gap=18;
+  const roots=root.kind==='container'?root.children:[root];
+  if(!roots.length)return {nodes,edges,bounds:{x:0,y:0,width:600,height:240}};
   function measure(node,depth){
     const kind=node.kind||(depth===0?'root':depth===1?'section':'detail');
     const fontSize=depth===0?24:depth===1?20:18,lineHeight=Math.ceil(fontSize*1.45);
@@ -31,7 +61,7 @@ function layoutMonthlyMap(root,collapsed=new Set()){
     const span=Math.max(own.height,children.reduce((sum,n)=>sum+measure(n,depth+1),0)+Math.max(0,children.length-1)*gap);
     cache.set(node.id,{...own,span});return span;
   }
-  measure(root,0);
+  roots.forEach(node=>measure(node,0));
   function place(node,depth,left,centerY,parent){
     const own=cache.get(node.id),item={...own,node,depth,side:1,x:left+own.width/2,y:centerY,color:'#555'};
     nodes.push(item);if(parent)edges.push({parent,child:item,color:'#666'});
@@ -40,12 +70,13 @@ function layoutMonthlyMap(root,collapsed=new Set()){
     let top=centerY-total/2;
     for(const child of children){const span=cache.get(child.id).span;place(child,depth+1,left+own.width+(depth===0?90:64),top+span/2,item);top+=span+gap;}
   }
-  place(root,0,0,0,null);
+  let rootTop=0;
+  for(const node of roots){const span=cache.get(node.id).span;place(node,0,0,rootTop+span/2,null);rootTop+=span+gap;}
   const left=Math.min(...nodes.map(n=>n.x-n.width/2))-48,right=Math.max(...nodes.map(n=>n.x+n.width/2))+48;
   const top=Math.min(...nodes.map(n=>n.y-n.height/2))-48,bottom=Math.max(...nodes.map(n=>n.y+n.height/2))+48;
   return {nodes,edges,bounds:{x:left,y:top,width:right-left,height:bottom-top}};
 }
-if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,monthlyMapLines};
+if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,monthlyMapLines,monthlyEntries,monthlyNodeAction};
 
 (() => {
   if(typeof document==='undefined')return;
@@ -61,7 +92,7 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   const nav=$('.nav-tabs');if(!nav)return;
   const tab=$('#monthlyTab')||document.createElement('button');if(!tab.id){tab.id='monthlyTab';tab.type='button';tab.textContent='个人月报';nav.insertBefore(tab,$('#orgTab'));}
   const page=document.createElement('section');page.id='monthlyPage';page.className='hidden';
-  page.innerHTML=`<main><section class="card"><h2>个人月报</h2><p class="muted">基于本人正式任务生成思维导图，修改自动保存，归档后保留快照。</p><div id="monthlyAuth"></div><div id="monthlyBody" hidden><nav class="monthly-tabs"><button type="button" id="monthlyMine" class="active">我的月报</button><button type="button" id="monthlyTeam" hidden>部门月报</button></nav><div class="monthly-toolbar"><label>报告月份<input type="month" id="monthlyMonth"></label><label id="monthlyEmployeeField" hidden>员工<select id="monthlyEmployee"><option value="">全部员工</option></select></label><button type="button" id="monthlyGenerate">生成 / 打开我的月报</button><button type="button" class="secondary" id="monthlyQuery">查询</button></div><div id="monthlyReport" hidden><h3 id="monthlyTitle"></h3><div class="monthly-meta" id="monthlyMeta"></div><div class="monthly-actions" id="monthlyActions"></div><div class="monthly-workspace"><div class="monthly-canvas"><div class="monthly-map-tools"><button type="button" class="secondary" data-map="in" aria-label="放大导图">放大</button><button type="button" class="secondary" data-map="out" aria-label="缩小导图">缩小</button><span id="monthlyZoom" class="monthly-zoom">100%</span><button type="button" class="secondary" data-map="actual">阅读大小</button><button type="button" class="secondary" data-map="width">适应宽度</button><button type="button" class="secondary" data-map="fit">适应画布</button><button type="button" class="secondary" data-map="expand">全部展开</button><button type="button" class="secondary" data-map="collapse">折叠明细</button><button type="button" class="secondary" data-map="editor" aria-expanded="false">节点详情</button><button type="button" class="secondary" data-map="fullscreen" aria-pressed="false">全屏查看</button></div><div id="monthlyMap"></div></div><aside class="monthly-panel" hidden><h3>节点内容</h3><textarea id="monthlyNodeText" aria-label="节点内容" maxlength="4000"></textarea><p id="monthlyNodeHint" class="monthly-help"></p><div class="monthly-node-actions" id="monthlyNodeActions"><button type="button" class="secondary" data-node-action="add">添加子节点</button><button type="button" class="secondary" data-node-action="remove">删除节点</button><button type="button" class="secondary" data-node-action="up">上移</button><button type="button" class="secondary" data-node-action="down">下移</button></div><div id="monthlySource" class="monthly-source"></div></aside></div><p class="monthly-help">从左向右阅读，文字完整显示；滚动或拖动画布，点击 + / − 展开收起。点击节点查看或编辑，可全屏阅读。归档前会完成最后一次保存。</p></div><div class="monthly-list" id="monthlyList"></div></div><p id="monthlyMessage" role="status" aria-live="polite"></p></section></main>`;
+  page.innerHTML=`<main><section class="card"><h2>个人月报</h2><p class="muted">基于本人正式任务生成思维导图，修改自动保存，归档后保留快照。</p><div id="monthlyAuth"></div><div id="monthlyBody" hidden><nav class="monthly-tabs"><button type="button" id="monthlyMine" class="active">我的月报</button><button type="button" id="monthlyTeam" hidden>部门月报</button></nav><div class="monthly-toolbar"><label>报告月份<input type="month" id="monthlyMonth"></label><label id="monthlyEmployeeField" hidden>员工<select id="monthlyEmployee"><option value="">全部员工</option></select></label><button type="button" id="monthlyGenerate">生成 / 打开我的月报</button><button type="button" class="secondary" id="monthlyQuery">查询</button></div><div id="monthlyReport" hidden><h3 id="monthlyTitle"></h3><div class="monthly-meta" id="monthlyMeta"></div><div class="monthly-actions" id="monthlyActions"></div><div class="monthly-workspace"><div class="monthly-canvas"><div class="monthly-map-tools"><button type="button" class="secondary" data-map="in" aria-label="放大导图">放大</button><button type="button" class="secondary" data-map="out" aria-label="缩小导图">缩小</button><span id="monthlyZoom" class="monthly-zoom">100%</span><button type="button" class="secondary" data-map="actual">阅读大小</button><button type="button" class="secondary" data-map="width">适应宽度</button><button type="button" class="secondary" data-map="fit">适应画布</button><button type="button" class="secondary" data-map="expand">全部展开</button><button type="button" class="secondary" data-map="collapse">折叠明细</button><button type="button" class="secondary" data-map="add-root" hidden>添加顶层节点</button><button type="button" class="secondary" data-map="editor" aria-expanded="false">节点详情</button><button type="button" class="secondary" data-map="fullscreen" aria-pressed="false">全屏查看</button></div><div id="monthlyMap"></div></div><aside class="monthly-panel" hidden><h3>节点内容</h3><textarea id="monthlyNodeText" aria-label="节点内容" maxlength="4000"></textarea><p id="monthlyNodeHint" class="monthly-help"></p><div class="monthly-node-actions" id="monthlyNodeActions"><button type="button" class="secondary" data-node-action="add">添加子节点</button><button type="button" class="secondary" data-node-action="remove">删除节点</button><button type="button" class="secondary" data-node-action="up">上移</button><button type="button" class="secondary" data-node-action="down">下移</button></div><div id="monthlySource" class="monthly-source"></div></aside></div><p class="monthly-help">从左向右阅读，文字完整显示；滚动或拖动画布，点击 + / − 展开收起。点击节点查看或编辑，可全屏阅读。归档前会完成最后一次保存。</p></div><div class="monthly-list" id="monthlyList"></div></div><p id="monthlyMessage" role="status" aria-live="polite"></p></section></main>`;
   document.body.append(page);
   const monthNow=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit'}).format(new Date());
   $('#monthlyMonth').value=monthNow();
@@ -79,7 +110,7 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
     const reload=$('#monthlyReload');if(reload)reload.hidden=state!=='error';
   }
   const autosave=createWeeklyAutosave({save:(id,payload)=>api('/'+id,payload),onState:saveState,canEdit:value=>value.can_edit&&value.status==='draft'});
-  function flat(root){const result=[];function visit(node,parent){result.push({node,parent});node.children.forEach(n=>visit(n,node));}visit(root,null);return result;}
+  const flat=monthlyEntries;
   function resetFolds(){collapsed=new Set();if(report)for(const {node} of flat(report.editorial.outline))if((node.kind==='group'&&node.children.length>6)||(node.kind==='task'&&report.snapshot.tasks.length>30))collapsed.add(node.id);}
   function setReport(value){report=value;selected='root';zoom=null;autosave.reset(value);resetFolds();$('#monthlyReport').hidden=!value;if(!value)fullscreen(false);if(value){showEditor(false);$('#monthlyMap').scrollTo(0,0);renderMeta();renderGraph();renderEditor();}}
   function renderMeta(){
@@ -87,6 +118,8 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
     $('#monthlyTitle').textContent=report.snapshot.title;
     $('#monthlyMeta').innerHTML=`<span class="tag">${esc(report.status_label)}</span><span>V${report.version}</span><span>数据截至 ${esc(report.snapshot.data_cutoff.replace('T',' ').slice(0,16))}（北京时间）</span>${report.user_id!==user.id?'<span>管理查看 · 只读</span>':''}`;
     $('#monthlyActions').innerHTML=`${report.can_edit?`<button id="monthlyArchive" type="button" data-action="archive" ${busy?'disabled':''}>归档月报</button><span id="monthlySaveState" class="muted">已自动保存</span><button id="monthlyRetry" type="button" class="secondary" data-action="retry" hidden>重试保存</button><button id="monthlyReload" type="button" class="secondary" data-action="reload" hidden>重新加载</button>`:''}${report.can_revise?'<button type="button" data-action="revise">新建修订稿</button>':''}<button type="button" class="secondary" data-action="svg">导出 SVG 导图</button><button type="button" class="secondary" data-action="text">复制月报文本</button><button type="button" class="secondary" data-action="json">导出导图数据</button>`;
+    $('[data-map="add-root"]').hidden=!report.can_edit;
+    $('[data-map="add-root"]').disabled=busy;
     document.querySelectorAll('#monthlyActions button').forEach(button=>button.disabled=busy);
     if(autosave.error)saveState('error',autosave.error);else if(autosave.dirty)saveState('saving');
   }
@@ -95,6 +128,7 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
     const map=layoutMonthlyMap(model,folds),svg=svgElement('svg',{xmlns:svgNS,role:'img','aria-label':report.snapshot.title,viewBox:`${map.bounds.x} ${map.bounds.y} ${map.bounds.width} ${map.bounds.height}`});
     const svgStyle=svgElement('style');svgStyle.textContent="text{font-family:-apple-system,BlinkMacSystemFont,'Microsoft YaHei',sans-serif}path,rect,circle{vector-effect:non-scaling-stroke}";svg.append(svgStyle);
     svg.append(svgElement('rect',{x:map.bounds.x,y:map.bounds.y,width:map.bounds.width,height:map.bounds.height,fill:'#fff'}));
+    if(!map.nodes.length){const hint=svgElement('text',{x:32,y:80,fill:'#7888a0','font-size':18});hint.textContent='月报暂无节点';svg.append(hint);}
     const baseline=item=>item.kind==='root'||item.kind==='section'?item.y:item.y+item.height/2;
     for(const edge of map.edges){
       const x1=edge.parent.x+edge.parent.width/2,x2=edge.child.x-edge.child.width/2,middle=(x1+x2)/2,y1=baseline(edge.parent),y2=baseline(edge.child);
@@ -164,12 +198,17 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   }
   document.addEventListener('keydown',event=>{if(event.key==='Escape')fullscreen(false);});
   function renderEditor(){
-    if(!report)return;const entry=flat(report.editorial.outline).find(x=>x.node.id===selected)||{node:report.editorial.outline,parent:null};selected=entry.node.id;
+    if(!report)return;const entries=flat(report.editorial.outline),entry=entries.find(x=>x.node.id===selected)||entries[0];
+    if(!entry){selected=null;$('#monthlyNodeText').value='';$('#monthlyNodeText').disabled=true;$('#monthlyNodeHint').textContent=report.can_edit?'点击“添加顶层节点”开始编写。':'当前版本只读。';$('#monthlyNodeActions').hidden=true;$('#monthlySource').textContent='';return;}
+    selected=entry.node.id;
     const editable=report.can_edit&&!busy,protectedNode=['root','metric'].includes(entry.node.kind);
     $('#monthlyNodeText').value=entry.node.text;$('#monthlyNodeText').disabled=!editable||protectedNode;
-    $('#monthlyNodeHint').textContent=!report.can_edit?'当前版本只读。':protectedNode?'姓名、月份与统计节点来自任务快照，不可手工修改。':'修改会自动保存；可调整描述、计划和补充说明。';
+    $('#monthlyNodeHint').textContent=!report.can_edit?'当前版本只读。':protectedNode?'文字来自任务快照；可删除、添加子节点或调整同级顺序，修改自动保存。':'修改自动保存；删除节点会一并删除其子节点，上移和下移调整同级顺序。';
     $('#monthlyNodeActions').hidden=!editable;
-    for(const button of document.querySelectorAll('#monthlyNodeActions button'))button.disabled=button.dataset.nodeAction==='add'?entry.node.kind==='metric':!entry.parent||['root','metric','section'].includes(entry.node.kind);
+    const siblings=entry.parent?.children||[entry.node],index=siblings.indexOf(entry.node);
+    for(const button of document.querySelectorAll('#monthlyNodeActions button')){
+      const action=button.dataset.nodeAction;button.disabled=!editable||(action==='up'&&index===0)||(action==='down'&&index===siblings.length-1);
+    }
     const task=report.snapshot.tasks.find(t=>t.id===entry.node.task_id);
     $('#monthlySource').textContent=task?`来源任务 #${task.id}\n${task.title}\n${task.domain_name} · ${task.priority}\n截止 ${task.due_at.slice(0,10)}\n${task.latest_progress||'暂无进展记录'}`:'';
   }
@@ -208,8 +247,8 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   $('#monthlyNodeActions').onclick=event=>{
     const button=event.target.closest('[data-node-action]');if(!button||!report?.can_edit||busy)return;
     const entry=flat(report.editorial.outline).find(x=>x.node.id===selected),action=button.dataset.nodeAction;if(!entry)return;
-    if(action==='add'){if(entry.node.kind==='metric')return;const value={id:'custom:'+Date.now().toString(36)+Math.random().toString(36).slice(2),text:'补充内容',kind:'custom',children:[]};entry.node.children.push(value);collapsed.delete(entry.node.id);selected=value.id;}
-    else{if(!entry.parent||['root','metric','section'].includes(entry.node.kind))return;const array=entry.parent.children,index=array.indexOf(entry.node);if(action==='remove'){array.splice(index,1);selected=entry.parent.id;}else{const target=index+(action==='up'?-1:1);if(target<0||target>=array.length)return;[array[index],array[target]]=[array[target],array[index]];}}
+    const result=monthlyNodeAction(report.editorial.outline,selected,action);if(!result.changed)return;
+    report.editorial.outline=result.outline;selected=result.selected;collapsed.delete(entry.node.id);
     autosave.edit();renderGraph();renderEditor();
   };
   $('#monthlyActions').onclick=async event=>{
@@ -226,7 +265,12 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   };
   $('.monthly-map-tools').onclick=event=>{
     const button=event.target.closest('[data-map]');if(!button||!report)return;const action=button.dataset.map,holder=$('#monthlyMap');
-    if(action==='expand'){collapsed.clear();renderGraph();}
+    if(action==='add-root'){
+      if(!report.can_edit||busy)return;
+      const result=monthlyNodeAction(report.editorial.outline,selected,'top');report.editorial.outline=result.outline;selected=result.selected;
+      autosave.edit();showEditor(true);renderGraph();renderEditor();
+    }
+    else if(action==='expand'){collapsed.clear();renderGraph();}
     else if(action==='collapse'){resetFolds();for(const {node} of flat(report.editorial.outline))if(node.kind==='task'||node.id==='section:overview')collapsed.add(node.id);renderGraph();}
     else if(action==='fit'){applyZoom(Math.min(holder.clientWidth/layout.bounds.width,holder.clientHeight/layout.bounds.height),{x:0,y:0});holder.scrollTo(0,0);}
     else if(action==='width'){applyZoom(holder.clientWidth/layout.bounds.width,{x:0,y:0});holder.scrollLeft=0;}

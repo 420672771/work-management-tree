@@ -1,6 +1,6 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {layoutMonthlyMap,monthlyMapLines}=require('../static/monthly-reports.js');
+const {layoutMonthlyMap,monthlyMapLines,monthlyEntries,monthlyNodeAction}=require('../static/monthly-reports.js');
 const {createWeeklyAutosave}=require('../static/weekly-reports.js');
 const node=(id,children=[])=>({id,text:'测试节点 '+id,children});
 test('mindmap expands to the right without overlapping visible nodes',()=>{
@@ -40,4 +40,34 @@ test('wide multi-line branches stay separated and the layout bounds include all 
  assert(long.lines.length>3);assert.equal(long.lines.join(''),long.node.text);
  for(const n of map.nodes){assert(n.x-n.width/2>=map.bounds.x);assert(n.x+n.width/2<=map.bounds.x+map.bounds.width);assert(n.y-n.height/2>=map.bounds.y);assert(n.y+n.height/2<=map.bounds.y+map.bounds.height);}
  for(const a of map.nodes)for(const b of map.nodes)if(a!==b)assert(!(Math.abs(a.x-b.x)<(a.width+b.width)/2&&Math.abs(a.y-b.y)<(a.height+b.height)/2));
+});
+
+test('every generated node kind supports adding children, deletion and sibling ordering',()=>{
+ for(const kind of ['root','section','metric','group','task','detail','custom']){
+  const target={...node(kind),kind},outline={...node('monthly:outline',[node('before'),target,node('after')]),kind:'container'};
+  const added=monthlyNodeAction(outline,kind,'add');assert(added.changed);assert.equal(target.children[0].id,added.selected);
+  assert(monthlyNodeAction(outline,kind,'up').changed);assert.equal(outline.children[0],target);
+  assert.equal(monthlyNodeAction(outline,kind,'up').changed,false);
+  assert(monthlyNodeAction(outline,kind,'down').changed);assert.equal(outline.children[1],target);
+  assert(monthlyNodeAction(outline,kind,'down').changed);assert.equal(outline.children[2],target);
+  assert.equal(monthlyNodeAction(outline,kind,'down').changed,false);
+  const removed=monthlyNodeAction(outline,kind,'remove');assert(removed.changed);
+  assert(!monthlyEntries(removed.outline).some(e=>[kind,added.selected].includes(e.node.id)));
+ }
+});
+
+test('deleting the title clears the map and top-level nodes restore an editable forest',()=>{
+ const cleared=monthlyNodeAction({...node('root',[node('branch')]),kind:'root'},'root','remove');
+ assert(cleared.changed);assert.equal(cleared.selected,null);assert.deepEqual(monthlyEntries(cleared.outline),[]);
+ const blank=layoutMonthlyMap(cleared.outline);assert.equal(blank.nodes.length,0);assert(Object.values(blank.bounds).every(Number.isFinite));
+ const first=monthlyNodeAction(cleared.outline,null,'top'),second=monthlyNodeAction(first.outline,first.selected,'top');
+ const nested=monthlyNodeAction(second.outline,first.selected,'add');
+ assert.equal(monthlyEntries(nested.outline).length,3);
+ const map=layoutMonthlyMap(nested.outline);assert.equal(map.nodes.length,3);assert.equal(map.edges.length,1);
+ assert(!map.nodes.some(n=>n.kind==='container'));
+ for(const a of map.nodes)for(const b of map.nodes)if(a!==b)assert(!(Math.abs(a.x-b.x)<(a.width+b.width)/2&&Math.abs(a.y-b.y)<(a.height+b.height)/2));
+ const legacy={...node('root'),kind:'root'},withPeer=monthlyNodeAction(legacy,'root','top');
+ assert.equal(withPeer.outline.children[0],legacy);
+ assert(monthlyNodeAction(withPeer.outline,'root','down').changed);
+ assert.equal(withPeer.outline.children[1],legacy);
 });

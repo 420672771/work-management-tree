@@ -19,7 +19,7 @@ assert(config.base.startsWith('http://127.0.0.1:'));
     await page.locator('#routineHours').fill('16.5');
     assert.equal(await page.locator('#routineHours').getAttribute('required'),'');
     await page.locator('#routineTitle').fill('核心系统日常运维');
-    await page.locator('#routineOwner').selectOption(String(config.owner));
+    await page.locator('#routineOwnerOptions input[value="'+config.owner+'"]').check();
     await page.locator('#routineNode').selectOption(String(config.domain));
     await page.locator('#routineDeliverable').fill('巡检、备份与异常处理记录');
     await page.screenshot({path:'/tmp/wmt-routines-template.png'});

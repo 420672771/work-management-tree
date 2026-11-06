@@ -9,3 +9,5 @@ bin/
 artifacts/weekly-report-demo/*.db*
 artifacts/monthly-report-demo/*.db*
 data/.auto-reload-enabled
+data/production-migration/
+artifacts/routine-flow-test/

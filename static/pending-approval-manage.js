@@ -85,7 +85,7 @@
   const editDraft = async (approval) => {
     const task = approval.task || {};
     const [users, tree] = await Promise.all([window.get('/api/users'), window.get('/api/tree')]);
-    const domains = tree.filter(item => item.node_type === 'domain');
+    const domains = tree.filter(item => ['domain','subdomain'].includes(item.node_type) && !item.inactive_at);
     let dialog = $('#pendingDraftDialog');
     if (!dialog) {
       dialog = document.createElement('dialog');

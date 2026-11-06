@@ -135,9 +135,10 @@ def build_snapshot(c, user, month, generated_at):
     return snapshot
 
 
-def node(node_id, text, kind='detail', children=None, task_id=None):
+def node(node_id, text, kind='detail', children=None, task_id=None, domain_id=None):
     value = {'id':node_id,'text':str(text)[:MAX_TEXT],'kind':kind,'children':children or []}
     if task_id is not None: value['task_id'] = task_id
+    if domain_id is not None: value['domain_id'] = domain_id
     return value
 
 
@@ -163,7 +164,7 @@ def default_outline(snapshot):
                             node(key+':action','建议：'+task['suggested_action'],task_id=task_id)]
             label = f"{task['title']}｜{task['priority']}｜{facts.WORK.get(task['work_status'],task['work_status'])}｜截止 {task['due_at'][:10]}"
             groups.setdefault(task['domain_name'],[]).append(node(key,label,'task',details,task_id))
-        children = [node(f'{section}:domain:{index}',name,'group',items) for index,(name,items) in enumerate(groups.items())]
+        children = [node(f'{section}:domain:{index}',name,'group',items,domain_id=tasks[items[0]['task_id']]['domain_id']) for index,(name,items) in enumerate(groups.items())]
         branches.append(node('section:'+section,SECTIONS[section],'section',children))
     branches.append(node('section:summary',SECTIONS['summary'],'section',[
         node('summary:conclusion','本月总结：待补充'),node('summary:improvements','不足与改进：待补充'),
@@ -174,16 +175,24 @@ def default_outline(snapshot):
 def validate_outline(outline, snapshot):
     expected = default_outline(snapshot)
     metric_nodes = {n['id']:n for n in expected['children'][0]['children']}
-    required_sections = {'section:'+key for key in SECTIONS}
-    if not isinstance(outline,dict) or outline.get('id')!='root' or outline.get('kind')!='root' or outline.get('text')!=snapshot['title']:
-        raise ValueError('月报根节点须保留本人姓名与报告月份')
-    seen = set(); metrics = {}; count = 0; task_ids = {t['id'] for t in snapshot['tasks']}
-    stack = [(outline,0,None)]
+    section_ids = {'section:'+key for key in SECTIONS}
+    if not isinstance(outline,dict):
+        raise ValueError('导图内容格式无效')
+    # The invisible document container allows every visible node to be deleted,
+    # including the generated title. Legacy single-root outlines remain valid.
+    container = outline.get('kind') == 'container'
+    if container:
+        if set(outline) != {'id','text','kind','children'} or outline.get('id') != 'monthly:outline' or outline.get('text') != '':
+            raise ValueError('导图容器格式无效')
+    elif outline.get('kind') != 'root':
+        raise ValueError('导图根节点格式无效')
+    seen = set(); count = 0; task_ids = {t['id'] for t in snapshot['tasks']}
+    stack = [(outline,-1 if container else 0,None)]
     while stack:
         item,depth,parent = stack.pop(); count += 1
         if depth>MAX_DEPTH or count>MAX_NODES or not isinstance(item,dict):
             raise ValueError('导图层级或节点数量超出限制')
-        if set(item)-{'id','text','kind','children','task_id'}:
+        if set(item)-{'id','text','kind','children','task_id','domain_id'}:
             raise ValueError('导图节点包含不支持的字段')
         key,text,kind,children = (item.get(k) for k in ('id','text','kind','children'))
         if not isinstance(key,str) or not key or len(key)>160 or key in seen:
@@ -191,25 +200,26 @@ def validate_outline(outline, snapshot):
         seen.add(key)
         if not isinstance(text,str) or len(text)>MAX_TEXT or not isinstance(children,list):
             raise ValueError('导图内容格式无效或单节点超过 4000 字')
-        if kind not in ('root','section','metric','group','task','detail','custom'):
+        if kind not in ('root','section','metric','group','task','detail','custom','container'):
             raise ValueError('导图节点类型无效')
-        if key in required_sections and (kind!='section' or parent!='root'):
-            raise ValueError('固定分支须保留在导图根节点下')
-        if kind=='root' and depth!=0:
-            raise ValueError('导图只能有一个根节点')
-        if kind=='section' and (key not in required_sections or parent!='root'):
-            raise ValueError('固定分支不能移动到其他层级')
+        if kind=='container' and depth!=-1:
+            raise ValueError('导图容器不能作为内容节点')
+        if key=='root' and kind!='root':
+            raise ValueError('月报标题节点类型不能修改')
+        if kind=='root' and (key!='root' or depth!=0 or text!=snapshot['title']):
+            raise ValueError('月报标题节点须保留本人姓名与报告月份')
+        if (key in section_ids and kind!='section') or (kind=='section' and key not in section_ids):
+            raise ValueError('导图分支类型无效')
         if kind=='metric':
-            if key not in metric_nodes or parent!='section:overview' or item!=metric_nodes[key]:
+            if key not in metric_nodes or text!=metric_nodes[key]['text'] or 'task_id' in item:
                 raise ValueError('统计节点来自任务快照，不能手动修改')
-            metrics[key]=item
         if key in metric_nodes and kind!='metric':
             raise ValueError('统计节点类型不能修改')
         if 'task_id' in item and (type(item['task_id']) is not int or item['task_id'] not in task_ids or kind not in ('task','detail')):
             raise ValueError('导图只能关联本月报快照中的本人任务')
+        if 'domain_id' in item and (kind!='group' or type(item['domain_id']) is not int or item['domain_id'] not in {t['domain_id'] for t in snapshot['tasks']}):
+            raise ValueError('导图只能关联本月报快照中的责任域')
         stack.extend((child,depth+1,key) for child in children)
-    if metrics.keys()!=metric_nodes.keys() or not required_sections.issubset(seen):
-        raise ValueError('月报须保留概览统计及全部固定分支')
     if len(json.dumps(outline,ensure_ascii=False).encode())>MAX_BYTES:
         raise ValueError('导图内容过大，请精简补充内容')
 
@@ -266,6 +276,9 @@ def revise(c, report_id, user_id):
 def text_export(report):
     lines=[report['snapshot']['title'],f"{report['status_label']} · V{report['version']} · 数据截至 {report['snapshot']['data_cutoff']}"]
     def visit(item,depth):
+        if item['kind']=='container':
+            for child in item['children']: visit(child,depth)
+            return
         lines.append('  '*depth+'- '+item['text'])
         for child in item['children']: visit(child,depth+1)
     visit(report['editorial']['outline'],0)

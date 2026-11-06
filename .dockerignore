@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+!.env.production.example
+data
+logs
+artifacts
+tests
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+worktree.pid
+bin

@@ -157,7 +157,7 @@
         setImportant(nav, key, values[index]);
       });
       nav.querySelectorAll('button').forEach(button => {
-        setImportant(button, 'display', 'inline-flex');
+        setImportant(button, 'display', button.hidden || button.classList.contains('hidden') ? 'none' : 'inline-flex');
         setImportant(button, 'flex', '0 0 auto');
         setImportant(button, 'width', 'auto');
         setImportant(button, 'min-width', '0');

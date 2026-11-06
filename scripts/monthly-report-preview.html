@@ -57,7 +57,7 @@ window.fetch=async function(resource,options={}){
     stored();
    }else if(match[2]==='/export')result={month:r.month,owner:r.snapshot.owner,outline:r.editorial.outline};
    else if(match[2]==='/text'){
-    const lines=[r.snapshot.title];function walk(n,depth){lines.push('  '.repeat(depth)+'- '+n.text);n.children.forEach(c=>walk(c,depth+1));}walk(r.editorial.outline,0);result={text:lines.join('\n')};
+    const lines=[r.snapshot.title];function walk(n,depth){if(n.kind==='container'){n.children.forEach(c=>walk(c,depth));return;}lines.push('  '.repeat(depth)+'- '+n.text);n.children.forEach(c=>walk(c,depth+1));}walk(r.editorial.outline,0);result={text:lines.join('\n')};
    }else result=reportView(r);
   }
   return new Response(JSON.stringify(result),{status:200,headers:{'Content-Type':'application/json'}});
@@ -73,7 +73,7 @@ document.getElementById('demoChecks').innerHTML=demoBundle.checks.map(text=>`<li
 document.getElementById('demoViewer').onchange=async event=>{await openPage('home');if(!document.getElementById('monthlyPage').classList.contains('hidden'))return;location.search='?viewer='+event.target.value;};
 document.getElementById('demoReset').onclick=()=>{sessionStorage.removeItem(demoKey);location.reload();};
 </script>
-<script src="/static/monthly-reports.js?v=20261105-3"></script>
+<script src="/static/monthly-reports.js?v=20261106-node-actions"></script>
 <script>
 window.addEventListener('load',async()=>{
  await openPage('monthly');document.getElementById('monthlyMonth').value=demoBundle.month;

@@ -8,6 +8,8 @@ import weekly_reports
 import monthly_reports
 import accounts
 import routines
+import assistant_management
+import responsibility_domains
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
@@ -29,8 +31,8 @@ CREATE TABLE IF NOT EXISTS reporting_line (id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE TABLE IF NOT EXISTS delegate (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, delegate_user_id INTEGER NOT NULL, scope TEXT NOT NULL DEFAULT 'approval', start_at TEXT NOT NULL, end_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS progress_record (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, reported_percent INTEGER NOT NULL, report_text TEXT NOT NULL, is_blocked INTEGER NOT NULL DEFAULT 0, block_reason TEXT DEFAULT '', expected_finish TEXT, status TEXT NOT NULL DEFAULT 'pending', reported_by INTEGER, reported_at TEXT NOT NULL, confirmed_by INTEGER, confirmed_at TEXT, effective_percent INTEGER, source TEXT NOT NULL DEFAULT 'web');
 CREATE TABLE IF NOT EXISTS approval_record (id INTEGER PRIMARY KEY AUTOINCREMENT, biz_type TEXT NOT NULL, biz_id INTEGER NOT NULL, task_id INTEGER, approver_id INTEGER, due_at TEXT, status TEXT NOT NULL DEFAULT 'pending', result_reason TEXT DEFAULT '', operated_by INTEGER, created_at TEXT NOT NULL, operated_at TEXT);
-CREATE TABLE IF NOT EXISTS task_template (id INTEGER PRIMARY KEY AUTOINCREMENT, org_node_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', owner_id INTEGER NOT NULL, deliverable TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'P1', recurrence TEXT NOT NULL, due_offset_days INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', review_at TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS task_instance (id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, instance_date TEXT NOT NULL, task_id INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(template_id,instance_date));
+CREATE TABLE IF NOT EXISTS task_template (id INTEGER PRIMARY KEY AUTOINCREMENT, org_node_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', owner_id INTEGER, deliverable TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'P1', recurrence TEXT NOT NULL, due_offset_days INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', review_at TEXT, created_at TEXT NOT NULL, assignment_type TEXT NOT NULL DEFAULT 'person', position_id INTEGER, owner_ids_json TEXT);
+CREATE TABLE IF NOT EXISTS task_instance (id INTEGER PRIMARY KEY AUTOINCREMENT, template_id INTEGER NOT NULL, instance_date TEXT NOT NULL, owner_id INTEGER NOT NULL, task_id INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(template_id,instance_date,owner_id));
 CREATE TABLE IF NOT EXISTS daily_report_status (id INTEGER PRIMARY KEY AUTOINCREMENT, report_date TEXT NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL, task_count INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT 'system', created_at TEXT NOT NULL, UNIQUE(report_date,user_id));
 CREATE TABLE IF NOT EXISTS job_run_log (id INTEGER PRIMARY KEY AUTOINCREMENT, job_name TEXT NOT NULL, run_key TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(job_name,run_key));
 CREATE TABLE IF NOT EXISTS conversation_draft (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, user_id INTEGER, source_type TEXT NOT NULL DEFAULT 'text', raw_text TEXT NOT NULL, slots_json TEXT NOT NULL DEFAULT '{}', missing_slots TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'collecting', expire_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -67,7 +69,7 @@ def db():
 
 def migrate(c):
     """Schema work must run once at service startup, never on every request."""
-    c.executescript(SCHEMA + weekly_reports.SCHEMA + monthly_reports.SCHEMA + accounts.SCHEMA)
+    c.executescript(SCHEMA + weekly_reports.SCHEMA + monthly_reports.SCHEMA + accounts.SCHEMA + responsibility_domains.SCHEMA)
     for statement in ("ALTER TABLE login_state ADD COLUMN flow_type TEXT NOT NULL DEFAULT 'login'", "ALTER TABLE login_state ADD COLUMN user_id INTEGER", "ALTER TABLE login_state ADD COLUMN session_hash TEXT", "ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''", "ALTER TABLE test_issue ADD COLUMN record_type TEXT NOT NULL DEFAULT 'issue'"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
@@ -75,6 +77,7 @@ def migrate(c):
     c.execute('PRAGMA journal_mode=WAL')
     c.execute('PRAGMA synchronous=NORMAL')
     routines.migrate(c)
+    responsibility_domains.install_guards(c)
 def rowdict(row): return dict(row) if row else None
 def audit(c, typ, oid, action, actor, before=None, after=None):
     c.execute("INSERT INTO audit_log(object_type,object_id,action,actor,before_json,after_json,created_at) VALUES(?,?,?,?,?,?,?)", (typ, oid, action, actor, json.dumps(before, ensure_ascii=False) if before else None, json.dumps(after, ensure_ascii=False) if after else None, now()))
@@ -158,8 +161,8 @@ def validate_task_fields(c, payload, *, require_all=False):
 def generate_routines(c, instance_date=None, current_time=None, template_ids=None):
     created=routines.generate(c,instance_date,current_time,approver_for,template_ids)
     for tid in created:
-        task=c.execute('SELECT parent_template_id,routine_week_start FROM task WHERE id=?',(tid,)).fetchone()
-        audit(c,'task',tid,'routine_generated','system',after={'template_id':task['parent_template_id'],'instance_date':task['routine_week_start']})
+        task=c.execute('SELECT parent_template_id,routine_week_start,owner_id,routine_position_id FROM task WHERE id=?',(tid,)).fetchone()
+        audit(c,'task',tid,'routine_generated','system',after={'template_id':task['parent_template_id'],'instance_date':task['routine_week_start'],'owner_id':task['owner_id'],'position_id':task['routine_position_id']})
     return created
 def daily_targets(c, report_date=None):
     day=report_date or datetime.now(timezone.utc).date().isoformat(); rows=[]
@@ -465,6 +468,11 @@ def detect_responsibility_domain(c, text):
 
 def initialize_responsibility_domains(c):
     """Bootstrap the approved five-domain structure without deleting task history."""
+    if c.execute("SELECT 1 FROM system_setting WHERE setting_key='responsibility_domains_initialized'").fetchone():return
+    # Existing definitions are authoritative; upgrades must not reset edits or
+    # recreate deleted seed domains. Only an uninitialized database is seeded.
+    if c.execute("SELECT 1 FROM org_node WHERE domain_code<>'' LIMIT 1").fetchone():
+        c.execute("INSERT INTO system_setting VALUES('responsibility_domains_initialized','1')");return
     # A department may explicitly maintain its own team-based responsibility tree.
     if c.execute("SELECT 1 FROM org_node WHERE domain_code IN ('BLD','TRN','OPS') LIMIT 1").fetchone(): return
     root=c.execute("SELECT id FROM org_node WHERE node_type='department' ORDER BY id LIMIT 1").fetchone()
@@ -485,6 +493,7 @@ def initialize_responsibility_domains(c):
             c.execute('UPDATE org_node SET parent_id=?,node_type=?,name=?,boundary=?,owner_id=?,domain_code=?,operating_line=?,inactive_at=NULL WHERE id=?',(root['id'],'domain',name,boundary,owner_id,code,line,node['id']))
         else:
             c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,domain_code,operating_line,effective_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(root['id'],'domain',name,boundary,owner_id,code,line,now(),now()))
+    c.execute("INSERT OR IGNORE INTO system_setting VALUES('responsibility_domains_initialized','1')")
 
 def initialize():
     c=db()
@@ -997,7 +1006,9 @@ def model_action_to_command(data):
     if operation=='accept_task' and task_id:
         return f'验收任务#{task_id} {"驳回" if data.get("result")=="rejected" else "通过"}'
     if operation=='edit_task' and task_id:
-        field={'title':'任务标题','description':'任务详情','deliverable':'交付物'}.get(str(data.get('field') or ''))
+        field={'title':'任务标题','description':'任务详情','deliverable':'交付物','priority':'优先级',
+               'risk_status':'风险状态','task_type':'任务类型','estimated_hours':'标准工时',
+               'actual_hours':'实际工时','complexity':'复杂度'}.get(str(data.get('field') or ''))
         value=str(data.get('value') or '').strip()
         if field and value: return f'任务#{task_id} {field}改为{value}'
     if operation=='set_delegate' and str(data.get('principal_name') or '').strip() and str(data.get('delegate_name') or '').strip():
@@ -1024,7 +1035,7 @@ def model_bot_operation_command(c, text, user_id, session_id=None):
         '仅能使用给定任务中的 id 和给定成员姓名；无法唯一确定时 operation=unknown。'
         '若用户说“该任务/这项任务/此任务”，优先使用“当前会话任务”；若没有当前会话任务且可操作任务只有一条，使用那一条。'
         'change_due 需 due_date 为 YYYY-MM-DD；change_owner 需 owner_name；accept_task 的 result 为 passed/rejected；'
-        'edit_task 的 field 仅为 title/description/deliverable 且带 value；progress_update 带整数 percent；'
+        'edit_task 的 field 仅为 title/description/deliverable/priority/risk_status/task_type/estimated_hours/actual_hours/complexity 且带 value；progress_update 带整数 percent；'
         'set_delegate 带 principal_name 和 delegate_name。用户输入：'+str(text or '')+
         '。可操作任务：'+json.dumps(tasks,ensure_ascii=False,separators=(',',':'))+
         '。当前会话任务：'+json.dumps(referenced,ensure_ascii=False,separators=(',',':'))+
@@ -1053,13 +1064,89 @@ def bot_can_manage_task(c, user_id, task):
 
 def save_bot_action(c, session_id, user_id, action):
     expiry=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat()
-    c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND status='pending'",(session_id,))
+    if action.get('task_id'):
+        action['task_before']=rowdict(c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone())
+    c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id IS ? AND status IN ('pending','collecting')",(session_id,user_id))
     return c.execute('INSERT INTO bot_pending_action(session_id,user_id,action_json,expire_at,created_at) VALUES(?,?,?,?,?)',(session_id,user_id,json.dumps(action,ensure_ascii=False),expiry,now())).lastrowid
+
+BOT_HELP = ('我是科技产品中心智能助手，可以查询任务、反馈进度、新建任务草稿、修改/删除任务、提交/验收任务、设置确认代理和定时汇总。\n'
+            '部门负责人和管理 PM 还可维护基础资料和成员信息，例如：\n'
+            '查看成员 / 查看部门 / 查看岗位 / 查看责任域 / 查看例行任务模板\n'
+            '新建部门 数据产品部\n'
+            '新建岗位 数据分析师，部门：数据产品部\n'
+            '新建成员 张三，部门：数据产品部，账号：zhangsan\n'
+            '修改成员 张三，岗位：数据分析师，直属上级：部门管理PM\n'
+            '把张三的部门改为科技产品中心\n'
+            '新建责任域 数据治理，负责人：张三，边界：数据质量管理\n'
+            '新建例行任务模板 每周数据检查，责任域：数据治理，责任人：张三，标准工时：2，交付物：检查记录\n'
+            '新建例行任务模板 每周例行检查，责任域：数据治理，责任人员：张三、李四，标准工时：2，交付物：检查记录\n'
+            '任务#15 优先级改为P0，交付物改为评审纪要\n'
+            '删除任务#15\n'
+            '涉及资料新建、修改、删除的操作会先回显，回复“确认”执行、“取消”放弃，10 分钟内有效。重名对象请使用 #编号。')
+
+
+def bot_task_changes(c, task, changes):
+    allowed={'title','description','deliverable','priority','task_type','due_at','owner_id','org_node_id','risk_status','estimated_hours','actual_hours','complexity'}
+    if not changes or set(changes)-allowed: raise ValueError('不支持的任务修改字段')
+    validated=validate_task_fields(c,{**dict(task),**changes},require_all=True)
+    result={key:validated.get(key,value) for key,value in changes.items()}
+    if 'risk_status' in changes and changes['risk_status'] not in ('normal','at_risk','blocked'): raise ValueError('风险状态须为正常、有风险或已阻塞')
+    if 'complexity' in changes and changes['complexity'] not in PERFORMANCE_DEFAULTS['complexity']: raise ValueError('复杂度无效')
+    for field in ('estimated_hours','actual_hours'):
+        if field in changes: result[field]=routines.hours(changes[field],actual=field=='actual_hours')
+    if task['routine_week_start']:
+        if ('estimated_hours' in result and result['estimated_hours']!=task['estimated_hours']) or ('task_type' in result and result['task_type']!='ROUTINE'):
+            raise ValueError('已生成例行任务的类型和标准工时快照不能修改，请调整模板用于未来任务')
+    return result
+
+
+def plan_bot_task_fields(c, text, user_id, session_id, task_id):
+    labels={'任务标题':'title','标题':'title','任务详情':'description','详情':'description','说明':'description',
+            '交付物':'deliverable','验收标准':'deliverable','优先级':'priority','风险状态':'risk_status',
+            '责任域':'org_node_id','任务类型':'task_type','标准工时':'estimated_hours','实际工时':'actual_hours',
+            '复杂度':'complexity','责任人':'owner_id','负责人':'owner_id','截止日期':'due_at','截止时间':'due_at'}
+    pattern='|'.join(re.escape(k) for k in sorted(labels,key=len,reverse=True))
+    changes={}; display=[]
+    for part in re.split(r'[，,；;]',text):
+        match=re.search('('+pattern+r')\s*(?:修改为|变更为|调整为|设置为|改为|改成|[:：])\s*(.+)$',part)
+        if not match: continue
+        key=labels[match[1]]; value=match[2].strip(' 。')
+        if key in changes: return None,'同一任务字段重复填写，请每项只提供一个值。'
+        display.append(match[1]+'：'+value);changes[key]=value
+    # Preserve the established single-field due/owner planners and their
+    # conversational date/title handling. This adds fields and combined edits.
+    if not changes:return None,None
+    if len(changes)==1:
+        if 'due_at' in changes and re.search(r'改|调|变|延|推',text):return None,None
+        if 'owner_id' in changes and not changes['owner_id'].startswith('#') and re.search(r'改为|变更为|调整为|改成|换成|为',text):return None,None
+    task=c.execute('SELECT * FROM task WHERE id=?',(task_id,)).fetchone()
+    if not task: return None,'未找到该任务。'
+    if not bot_can_manage_task(c,user_id,task): return None,'只有任务责任人、管理 PM 或部门负责人可以修改任务。'
+    try:
+        for key,table in (('owner_id','user'),('org_node_id','org_node')):
+            if key in changes:changes[key]=assistant_management.lookup(c,table,changes[key],nodes=key=='org_node_id')['id']
+        if 'due_at' in changes:changes['due_at']=valid_due_at(changes['due_at']) if re.match(r'^\d{4}-\d{2}-\d{2}',changes['due_at']) else parse_due(changes['due_at'])
+        if 'priority' in changes:changes['priority']=changes['priority'].upper()
+        if 'task_type' in changes:changes['task_type']={'专项':'PROJECT','专项任务':'PROJECT','临时':'ADHOC','临时任务':'ADHOC','例行':'ROUTINE','例行任务':'ROUTINE'}.get(changes['task_type'],changes['task_type'])
+        if 'risk_status' in changes:changes['risk_status']={'正常':'normal','有风险':'at_risk','已阻塞':'blocked','阻塞':'blocked'}.get(changes['risk_status'],changes['risk_status'])
+        for key in ('estimated_hours','actual_hours'):
+            if key in changes:changes[key]=re.sub(r'\s*(?:小时|h)$','',changes[key],flags=re.I)
+        changes=bot_task_changes(c,task,changes)
+    except (ValueError,LookupError) as exc:return None,str(exc)
+    action={'type':'update_task','task_id':task_id,'changes':changes};save_bot_action(c,session_id,user_id,action)
+    return action,f'拟修改任务#{task_id}《{task["title"]}》：\n'+ '\n'.join(display)+'\n回复“确认”执行，回复“取消”放弃。'
 
 def plan_bot_action(c, text, user_id, session_id, allow_model=True):
     """Create an explicit, reviewable plan for non-creation work actions."""
-    source=normalize_assistant_text(text); tid=task_number(source) or referenced_task_id(c,session_id,user_id,source); fallback_reply=None
+    source=normalize_assistant_text(text)
+    if re.fullmatch(r'(?:助手帮助|基础资料帮助|帮助|你能做什么|你会什么|怎么用|功能说明)[？?！!。]*',source): return None,BOT_HELP
+    handled,action,reply=assistant_management.plan(c,str(text),user_id,session_id,extract=model_management_proposal if allow_model and ai_configured() else None)
+    if handled:return action,reply
+    tid=task_number(source) or referenced_task_id(c,session_id,user_id,source); fallback_reply=None
     if not user_id: return None,'你的飞书账号尚未绑定系统成员，暂不能执行管理操作。'
+    if tid:
+        action,reply=plan_bot_task_fields(c,source,user_id,session_id,tid)
+        if action or reply:return action,reply
     report_schedule=parse_report_schedule(c,source,user_id)
     if report_schedule:
         if report_schedule.get('missing'):
@@ -1128,8 +1215,10 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         field='title' if ('标题' in field_match.group(0) and '详情' not in field_match.group(0)) else ('deliverable' if ('验收' in field_match.group(0) or '交付物' in field_match.group(0)) else 'description')
         value=field_match.group(1).strip('。；; ')
         if not value: return None,'请补充修改后的内容。'
-        action={'type':'edit_field','task_id':tid,'field':field,'value':value[:2000]}; save_bot_action(c,session_id,user_id,action)
-        return action,f'拟修改任务#{tid}《{task["title"]}》的{ {"title":"标题","description":"详情","deliverable":"交付物/验收标准"}[field] }。回复“确认”执行，回复“取消”放弃。'
+        try:bot_task_changes(c,task,{field:value})
+        except ValueError as exc:return None,str(exc)
+        action={'type':'edit_field','task_id':tid,'field':field,'value':value}; save_bot_action(c,session_id,user_id,action)
+        return action,f'拟将任务#{tid}《{task["title"]}》的{ {"title":"标题","description":"详情","deliverable":"交付物/验收标准"}[field] }改为：{value}。回复“确认”执行，回复“取消”放弃。'
     due=parse_due(source)
     if due and re.search(r'(?:截止(?:日期)?|完成时间|交付日期|到期).*(?:改|调|变|延|推|到|为)|(?:改|调|变|延|推).*(?:截止|日期|时间|到期)|(?:该|这|此)(?:任务|事项)?.{0,12}(?:到|为)\s*(?:\d{1,2}[./月]|今天|明天|后天|下周)',source):
         if not tid:
@@ -1166,6 +1255,21 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
 
 def execute_bot_action(c, action, user_id):
     typ=action['type']; t=now()
+    if typ=='manage_reference':return assistant_management.execute(c,action,user_id)
+    if 'task_before' in action:
+        current=rowdict(c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone())
+        if current!=action['task_before']:raise ValueError('任务已发生变化，请重新提出操作并确认最新内容')
+    if typ=='update_task':
+        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
+        if not task or not bot_can_manage_task(c,user_id,task):raise PermissionError('无权修改该任务')
+        changes=bot_task_changes(c,task,action['changes'])
+        if 'actual_hours' in changes and task['task_type']=='ROUTINE':changes['routine_hours_updated_at']=t
+        if 'owner_id' in changes:changes['approver_id']=approver_for(c,changes['owner_id'])
+        changes['updated_at']=t
+        c.execute('UPDATE task SET '+','.join(key+'=?' for key in changes)+' WHERE id=?',(*changes.values(),task['id']))
+        if 'owner_id' in changes:sync_bot_task_approver(c,task['id'],changes['approver_id'],user_id,t)
+        audit(c,'task',task['id'],'assistant_update',str(user_id),before=dict(task),after=changes)
+        return '任务内容已修改，已记录操作审计。'
     if typ in ('start_task','submit_acceptance'):
         task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone(); expected='assigned' if typ=='start_task' else 'in_progress'
         if not task or int(task['owner_id'])!=int(user_id) or task['work_status']!=expected: raise PermissionError('当前无法执行该任务状态变更')
@@ -1181,15 +1285,21 @@ def execute_bot_action(c, action, user_id):
     if typ=='change_owner':
         task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
         if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权变更该任务责任人')
-        c.execute('UPDATE task SET owner_id=?,approver_id=?,updated_at=? WHERE id=?',(action['owner_id'],approver_for(c,action['owner_id']),t,task['id'])); audit(c,'task',task['id'],'change_owner',str(user_id),before=rowdict(task),after=action); return '任务责任人已变更。'
+        bot_task_changes(c,task,{'owner_id':action['owner_id']})
+        approver=approver_for(c,action['owner_id'])
+        c.execute('UPDATE task SET owner_id=?,approver_id=?,updated_at=? WHERE id=?',(action['owner_id'],approver,t,task['id']))
+        sync_bot_task_approver(c,task['id'],approver,user_id,t)
+        audit(c,'task',task['id'],'change_owner',str(user_id),before=rowdict(task),after=action); return '任务责任人已变更。'
     if typ=='change_due':
         task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
         if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权变更截止日期')
+        bot_task_changes(c,task,{'due_at':action['due_at']})
         c.execute('UPDATE task SET due_at=?,updated_at=? WHERE id=?',(action['due_at'],t,task['id'])); audit(c,'task',task['id'],'change_due',str(user_id),before=rowdict(task),after=action); return '任务截止日期已调整。'
     if typ=='edit_field':
         task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
         if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权修改该任务')
         if action['field'] not in ('title','description','deliverable'): raise ValueError('不支持的修改字段')
+        bot_task_changes(c,task,{action['field']:action['value']})
         c.execute(f"UPDATE task SET {action['field']}=?,updated_at=? WHERE id=?",(action['value'],t,task['id'])); audit(c,'task',task['id'],'edit_'+action['field'],str(user_id),before=rowdict(task),after=action); return '任务内容已修改。'
     if typ=='confirm_approval':
         approval=c.execute("SELECT * FROM approval_record WHERE id=? AND status='pending'",(action['approval_id'],)).fetchone()
@@ -1200,6 +1310,9 @@ def execute_bot_action(c, action, user_id):
             record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone(); c.execute('UPDATE progress_record SET status=?,effective_percent=?,confirmed_by=?,confirmed_at=? WHERE id=?',('approved',record['reported_percent'],user_id,t,record['id'])); c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],progress_work_status(c,approval['task_id'],record['reported_percent']),t,approval['task_id']))
         audit(c,'approval',approval['id'],action['result'],str(user_id),after=action); return '确认已通过。' if action['result']=='approved' else '已驳回。'
     if typ=='set_delegate':
+        actor=c.execute('SELECT role FROM user WHERE id=?',(user_id,)).fetchone()
+        if not actor or (action['user_id']!=user_id and actor['role'] not in ('manager','pm')):raise PermissionError('当前无权设置该确认代理')
+        if any(not c.execute('SELECT 1 FROM user WHERE id=?',(action[key],)).fetchone() for key in ('user_id','delegate_user_id')):raise ValueError('被代理人或代理成员不存在')
         c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(action['user_id'],action['delegate_user_id'],'approval',action['start_at'],action['end_at'])); audit(c,'delegate',action['user_id'],'create',str(user_id),after=action); return '确认代理已设置。'
     if typ=='create_scheduled_report':
         if int(action.get('receiver_id') or 0)!=int(user_id): raise PermissionError('当前只支持为自己配置定时汇总')
@@ -1212,6 +1325,79 @@ def execute_bot_action(c, action, user_id):
         sid=c.execute("INSERT INTO scheduled_report(created_by,receiver_id,scope,frequency,schedule_time,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(user_id,user_id,scope,'daily',action['schedule_time'],1,t,t)).lastrowid
         audit(c,'scheduled_report',sid,'create',str(user_id),after=action); return '定时任务已生效。'
     raise ValueError('不支持的机器人操作')
+
+
+def sync_bot_task_approver(c, task_id, approver, user_id, stamp):
+    task=c.execute('SELECT approval_status FROM task WHERE id=?',(task_id,)).fetchone()
+    if task and task['approval_status']=='pending':
+        if approver:
+            c.execute("UPDATE approval_record SET approver_id=? WHERE task_id=? AND biz_type='task_confirm' AND status='pending'",(approver,task_id))
+        else:
+            c.execute("UPDATE approval_record SET status='approved',operated_at=?,operated_by=? WHERE task_id=? AND biz_type='task_confirm' AND status='pending'",(stamp,user_id,task_id))
+            c.execute("UPDATE task SET approval_status='approved',confirmed_by=?,confirmed_at=?,confirm_source='feishu' WHERE id=?",(user_id,stamp,task_id))
+
+
+def confirm_bot_action(c, user_id, session_id):
+    if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
+    pending=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='pending' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,user_id,now())).fetchone()
+    if not pending:return '没有待确认的操作；请先补齐资料，或重新说明需要执行什么。'
+    c.execute('SAVEPOINT bot_confirmation')
+    try:
+        reply=execute_bot_action(c,json.loads(pending['action_json']),user_id)
+    except (ValueError,PermissionError,LookupError,sqlite3.IntegrityError) as exc:
+        c.execute('ROLLBACK TO bot_confirmation')
+        c.execute('RELEASE bot_confirmation')
+        c.execute("UPDATE bot_pending_action SET status='failed',confirmed_at=? WHERE id=?",(now(),pending['id']))
+        return '操作未执行：'+('资料发生冲突，请重新核对后提出操作。' if isinstance(exc,sqlite3.IntegrityError) else str(exc))
+    c.execute('RELEASE bot_confirmation')
+    c.execute("UPDATE bot_pending_action SET status='executed',confirmed_at=? WHERE id=?",(now(),pending['id']))
+    return reply
+
+
+def process_bot_message(c, text, user_id, session_id):
+    """Shared text workflow for the Feishu callback and WebSocket receiver."""
+    source=normalize_assistant_text(text)
+    if re.fullmatch(r'(?:确认|确认执行|好的，?确认|是)[。！!]?',source):return confirm_bot_action(c,user_id,session_id)
+    if re.fullmatch(r'(?:取消|取消操作|不确认|否)[。！!]?',source):
+        c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status IN ('pending','collecting')",(now(),session_id,user_id))
+        return '已取消待执行操作。'
+    if re.search(r'删除|移除|作废|修改|改为|改成|调整|变更|新建|新增|创建|添加|开始|启动|提交|验收|设置|配置|代理',source):
+        c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id IS ? AND status='pending'",(session_id,user_id))
+    action,reply=plan_bot_action(c,text,user_id,session_id)
+    if action or reply:return reply
+    progress,error=resolve_progress_message(c,source,user_id,session_id)
+    if progress:
+        try:
+            _,_,task=submit_progress(c,progress['task_id'],user_id,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
+            return f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
+        except (ValueError,PermissionError) as exc:return str(exc)
+    if error:return error
+    intent=classify_bot_intent(source)
+    if is_department_progress_query(source):return feishu_department_progress(c,user_id)
+    if is_team_progress_query(source):return feishu_team_progress(c,user_id)
+    if intent=='task_query':return feishu_task_list(c,user_id,session_id)
+    if intent=='help':return BOT_HELP
+    if intent=='task_creation':
+        slots,missing=draft_slots(source,user_id,c);expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+        c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,user_id,'feishu',source,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
+        domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+        return '已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+    return assistant_clarification(source)
+
+
+def model_management_proposal(text):
+    """Model proposals remain inert until field/reference validation and confirmation."""
+    try:
+        content=ai_chat_completion([
+            {'role':'system','content':'你是科技产品中心助手的基础资料参数提取器，只输出 JSON，不执行操作。'
+             '格式：{"operation":"create或update","entity":"department/position/user/domain/subdomain/template","target":"修改成员时的完整姓名或#编号","fields":{...}}。'
+             '只提取用户明确提供的信息，不猜测姓名、权限、账号、归属；不确定返回{}。仅 user 支持 update。'
+             '字段白名单：'+json.dumps({key:sorted(value) for key,value in assistant_management.ALLOWED.items()},ensure_ascii=False)+
+             '。name为新资料名称/修改后姓名，department为所属部门完整名称，owner为负责人完整姓名，position为岗位名称，leader为直属上级姓名，approver为确认人姓名。'
+             'role取member/pm/manager，username为登录账号；template的owner支持用顿号分隔的多个完整姓名，不能按岗位推断人员；所有字段值必须是字符串；禁止提取密码、飞书绑定或用户声明的操作者身份。'},
+            {'role':'user','content':text}],temperature=0,max_tokens=600,timeout=12)
+        return parse_model_json(content)
+    except Exception:return None
 
 def extract_document_text(data, filename=''):
     """Best-effort local extraction for common text documents; never invents content."""
@@ -1803,11 +1989,11 @@ class Handler(BaseHTTPRequestHandler):
         user=self.session_user()
         return {'authenticated':bool(user),'mode':os.getenv('WMT_AUTH_MODE','demo').lower(),'user':user,
                 'monthly_demo':monthly_demo_enabled(),'feishu_ready':FeishuAdapter().login_configured()}
-    def management_user(self,c,body=None):
+    def management_user(self,c,body=None,message='仅部门负责人和管理 PM 可配置账号或重置密码'):
         uid=getattr(self,'authenticated_user_id',None)
         if not uid and monthly_demo_enabled():uid=(body or {}).get('actor_id')
         row=c.execute('SELECT id,role FROM user WHERE id=?',(uid,)).fetchone() if uid else None
-        if not row or row['role'] not in ('manager','pm'):raise PermissionError('仅部门负责人和管理 PM 可配置账号或重置密码')
+        if not row or row['role'] not in ('manager','pm'):raise PermissionError(message)
         return row['id']
     def account_cookie(self,token,max_age=28800,name='wmt_session',path='/'):
         secure='; Secure' if feishu_redirect_uri().startswith('https://') else ''
@@ -1855,6 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(404,{'error':'接口不存在'})
         except accounts.Throttled as exc:return self.json(429,{'error':str(exc)})
         except accounts.Conflict as exc:return self.json(409,{'error':str(exc)})
+        except sqlite3.IntegrityError as exc:return self.json(409,{'error':str(exc)})
         except PermissionError as exc:return self.json(403 if path!='/api/auth/login' else 401,{'error':str(exc)})
         except LookupError as exc:return self.json(404,{'error':str(exc)})
         except (ValueError,TypeError) as exc:return self.json(400,{'error':str(exc)})
@@ -1988,6 +2175,8 @@ class Handler(BaseHTTPRequestHandler):
             report=ROOT/'artifacts'/'routine-flow-test'/'report.html'
             if not report.exists():return self.json(404,{'error':'演练报告尚未生成'})
             return self.send_bytes(200,'text/html; charset=utf-8',report.read_bytes(),'no-cache')
+        if p.path=='/static/responsibility-domains.js':
+            return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'responsibility-domains.js').read_bytes(),'no-cache')
         if p.path=='/static/routine-tasks.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'routine-tasks.js').read_bytes(),'no-cache')
         if p.path=='/static/weekly-reports.js':
@@ -2022,13 +2211,13 @@ class Handler(BaseHTTPRequestHandler):
             data=(ROOT/'static'/'manual-assets'/manual_assets[p.path]).read_bytes(); self.send_response(200); self.send_header('Content-Type','image/svg+xml'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/' or p.path=='/index.html':
             if not login_required() and not self.require_auth(): return
-            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-flow2"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261104-layout1"></script><script defer src="/static/layout-guard.js?v=20261104-layout3"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
+            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-people"></script><script defer src="/static/responsibility-domains.js?v=20261106-1"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261106-domains"></script><script defer src="/static/layout-guard.js?v=20261106-domains"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
         if p.path=='/manual' or p.path=='/manual.html':
             if not self.require_auth(): return
             data=(ROOT/'static'/'manual.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/manual.md':
             if not self.require_auth(): return
-            data=(ROOT/'docs'/'工作管理树测试人员操作手册.md').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/markdown; charset=utf-8'); self.send_header('Content-Disposition','inline; filename="work-management-tree-test-manual.md"'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+            data=(ROOT/'docs'/'工作管理树用户操作手册.md').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/markdown; charset=utf-8'); self.send_header('Content-Disposition','inline; filename="work-management-tree-user-manual.md"'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/test-issues' or p.path=='/test-issues.html':
             if not self.require_auth(): return
             data=(ROOT/'static'/'test-issues.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
@@ -2060,6 +2249,11 @@ class Handler(BaseHTTPRequestHandler):
             out={'dashboard':{'total':len(task_rows),'active':sum(x['work_status']!='completed' for x in task_rows),'completed':sum(x['work_status']=='completed' for x in task_rows),'overdue':sum(x['time_status']=='overdue' for x in task_rows),'risk':sum(x['risk_status']!='normal' for x in task_rows),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]},'users':[accounts.public_user(c,x) for x in c.execute('SELECT * FROM user ORDER BY id')],'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
         elif p.path=='/api/users': out=[accounts.public_user(c,x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
+        elif p.path=='/api/domains':
+            try:
+                self.management_user(c,{'actor_id':q.get('actor_id',[None])[0]},message='仅部门负责人和管理 PM 可维护责任域')
+                out=responsibility_domains.listing(c)
+            except PermissionError as exc:c.close();return self.json(403,{'error':str(exc)})
         elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
         elif p.path=='/api/tasks/similar':
             out=similar_tasks(c,q.get('title',[''])[0])
@@ -2083,7 +2277,9 @@ class Handler(BaseHTTPRequestHandler):
             for row in c.execute("SELECT d.*,u.name AS user_name,du.name AS delegate_name FROM delegate d JOIN user u ON u.id=d.user_id JOIN user du ON du.id=d.delegate_user_id ORDER BY d.end_at DESC"):
                 item=rowdict(row); item['is_active']=item['start_at']<=now()<=item['end_at']; out.append(item)
         elif p.path=='/api/progress': out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(q.get('task_id',[0])[0],))]
-        elif p.path=='/api/routine/templates': out=[rowdict(x) for x in c.execute("SELECT tt.*,u.name AS owner_name,n.name AS node_name FROM task_template tt LEFT JOIN user u ON u.id=tt.owner_id LEFT JOIN org_node n ON n.id=tt.org_node_id WHERE tt.status='active' ORDER BY tt.id DESC")]
+        elif p.path=='/api/routine/templates':
+            try:out=routines.list_templates(c,q.get('week',[None])[0])
+            except ValueError as exc:c.close();return self.json(400,{'error':str(exc)})
         elif p.path=='/api/feishu/unbound-identities':
             rows=[]
             for log in c.execute("SELECT id,payload_json,created_at FROM im_message_log WHERE channel='feishu_ws' ORDER BY id DESC"):
@@ -2179,7 +2375,19 @@ class Handler(BaseHTTPRequestHandler):
                 suffix=Path(upload['filename']).suffix.lower()
                 kind='图片' if upload['content_type'].startswith('image/') else ('录音' if upload['content_type'].startswith('audio/') or suffix in {'.mp3','.wav','.m4a','.aac','.ogg','.mp4'} else '文档')
                 out={'filename':upload['filename'],'kind':kind,'text':extracted}
+            elif p.path=='/api/domains' or re.fullmatch(r'/api/domains/\d+',p.path):
+                domain_actor=self.management_user(c,b,message='仅部门负责人和管理 PM 可维护责任域')
+                changes={key:value for key,value in b.items() if key not in ('actor_id','operator_id','action')}
+                if p.path=='/api/domains':
+                    out=responsibility_domains.create(c,changes,domain_actor);response_code=201
+                else:
+                    domain_id=int(p.path.rsplit('/',1)[1])
+                    if b.get('action')=='delete':out=responsibility_domains.delete(c,domain_id,domain_actor)
+                    elif b.get('action','update')=='update':out=responsibility_domains.update(c,domain_id,changes,domain_actor)
+                    else:raise ValueError('不支持的责任域操作')
+                c.commit()
             elif p.path=='/api/tree':
+                if getattr(self,'authenticated_user_id',None):self.management_user(c,b)
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,effective_at,created_at) VALUES(?,?,?,?,?,?,?)',(b.get('parent_id'),b.get('node_type','domain'),b['name'],b.get('boundary',''),b.get('owner_id'),t,t)).lastrowid; audit(c,'org_node',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/users':
@@ -2303,6 +2511,12 @@ class Handler(BaseHTTPRequestHandler):
                 oid=c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(b['user_id'],b['delegate_user_id'],b.get('scope','approval'),b['start_at'],b['end_at'])).lastrowid; audit(c,'delegate',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/routine/templates' or re.fullmatch(r'/api/routine/templates/\d+',p.path):
                 template_actor=self.management_user(c,b)
+                if b.get('action')=='deactivate' and p.path!='/api/routine/templates':
+                    oid=int(p.path.rsplit('/',1)[1]);old=c.execute('SELECT * FROM task_template WHERE id=?',(oid,)).fetchone()
+                    if not old:return self.json(404,{'error':'模板不存在'})
+                    c.execute("UPDATE task_template SET status='inactive' WHERE id=?",(oid,))
+                    audit(c,'task_template',oid,'deactivate',str(template_actor),before=rowdict(old),after={'status':'inactive'})
+                    c.commit();return self.json(200,{'id':oid,'status':'inactive'})
                 fields=routines.template_fields(c,b)
                 if p.path=='/api/routine/templates':
                     fields['created_at']=t
@@ -2523,6 +2737,8 @@ class Handler(BaseHTTPRequestHandler):
             elif p.path=='/api/notify': out=WeComAdapter().send(b.get('userid',''),b.get('text',''))
             else: return self.json(404,{'error':'not found'})
             self.json(response_code,out)
+        except responsibility_domains.Referenced as exc:return self.json(409,{'error':str(exc)})
+        except LookupError as exc:return self.json(404,{'error':str(exc)})
         except accounts.Conflict as exc:return self.json(409,{'error':str(exc)})
         except PermissionError as exc:return self.json(403,{'error':str(exc)})
         except ValueError as exc:return self.json(400,{'error':str(exc)})
@@ -2534,7 +2750,10 @@ class Handler(BaseHTTPRequestHandler):
             if payload.get('type')=='url_verification':
                 if payload.get('token')!=adapter.verify_token: return self.json(403,{'error':'invalid verification token'})
                 return self.json(200,{'challenge':payload.get('challenge','')})
-            header=payload.get('header',{}); event=payload.get('event',{}); event_id=header.get('event_id') or event.get('message',{}).get('message_id')
+            header=payload.get('header',{})
+            if not secrets.compare_digest(str(header.get('token') or payload.get('token') or ''),str(adapter.verify_token or '')):
+                return self.json(403,{'error':'invalid verification token'})
+            event=payload.get('event',{}); event_id=header.get('event_id') or event.get('message',{}).get('message_id')
             if not event_id: return self.json(400,{'error':'event id is required'})
             sender=(event.get('sender') or {}).get('sender_id',{}).get('open_id'); message=event.get('message') or {}; content=message.get('content','')
             c=db(); user=c.execute('SELECT id FROM user WHERE feishu_open_id=?',(sender,)).fetchone() if sender else None
@@ -2551,39 +2770,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc: reply='暂未能识别这段语音：'+str(exc)+'。请改发文字，或联系管理员配置语音转写能力。'
             if text:
                 uid=user[0] if user else None; session_id=f'feishu:{sender or "anonymous"}'
-                if re.fullmatch(r'\s*(?:确认|确认执行|好的，?确认|是)\s*',text):
-                    pending=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='pending' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,uid,now())).fetchone()
-                    if not pending: reply='没有待确认的操作。请先告诉我需要执行什么。'
-                    else:
-                        try: reply=execute_bot_action(c,json.loads(pending['action_json']),uid); c.execute("UPDATE bot_pending_action SET status='executed',confirmed_at=? WHERE id=?",(now(),pending['id']))
-                        except (ValueError,PermissionError) as exc: reply='操作未执行：'+str(exc); c.execute("UPDATE bot_pending_action SET status='failed',confirmed_at=? WHERE id=?",(now(),pending['id']))
-                elif re.fullmatch(r'\s*(?:取消|取消操作|不确认|否)\s*',text):
-                    c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status='pending'",(now(),session_id,uid)); reply='已取消待执行操作。'
-                else:
-                    action,action_reply=plan_bot_action(c,text,uid,session_id)
-                    progress,error=resolve_progress_message(c,text,uid,session_id) if not action and not action_reply else (None,None)
-                    if action: reply=action_reply
-                    elif action_reply: reply=action_reply
-                    elif progress:
-                        try:
-                            rid,aid,task=submit_progress(c,progress['task_id'],uid,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
-                            reply=f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
-                        except (ValueError,PermissionError) as exc: reply=str(exc)
-                    elif error: reply=error
-                    else:
-                        intent=classify_bot_intent(text)
-                        if is_department_progress_query(text): reply=feishu_department_progress(c,uid)
-                        elif is_team_progress_query(text): reply=feishu_team_progress(c,uid)
-                        elif intent=='task_query': reply=feishu_task_list(c,uid,session_id)
-                        elif intent=='task_creation':
-                            slots,missing=draft_slots(text,uid,c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-                            c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,uid,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
-                            domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-                            reply='已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
-                        elif intent=='help': reply='我可以查询你的待办、填报进度、新建或修改任务、提交/执行验收、变更责任人和设置确认代理。涉及变更、删除和验收时，我会先回显，回复“确认”后才执行。'
-                        else: reply=assistant_clarification(text)
-            if sender and reply: adapter.send_text(sender,reply)
-            c.commit(); c.close(); self.json(200,{'code':0})
+                reply=process_bot_message(c,text,uid,session_id)
+            c.commit(); c.close()
+            if sender and reply:
+                try: adapter.send_text(sender,reply)
+                except Exception: pass  # A send failure must never roll back or repeat a confirmed mutation.
+            self.json(200,{'code':0})
         except Exception as exc: self.json(400,{'error':'feishu callback failed','detail':str(exc)})
     def handle_wecom_post(self):
         p=urllib.parse.urlparse(self.path); q=urllib.parse.parse_qs(p.query); codec=WeComCallback()

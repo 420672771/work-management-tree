@@ -1,0 +1,57 @@
+// Run only against the isolated fictional fixture from demo-monthly-report.py.
+const {chromium}=require(process.env.WMT_PLAYWRIGHT_MODULE||'playwright');
+const assert=require('node:assert/strict');
+const base=process.env.WMT_TEST_URL;
+assert(base,'Set WMT_TEST_URL to an isolated monthly demo server');
+(async()=>{
+ const browser=await chromium.launch({headless:true});
+ try{
+  const page=await browser.newPage({viewport:{width:1680,height:1100}}),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(base);await page.waitForFunction(()=>typeof currentUsers!=='undefined'&&currentUsers.length>0);
+  const user=await page.evaluate(()=>currentUsers.find(u=>u.name==='孙然（演示）'));
+  assert(user,'This test requires the isolated fictional fixture');
+  await page.locator('#demoActor').selectOption(String(user.id));await page.locator('#monthlyTab').click();
+  await page.locator('#monthlyMonth').fill('2026-09');await page.locator('#monthlyGenerate').click();
+  await page.waitForFunction(()=>document.querySelector('#monthlyTitle').textContent.includes('2026-09'));
+  const id=await page.locator('#monthlyList [data-report]').first().getAttribute('data-report');
+  const saved=()=>page.waitForFunction(()=>document.querySelector('#monthlySaveState')?.textContent==='已自动保存');
+  const read=async()=>{await saved();return (await page.request.get(base+'/api/monthly-reports/'+id+'?actor_id='+user.id)).json();};
+  const select=async key=>{await page.locator('#monthlyMap [data-node="'+key+'"]').click();};
+  const action=async key=>{await page.locator('[data-node-action="'+key+'"]').click();await saved();};
+  const original=await read();
+  await select('metric:new');assert(await page.locator('#monthlyNodeText').isDisabled());
+  assert(await page.locator('[data-node-action="up"]').isDisabled());
+  await action('down');assert.equal((await read()).editorial.outline.children[0].children[1].id,'metric:new');
+  await action('up');await action('add');await page.locator('#monthlyNodeText').fill('统计补充说明');await saved();
+  let report=await read();assert.equal(report.editorial.outline.children[0].children[0].children[0].text,'统计补充说明');
+  await page.reload();await page.locator('#monthlyTab').click();
+  await page.locator('#monthlyMonth').fill('2026-09');await page.locator('#monthlyGenerate').click();
+  await page.waitForFunction(()=>document.querySelector('#monthlyTitle').textContent.includes('2026-09'));
+  await select('metric:new');await action('remove');
+  report=await read();assert(!report.editorial.outline.children[0].children.some(n=>n.id==='metric:new'));
+  await select('section:summary');await action('up');
+  assert.equal((await read()).editorial.outline.children.at(-2).id,'section:summary');
+  await action('down');assert(await page.locator('[data-node-action="down"]').isDisabled());
+  await action('remove');assert(!((await read()).editorial.outline.children.some(n=>n.id==='section:summary')));
+  await page.locator('[data-map="add-root"]').click();await saved();
+  const peer=(await read()).editorial.outline.children[1].id;
+  await select('root');await action('down');assert.equal((await read()).editorial.outline.children[1].id,'root');
+  await action('up');await select(peer);await action('remove');
+  await select('root');await action('remove');
+  assert.equal(await page.locator('#monthlyMap [data-node]').count(),0);
+  report=await read();assert.deepEqual(report.editorial.outline.children,[]);assert.deepEqual(report.snapshot,original.snapshot);
+  await page.locator('[data-map="add-root"]').click();await saved();
+  await page.locator('#monthlyNodeText').fill('重新编写月报');await saved();await action('add');
+  await page.locator('#monthlyNodeText').fill('新增子节点');await saved();
+  report=await read();assert.equal(report.editorial.outline.children[0].children[0].text,'新增子节点');
+  const exported=await (await page.request.get(base+'/api/monthly-reports/'+id+'/text?actor_id='+user.id)).json();
+  assert(exported.text.includes('- 重新编写月报\n  - 新增子节点'));
+  await page.locator('[data-action="archive"]').click();await page.locator('[data-action="revise"]').waitFor();
+  assert.equal(await page.locator('[data-map="add-root"]').isVisible(),false);
+  await page.locator('[data-action="revise"]').click();await page.locator('[data-action="archive"]').waitFor();
+  assert.equal(await page.locator('#monthlyMap [data-node]').count(),2);
+  assert(await page.locator('[data-map="add-root"]').isVisible());assert.deepEqual(errors,[]);
+  console.log('PASS: generated metric/section/title actions, sibling boundaries, autosave/reload, clear/rebuild, export, archive/revise');
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exit(1);});

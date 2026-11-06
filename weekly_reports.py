@@ -173,7 +173,7 @@ def build_snapshot(c, start, end, generated_at, owner_id=None):
                               ((due and week_end <= due < next_end) or t['work_status'] == 'in_progress'))
         t['accepted'] = bool(accepted and accepted[-1]['result'] == 'passed')
         # Keep only meeting facts, never mutable database rows or personal IDs.
-        keys = ('id', 'title', 'owner_id', 'owner_name', 'domain_id', 'domain_name', 'due_at', 'priority',
+        keys = ('id', 'title', 'owner_id', 'owner_name', 'org_node_id', 'domain_id', 'domain_name', 'due_at', 'priority',
                 'work_status', 'risk_status', 'deliverable', 'estimated_hours', 'actual_hours', 'complexity',
                 'completed_at', 'completion_source', 'latest_progress', 'latest_progress_at', 'block_reason',
                 'reported_this_week', 'overdue', 'completed_this_week', 'new_this_week', 'risk_reasons',
