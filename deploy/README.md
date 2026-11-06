@@ -68,6 +68,20 @@ systemctl --user list-timers worktree-routines.timer --no-pager
 
 定时器恢复时只补最近一次到期周期，不批量补历史空周。命令 `python3 scripts/generate-routines.py --week 2026-11-09` 可人工补指定日期所在周（不会发送外部消息）。与其他定时任务一样，自定义数据库时须通过 service 的 `Environment=WMT_DB=...` 指向网站相同数据库；更换部署目录也须同步修改 service 路径。
 
+模板新增、编辑与手动补生成限部门负责人或管理 PM；真实登录身份优先于请求中的演示身份。人工补生成 API 可传 `template_ids` 限定模板，定时任务仍处理全部生效且已配置工时的模板。已生成周任务的标准工时为只读快照。例行任务的周工时填报（包括明确填报 0 小时）计入绩效过程记录，100% 进度确认进入待验收，验收通过后才形成已交付成果。
+
+### 保留的例行任务全流程演练
+
+`scripts/test-routine-business-flow.py` 按 2026 年 11 月业务周期演练模板配置、按周生成、执行、工时、验收、逾期、跨期和绩效，使用 `routine.*` 独立账号、`[例行演练]` 模板和任务。先使用 SQLite 备份接口制作隔离副本，再执行：
+
+```bash
+python3 scripts/test-routine-business-flow.py --database /tmp/isolated-worktree.db --output /tmp/routine-flow-report
+```
+
+明确需要在测试站保留数据时，增加 `--retain` 并指定网站数据库；脚本拒绝覆盖已有同批演练账号。演练只补生成指定模板，不改其他任务；演练账号没有飞书绑定，运行进程也关闭外部消息凭据。既有员工、账号、任务、模板逐条核对。四类主要模板继续生效，兼容性和删除验证模板停用保留。生产迁移应排除 `routine.*` 演练账号及本批关联记录。
+
+本次保留的结果位于 `artifacts/routine-flow-test/manifest.json` 和 `report.html`，网站入口 `/routine-test-report`。真实登录页面核查脚本为 `tests/routine-business.browser.cjs`，要求显式设置 `WMT_ROUTINE_TEST_URL`、`WMT_ROUTINE_MANIFEST`、`WMT_PLAYWRIGHT_MODULE`；该脚本只读取演练业务数据、打开后取消编辑，并退出自己创建的登录会话。
+
 ## VPS/公网主机
 
 将项目放到 `/opt/work-management-tree`，创建 `worktree` 用户，把 `worktree.service` 安装到 `/etc/systemd/system/`，再执行：

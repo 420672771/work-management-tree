@@ -155,8 +155,8 @@ def validate_task_fields(c, payload, *, require_all=False):
     if org_node_id not in (None,'') and not c.execute('SELECT 1 FROM org_node WHERE id=? AND inactive_at IS NULL',(org_node_id,)).fetchone():
         raise ValueError('挂载责任域不存在或已停用')
     return {'title':title,'description':description,'deliverable':deliverable,'priority':priority,'task_type':task_type,'due_at':due,'owner_id':owner_id,'org_node_id':org_node_id}
-def generate_routines(c, instance_date=None, current_time=None):
-    created=routines.generate(c,instance_date,current_time,approver_for)
+def generate_routines(c, instance_date=None, current_time=None, template_ids=None):
+    created=routines.generate(c,instance_date,current_time,approver_for,template_ids)
     for tid in created:
         task=c.execute('SELECT parent_template_id,routine_week_start FROM task WHERE id=?',(tid,)).fetchone()
         audit(c,'task',tid,'routine_generated','system',after={'template_id':task['parent_template_id'],'instance_date':task['routine_week_start']})
@@ -213,7 +213,7 @@ def run_daily_jobs(c, report_date=None, kind='all'):
             if not record: continue
             c.execute("UPDATE approval_record SET status='approved',result_reason=?,operated_at=? WHERE id=?",('超时自动生效',now(),approval['id']))
             c.execute("UPDATE progress_record SET status='auto_approved',effective_percent=?,confirmed_at=? WHERE id=?",(record['reported_percent'],now(),record['id']))
-            c.execute("UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,confirm_source='timeout_auto',updated_at=? WHERE id=?",(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],'completed' if record['reported_percent']==100 else 'in_progress',now(),approval['task_id']))
+            c.execute("UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,confirm_source='timeout_auto',updated_at=? WHERE id=?",(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],progress_work_status(c,approval['task_id'],record['reported_percent']),now(),approval['task_id']))
             audit(c,'approval',approval['id'],'timeout_auto','system',after={'hours':hours}); auto+=1
         approvals=c.execute("SELECT a.*,t.title FROM approval_record a LEFT JOIN task t ON t.id=a.task_id WHERE a.status='pending'").fetchall()
         out['approval_reminders']=len(approvals); out['auto_confirmed_progress']=auto
@@ -583,9 +583,10 @@ def task_performance(c,task,config=None):
     timeliness=1.0 if on_time else (.9 if days_late<=3 else (.75 if days_late<=7 else (.5 if completed else 0)))
     progress_count=c.execute('SELECT count(*) FROM progress_record WHERE task_id=?',(task['id'],)).fetchone()[0]
     risk_count=c.execute("SELECT count(*) FROM progress_record WHERE task_id=? AND is_blocked=1",(task['id'],)).fetchone()[0]
-    return {'task_id':task['id'],'base_points':base,'estimated_hours':hours,'actual_hours':float(task.get('actual_hours') or 0),'complexity_factor':complexity,'priority_factor':priority,'type_factor':task_type,'completed':completed,'on_time':on_time,'quality_factor':quality,'timeliness_factor':timeliness,'earned_points':round(base*quality*timeliness,2) if completed else 0,'days_late':days_late,'progress_count':progress_count,'risk_count':risk_count}
+    process_recorded=bool(task.get('routine_hours_updated_at') or task.get('actual_hours')) if task.get('task_type')=='ROUTINE' else bool(progress_count)
+    return {'task_id':task['id'],'base_points':base,'estimated_hours':hours,'actual_hours':float(task.get('actual_hours') or 0),'complexity_factor':complexity,'priority_factor':priority,'type_factor':task_type,'completed':completed,'on_time':on_time,'quality_factor':quality,'timeliness_factor':timeliness,'earned_points':round(base*quality*timeliness,2) if completed else 0,'days_late':days_late,'progress_count':progress_count,'risk_count':risk_count,'process_recorded':process_recorded}
 
-def performance_summary(c,user_id,period=None,start=None,end=None):
+def performance_summary(c,user_id,period=None,start=None,end=None,include_management=True):
     start,end=performance_period(period,start,end); config=performance_config(c)
     user=c.execute('SELECT * FROM user WHERE id=?',(user_id,)).fetchone()
     if not user: raise ValueError('user not found')
@@ -595,16 +596,16 @@ def performance_summary(c,user_id,period=None,start=None,end=None):
     delivery=round(100*earned/base,1) if base else 0
     timeliness=round(100*sum(x['base_points'] for x in completed if x['on_time'])/sum(x['base_points'] for x in completed),1) if completed else 0
     quality=round(100*sum(x['base_points']*x['quality_factor'] for x in completed)/sum(x['base_points'] for x in completed),1) if completed else 0
-    process=round(100*sum(1 for x in scored if x['progress_count'])/len(scored),1) if scored else 0
+    process=round(100*sum(1 for x in scored if x['process_recorded'])/len(scored),1) if scored else 0
     role=performance_role(c,user); weights=config['role_weights'][role]
     management=0
-    if role in ('leader','pm','manager'):
+    if include_management and role in ('leader','pm','manager'):
         managed=managed_user_ids(c,user_id) if role=='leader' else [x['id'] for x in c.execute("SELECT id FROM user WHERE role<>'manager'")]
-        child=[performance_summary(c,uid,start=start,end=end) for uid in managed if uid!=user_id]
+        child=[performance_summary(c,uid,start=start,end=end,include_management=False) for uid in managed if uid!=user_id]
         management=round(sum(x['delivery'] for x in child)/len(child),1) if child else 0
     total=round(delivery*weights['delivery']/100+quality*weights['quality']/100+timeliness*weights['timeliness']/100+process*weights['process']/100+management*weights['management']/100,1)
     adjustments=sum(x[0] for x in c.execute('SELECT score_delta FROM performance_adjustment WHERE user_id=? AND period_start=? AND period_end=?',(user_id,start,end)))
-    return {'period_start':start,'period_end':end,'user':rowdict(user),'position':position_name_for(c,user_id),'performance_role':role,'weights':weights,'task_count':len(scored),'completed_count':len(completed),'base_points':round(base,2),'earned_points':round(earned,2),'estimated_hours':round(sum(x['estimated_hours'] for x in scored),1),'actual_hours':round(sum(x['actual_hours'] for x in scored),1),'delivery':delivery,'timeliness':timeliness,'quality':quality,'process':process,'management':management,'raw_score':total,'adjustment':round(adjustments,1),'score':round(total+adjustments,1),'evidence':[{**task_performance(c,t,config),**{'title':t['title'],'task_type':t.get('task_type'),'priority':t['priority'],'complexity':t.get('complexity'),'due_at':t['due_at'],'work_status':t['work_status'],'deliverable':t['deliverable']}} for t in tasks]}
+    return {'period_start':start,'period_end':end,'user':rowdict(user),'position':position_name_for(c,user_id),'performance_role':role,'weights':weights,'task_count':len(scored),'completed_count':len(completed),'base_points':round(base,2),'earned_points':round(earned,2),'estimated_hours':round(sum(x['estimated_hours'] for x in scored),1),'actual_hours':round(sum(x['actual_hours'] for x in scored),1),'delivery':delivery,'timeliness':timeliness,'quality':quality,'process':process,'management':management,'raw_score':total,'adjustment':round(adjustments,1),'score':round(total+adjustments,1),'evidence':[{**task_performance(c,t,config),**{'title':t['title'],'task_type':t.get('task_type'),'priority':t['priority'],'complexity':t.get('complexity'),'due_at':t['due_at'],'work_status':t['work_status'],'deliverable':t['deliverable'],'routine_week_start':t.get('routine_week_start'),'routine_week_end':t.get('routine_week_end'),'actual_hours_reported':bool(t.get('routine_hours_updated_at') or t.get('actual_hours'))}} for t in tasks]}
 
 def parse_due(text):
     # Meeting minutes commonly write dates as “2026 年 10 月 30 日前”.
@@ -1196,7 +1197,7 @@ def execute_bot_action(c, action, user_id):
         c.execute('UPDATE approval_record SET status=?,operated_by=?,operated_at=? WHERE id=?',(action['result'],user_id,t,approval['id']))
         if approval['biz_type']=='task_confirm': c.execute("UPDATE task SET approval_status=?,work_status=?,confirmed_by=?,confirmed_at=?,confirm_source='feishu',updated_at=? WHERE id=?",('approved' if action['result']=='approved' else 'rejected','assigned' if action['result']=='approved' else 'draft',user_id,t,t,approval['task_id']))
         elif approval['biz_type']=='progress_confirm' and action['result']=='approved':
-            record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone(); c.execute('UPDATE progress_record SET status=?,effective_percent=?,confirmed_by=?,confirmed_at=? WHERE id=?',('approved',record['reported_percent'],user_id,t,record['id'])); c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],'completed' if record['reported_percent']==100 else 'in_progress',t,approval['task_id']))
+            record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone(); c.execute('UPDATE progress_record SET status=?,effective_percent=?,confirmed_by=?,confirmed_at=? WHERE id=?',('approved',record['reported_percent'],user_id,t,record['id'])); c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],progress_work_status(c,approval['task_id'],record['reported_percent']),t,approval['task_id']))
         audit(c,'approval',approval['id'],action['result'],str(user_id),after=action); return '确认已通过。' if action['result']=='approved' else '已驳回。'
     if typ=='set_delegate':
         c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(action['user_id'],action['delegate_user_id'],'approval',action['start_at'],action['end_at'])); audit(c,'delegate',action['user_id'],'create',str(user_id),after=action); return '确认代理已设置。'
@@ -1323,6 +1324,11 @@ def extract_uploaded_text(data, filename, mime_type=''):
     text=strip_decorative_emoji(text)
     if not text: raise ValueError('未从文件中识别到可用于建单的文字')
     return text
+
+def progress_work_status(c, task_id, percent):
+    if percent!=100:return 'in_progress'
+    task=c.execute('SELECT routine_week_start FROM task WHERE id=?',(task_id,)).fetchone()
+    return 'awaiting_acceptance' if task and task['routine_week_start'] else 'completed'
 
 def submit_progress(c, task_id, reporter_id, percent, comment, blocked=False, block_reason='', expected_finish=None, source='web'):
     task=c.execute('SELECT * FROM task WHERE id=?',(task_id,)).fetchone()
@@ -1978,6 +1984,10 @@ class Handler(BaseHTTPRequestHandler):
         if p.path=='/auth/feishu/bind':return self.start_feishu_login(bind=True)
         if p.path=='/static/monthly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'monthly-reports.js').read_bytes(),'no-cache')
+        if p.path=='/routine-test-report':
+            report=ROOT/'artifacts'/'routine-flow-test'/'report.html'
+            if not report.exists():return self.json(404,{'error':'演练报告尚未生成'})
+            return self.send_bytes(200,'text/html; charset=utf-8',report.read_bytes(),'no-cache')
         if p.path=='/static/routine-tasks.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'routine-tasks.js').read_bytes(),'no-cache')
         if p.path=='/static/weekly-reports.js':
@@ -2012,7 +2022,7 @@ class Handler(BaseHTTPRequestHandler):
             data=(ROOT/'static'/'manual-assets'/manual_assets[p.path]).read_bytes(); self.send_response(200); self.send_header('Content-Type','image/svg+xml'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/' or p.path=='/index.html':
             if not login_required() and not self.require_auth(): return
-            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-weekly1"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261104-layout1"></script><script defer src="/static/layout-guard.js?v=20261104-layout3"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
+            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-flow2"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261104-layout1"></script><script defer src="/static/layout-guard.js?v=20261104-layout3"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
         if p.path=='/manual' or p.path=='/manual.html':
             if not self.require_auth(): return
             data=(ROOT/'static'/'manual.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
@@ -2292,19 +2302,21 @@ class Handler(BaseHTTPRequestHandler):
                 if b['start_at']>=b['end_at']: return self.json(400,{'error':'delegate period is invalid'})
                 oid=c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(b['user_id'],b['delegate_user_id'],b.get('scope','approval'),b['start_at'],b['end_at'])).lastrowid; audit(c,'delegate',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/routine/templates' or re.fullmatch(r'/api/routine/templates/\d+',p.path):
+                template_actor=self.management_user(c,b)
                 fields=routines.template_fields(c,b)
                 if p.path=='/api/routine/templates':
                     fields['created_at']=t
                     oid=c.execute('INSERT INTO task_template('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',tuple(fields.values())).lastrowid
-                    audit(c,'task_template',oid,'create','local',after=fields)
+                    audit(c,'task_template',oid,'create',str(template_actor),after=fields)
                 else:
                     oid=int(p.path.rsplit('/',1)[1]); old=c.execute('SELECT * FROM task_template WHERE id=?',(oid,)).fetchone()
                     if not old:return self.json(404,{'error':'模板不存在'})
                     c.execute('UPDATE task_template SET '+','.join(key+'=?' for key in fields)+' WHERE id=?',(*fields.values(),oid))
-                    audit(c,'task_template',oid,'update','local',before=rowdict(old),after=fields)
+                    audit(c,'task_template',oid,'update',str(template_actor),before=rowdict(old),after=fields)
                 c.commit(); out={'id':oid,'status':'ok'}
             elif p.path=='/api/routine/generate':
-                generated=generate_routines(c,b.get('instance_date')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
+                self.management_user(c,b)
+                generated=generate_routines(c,b.get('instance_date'),template_ids=b.get('template_ids')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/ops/daily-run':
                 out=run_daily_jobs(c,b.get('report_date'),b.get('kind','all')); c.commit()
             elif p.path=='/api/task/drafts/parse':
@@ -2422,7 +2434,7 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute('UPDATE approval_record SET status=?,result_reason=?,operated_by=?,operated_at=? WHERE id=?',(result,b.get('reason',''),operator,t,aid))
                 if approval['biz_type']=='task_confirm': c.execute("UPDATE task SET approval_status=?,work_status=?,confirmed_by=?,confirmed_at=?,confirm_source='manual',updated_at=? WHERE id=?",('approved' if result=='approved' else 'rejected','assigned' if result=='approved' else 'draft',operator,t,t,approval['task_id']))
                 elif approval['biz_type']=='progress_confirm' and result=='approved':
-                    record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone(); c.execute("UPDATE progress_record SET status='approved',effective_percent=?,confirmed_by=?,confirmed_at=? WHERE id=?",(record['reported_percent'],operator,t,record['id'])); c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],'completed' if record['reported_percent']==100 else 'in_progress',t,approval['task_id']))
+                    record=c.execute('SELECT * FROM progress_record WHERE id=?',(approval['biz_id'],)).fetchone(); c.execute("UPDATE progress_record SET status='approved',effective_percent=?,confirmed_by=?,confirmed_at=? WHERE id=?",(record['reported_percent'],operator,t,record['id'])); c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',(record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],progress_work_status(c,approval['task_id'],record['reported_percent']),t,approval['task_id']))
                 audit(c,'approval',aid,result,str(operator or 'local'),after=b); c.commit(); out={'id':aid,'status':result}
             elif p.path.startswith('/api/tasks/') and p.path.endswith('/progress'):
                 tid=int(p.path.split('/')[3]); task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
@@ -2467,7 +2479,7 @@ class Handler(BaseHTTPRequestHandler):
                     acceptor_id=self.actor_id(b.get('acceptor_id'))
                     approver_id=old['approver_id'] or approver_for(c,old['owner_id'])
                     if not acceptor_id or int(acceptor_id)!=int(approver_id): return self.json(403,{'error':'only the task owner\'s approver may accept'})
-                    c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,b.get('acceptor_id'),result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
+                    c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,acceptor_id,result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
                 else:
                     allowed={'title','description','deliverable','org_node_id','task_type','work_status','risk_status','due_at','priority','owner_id','estimated_hours','actual_hours','complexity','business_impact','urgent_source','urgent_level','plan_impact'}; changes={k:v for k,v in b.items() if k in allowed};
                     if not changes: return self.json(400,{'error':'no editable fields'})
@@ -2484,7 +2496,10 @@ class Handler(BaseHTTPRequestHandler):
                     for key in ('title','description','deliverable','priority','task_type','due_at','owner_id','org_node_id'):
                         if key in changes: changes[key]=validated[key]
                     if old['task_type']=='ROUTINE':
-                        if 'estimated_hours' in changes:changes['estimated_hours']=routines.hours(changes['estimated_hours'])
+                        if 'estimated_hours' in changes:
+                            changes['estimated_hours']=routines.hours(changes['estimated_hours'])
+                            if old['routine_week_start'] and changes['estimated_hours']!=old['estimated_hours']:
+                                return self.json(400,{'error':'标准工时为生成时的模板快照；请修改模板以调整后续任务'})
                         if 'actual_hours' in changes:
                             changes['actual_hours']=routines.hours(changes['actual_hours'],actual=True)
                             changes['routine_hours_updated_at']=t

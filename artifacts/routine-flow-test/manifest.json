@@ -1,0 +1,2478 @@
+{
+  "database": "/home/admin/work-management-tree/data/worktree.db",
+  "prefix": "[例行演练]",
+  "users": {
+    "manager": 33,
+    "pm": 34,
+    "ops": 35,
+    "req": 36,
+    "dev": 37,
+    "it": 38
+  },
+  "accounts": {
+    "manager": "routine.manager",
+    "pm": "routine.pm",
+    "ops": "routine.ops",
+    "req": "routine.req",
+    "dev": "routine.dev",
+    "it": "routine.it"
+  },
+  "templates": {
+    "ops": 4,
+    "req": 5,
+    "dev": 6,
+    "it": 7
+  },
+  "tasks": {
+    "2026-10-26": {
+      "ops": 85,
+      "req": 86,
+      "dev": 87,
+      "it": 88
+    },
+    "2026-11-02": {
+      "ops": 89,
+      "req": 90,
+      "dev": 91,
+      "it": 92
+    },
+    "2026-11-09": {
+      "ops": 93,
+      "req": 94,
+      "dev": 95,
+      "it": 96
+    },
+    "2026-11-30": {
+      "ops": 97,
+      "req": 98,
+      "dev": 99,
+      "it": 100
+    },
+    "2026-12-28": {
+      "ops": 101,
+      "req": 102,
+      "dev": 103,
+      "it": 104
+    }
+  },
+  "checks": [
+    {
+      "name": "manager /api/auth/login → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/me → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "真实账号登录身份正确：manager",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "pm /api/auth/login → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "pm /api/me → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "真实账号登录身份正确：pm",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "ops /api/auth/login → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/me → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "真实账号登录身份正确：ops",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "req /api/auth/login → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/me → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "真实账号登录身份正确：req",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "dev /api/auth/login → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/me → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "真实账号登录身份正确：dev",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "it /api/auth/login → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/me → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "真实账号登录身份正确：it",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/templates → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "pm /api/routine/templates → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "pm /api/routine/templates → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/routine/templates → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "manager /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 每周标准工时须为 0.5—168 小时的有效数字"
+    },
+    {
+      "name": "pm /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 模板名称须为 1—200 个字符"
+    },
+    {
+      "name": "pm /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 请填写交付物，最多 5000 个字符"
+    },
+    {
+      "name": "pm /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 请选择有效责任人"
+    },
+    {
+      "name": "pm /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 请选择有效责任域"
+    },
+    {
+      "name": "pm /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 例行任务统一按周生成"
+    },
+    {
+      "name": "pm /api/routine/templates → 400",
+      "passed": true,
+      "detail": "HTTP 400: 优先级仅支持 P0、P1、P2"
+    },
+    {
+      "name": "ops /api/routine/templates → 403",
+      "passed": true,
+      "detail": "HTTP 403: 仅部门负责人和管理 PM 可配置账号或重置密码"
+    },
+    {
+      "name": "ops /api/routine/templates/4 → 403",
+      "passed": true,
+      "detail": "HTTP 403: 仅部门负责人和管理 PM 可配置账号或重置密码"
+    },
+    {
+      "name": "ops /api/routine/generate → 403",
+      "passed": true,
+      "detail": "HTTP 403: 仅部门负责人和管理 PM 可配置账号或重置密码"
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "每周每模板各一条：2026-10-26",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "同周再次生成不重复",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "同周其他日期不重复",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "每周每模板各一条：2026-11-02",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "同周再次生成不重复",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "同周其他日期不重复",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成即生效且待开始：ops",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成无任务确认审批：ops",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "模板工时准确带入：ops",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成即生效且待开始：req",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成无任务确认审批：req",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "模板工时准确带入：req",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成即生效且待开始：dev",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成无任务确认审批：dev",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "模板工时准确带入：dev",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成即生效且待开始：it",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "生成无任务确认审批：it",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "模板工时准确带入：it",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "pm /api/routine/templates/4 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "pm /api/routine/templates/6 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "旧周标准工时不被模板更新覆盖",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "换责任人只影响后续任务",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "pm /api/routine/templates/6 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "跨月/跨年一周仍只生成一条：2026-11-30",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "跨月/跨年一周仍只生成一条：2026-12-28",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "req /api/tasks/89/hours → 403",
+      "passed": true,
+      "detail": "HTTP 403: 仅任务责任人、部门负责人或管理 PM 可填写工时"
+    },
+    {
+      "name": "req /api/tasks/89/hours → 403",
+      "passed": true,
+      "detail": "HTTP 403: 仅任务责任人、部门负责人或管理 PM 可填写工时"
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 400",
+      "passed": true,
+      "detail": "HTTP 400: 实际工时须为 0—168 小时的有效数字"
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 400",
+      "passed": true,
+      "detail": "HTTP 400: 实际工时须为 0—168 小时的有效数字"
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 400",
+      "passed": true,
+      "detail": "HTTP 400: 实际工时须为 0—168 小时的有效数字"
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 400",
+      "passed": true,
+      "detail": "HTTP 400: 实际工时须为 0—168 小时的有效数字"
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 400",
+      "passed": true,
+      "detail": "HTTP 400: 实际工时须为 0—168 小时的有效数字"
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "累计工时替换而非累加",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "累计工时替换而非累加",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "累计工时替换而非累加",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "pm /api/tasks/89/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/89 → 400",
+      "passed": true,
+      "detail": "HTTP 400: 标准工时为生成时的模板快照；请修改模板以调整后续任务"
+    },
+    {
+      "name": "req /api/tasks/89 → 403",
+      "passed": true,
+      "detail": "HTTP 403: only the task owner may update task status"
+    },
+    {
+      "name": "ops /api/tasks/89 → 400",
+      "passed": true,
+      "detail": "HTTP 400: invalid task status transition"
+    },
+    {
+      "name": "ops /api/tasks/89/accept → 400",
+      "passed": true,
+      "detail": "HTTP 400: task is not awaiting acceptance"
+    },
+    {
+      "name": "ops /api/tasks/89 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/89/feedback → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/89 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/tasks/89/accept → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "验收后完成且实际工时保存",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "req /api/tasks/90 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/tasks/90/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/tasks/90/feedback → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/tasks/90 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/tasks/90/accept → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "验收后完成且实际工时保存",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "dev /api/tasks/91 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/tasks/91/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/tasks/91/feedback → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/tasks/91 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "pm /api/tasks/91/accept → 403",
+      "passed": true,
+      "detail": "HTTP 403: only the task owner's approver may accept"
+    },
+    {
+      "name": "manager /api/tasks/91/accept → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/92/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/85 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/85/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/85/feedback → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/tasks/85 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/tasks/85/accept → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "验收后完成且实际工时保存",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "req /api/tasks/86 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/tasks/86/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/tasks/86/progress → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/approvals/56/confirm → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/tasks/87 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/tasks/87/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/tasks/87/progress → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/approvals/57/confirm → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "例行任务100%进度仍须验收",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "it /api/tasks/88 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/88/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/88/feedback → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/88 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/tasks/88/accept → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "验收驳回回到进行中",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "it /api/tasks/88/feedback → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/88 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/tasks/88/accept → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "验收后完成且实际工时保存",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "req /api/tasks/86 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "历史逾期任务显示逾期",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "缺工时与停用模板不生成",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "pm /api/routine/templates → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/105 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/105/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/105/progress → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/tasks/105/feedback → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/tasks/105 → 403",
+      "passed": true,
+      "detail": "HTTP 403: only the task owner or manager may delete a task"
+    },
+    {
+      "name": "it /api/tasks/105 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "删除后任务及关联记录清理",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "删除审计保留",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/routine/generate → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "已删除实例同周不悄悄重建",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "ops /api/performance/personal?start=2026-11-02&end=2026-11-08&user_id=35 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/performance/personal?period=2026-11&user_id=35 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/performance/personal?start=2026-11-02&end=2026-11-08&user_id=36 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "req /api/performance/personal?period=2026-11&user_id=36 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/performance/personal?start=2026-11-02&end=2026-11-08&user_id=37 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "dev /api/performance/personal?period=2026-11&user_id=37 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/performance/personal?start=2026-11-02&end=2026-11-08&user_id=38 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "it /api/performance/personal?period=2026-11&user_id=38 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "已填周工时无需日报也覆盖过程记录",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "正常交付周绩效为100分",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "待验收和驳回不计有效交付",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "标准/实际工时汇总准确：ops",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "标准/实际工时汇总准确：req",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "标准/实际工时汇总准确：dev",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "标准/实际工时汇总准确：it",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/performance/personal?start=2026-10-26&end=2026-11-01&user_id=35 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "逾期与返工影响交付点而非虚增工时",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/performance/personal?start=2026-11-02&end=2026-11-08 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "增加实际工时不直接提高绩效",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "ops /api/tasks/89/hours → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/performance/personal?user_id=36&actor_id=33 → 403",
+      "passed": true,
+      "detail": "HTTP 403: 无权查看该成员绩效"
+    },
+    {
+      "name": "manager /api/performance/team?period=2026-11 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "管理人员可查看演练员工绩效：manager",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "manager /api/performance/department?period=2026-11 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "pm /api/performance/team?period=2026-11 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "管理人员可查看演练员工绩效：pm",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "pm /api/performance/department?period=2026-11 → 200",
+      "passed": true,
+      "detail": "HTTP 200"
+    },
+    {
+      "name": "ops /api/performance/department?period=2026-11 → 403",
+      "passed": true,
+      "detail": "HTTP 403: 仅管理PM和部门负责人可查看部门绩效"
+    },
+    {
+      "name": "跨月任务按截止日期归入12月",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "既有数据保持不变：user",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "既有数据保持不变：user_account",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "既有数据保持不变：task",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "既有数据保持不变：task_template",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "演练账号均无飞书绑定",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "浏览器登录身份：ops",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "任务详情显示生成周期和周工时",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "周工时入口回显累计值",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "生成任务标准工时只读",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "个人绩效页面得分与接口一致",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "绩效明细区分周周期与实际工时",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "浏览器登录身份：manager",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "负责人可查看四类业务模板",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "模板每周标准工时可编辑",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "模板回显更新后的标准工时",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "负责人绩效页面可正常打开",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "手机页面无横向溢出",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    },
+    {
+      "name": "页面无脚本错误",
+      "passed": true,
+      "detail": "真实浏览器与账号登录验证"
+    }
+  ],
+  "performance": {
+    "ops": {
+      "week": {
+        "period_start": "2026-11-02",
+        "period_end": "2026-11-08",
+        "user": {
+          "id": 35,
+          "name": "演练·系统运维",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]系统运维",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 1,
+        "completed_count": 1,
+        "base_points": 29.7,
+        "earned_points": 29.7,
+        "estimated_hours": 16.5,
+        "actual_hours": 18.5,
+        "delivery": 100,
+        "timeliness": 100,
+        "quality": 100,
+        "process": 100,
+        "management": 0,
+        "raw_score": 100,
+        "adjustment": 0,
+        "score": 100,
+        "evidence": [
+          {
+            "task_id": 89,
+            "base_points": 29.7,
+            "estimated_hours": 16.5,
+            "actual_hours": 18.5,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": true,
+            "on_time": true,
+            "quality_factor": 1,
+            "timeliness_factor": 1,
+            "earned_points": 29.7,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统日常运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "completed",
+            "deliverable": "巡检、备份核验、接口异常处置与周结记录"
+          }
+        ]
+      },
+      "month": {
+        "period_start": "2026-11-01",
+        "period_end": "2026-11-30",
+        "user": {
+          "id": 35,
+          "name": "演练·系统运维",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]系统运维",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 3,
+        "completed_count": 2,
+        "base_points": 95.4,
+        "earned_points": 51.97,
+        "estimated_hours": 53,
+        "actual_hours": 38.5,
+        "delivery": 54.5,
+        "timeliness": 50,
+        "quality": 100,
+        "process": 66.7,
+        "management": 0,
+        "raw_score": 66.8,
+        "adjustment": 0,
+        "score": 66.8,
+        "evidence": [
+          {
+            "task_id": 85,
+            "base_points": 29.7,
+            "estimated_hours": 16.5,
+            "actual_hours": 20,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": true,
+            "on_time": false,
+            "quality_factor": 1,
+            "timeliness_factor": 0.75,
+            "earned_points": 22.27,
+            "days_late": 5,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统日常运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-01T23:59:59+08:00",
+            "work_status": "completed",
+            "deliverable": "巡检、备份核验、接口异常处置与周结记录"
+          },
+          {
+            "task_id": 89,
+            "base_points": 29.7,
+            "estimated_hours": 16.5,
+            "actual_hours": 18.5,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": true,
+            "on_time": true,
+            "quality_factor": 1,
+            "timeliness_factor": 1,
+            "earned_points": 29.7,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统日常运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "completed",
+            "deliverable": "巡检、备份核验、接口异常处置与周结记录"
+          },
+          {
+            "task_id": 93,
+            "base_points": 36,
+            "estimated_hours": 20,
+            "actual_hours": 0,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": false,
+            "title": "[例行演练]核心系统日常运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-15T23:59:59+08:00",
+            "work_status": "assigned",
+            "deliverable": "巡检、备份核验、接口异常处置与周结记录"
+          }
+        ]
+      }
+    },
+    "req": {
+      "week": {
+        "period_start": "2026-11-02",
+        "period_end": "2026-11-08",
+        "user": {
+          "id": 36,
+          "name": "演练·需求管理",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]需求管理",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 1,
+        "completed_count": 1,
+        "base_points": 21.6,
+        "earned_points": 21.6,
+        "estimated_hours": 12,
+        "actual_hours": 10,
+        "delivery": 100,
+        "timeliness": 100,
+        "quality": 100,
+        "process": 100,
+        "management": 0,
+        "raw_score": 100,
+        "adjustment": 0,
+        "score": 100,
+        "evidence": [
+          {
+            "task_id": 90,
+            "base_points": 21.6,
+            "estimated_hours": 12,
+            "actual_hours": 10,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": true,
+            "on_time": true,
+            "quality_factor": 1,
+            "timeliness_factor": 1,
+            "earned_points": 21.6,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统需求管理",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "completed",
+            "deliverable": "本周需求澄清、优先级清单与排期结论"
+          }
+        ]
+      },
+      "month": {
+        "period_start": "2026-11-01",
+        "period_end": "2026-11-30",
+        "user": {
+          "id": 36,
+          "name": "演练·需求管理",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]需求管理",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 4,
+        "completed_count": 1,
+        "base_points": 108,
+        "earned_points": 21.6,
+        "estimated_hours": 60,
+        "actual_hours": 18,
+        "delivery": 20,
+        "timeliness": 100,
+        "quality": 100,
+        "process": 50,
+        "management": 0,
+        "raw_score": 60.5,
+        "adjustment": 0,
+        "score": 60.5,
+        "evidence": [
+          {
+            "task_id": 86,
+            "base_points": 21.6,
+            "estimated_hours": 12,
+            "actual_hours": 8,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 1,
+            "risk_count": 1,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统需求管理",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-01T23:59:59+08:00",
+            "work_status": "in_progress",
+            "deliverable": "本周需求澄清、优先级清单与排期结论"
+          },
+          {
+            "task_id": 90,
+            "base_points": 21.6,
+            "estimated_hours": 12,
+            "actual_hours": 10,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": true,
+            "on_time": true,
+            "quality_factor": 1,
+            "timeliness_factor": 1,
+            "earned_points": 21.6,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统需求管理",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "completed",
+            "deliverable": "本周需求澄清、优先级清单与排期结论"
+          },
+          {
+            "task_id": 94,
+            "base_points": 21.6,
+            "estimated_hours": 12,
+            "actual_hours": 0,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": false,
+            "title": "[例行演练]核心系统需求管理",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-15T23:59:59+08:00",
+            "work_status": "assigned",
+            "deliverable": "本周需求澄清、优先级清单与排期结论"
+          },
+          {
+            "task_id": 95,
+            "base_points": 43.2,
+            "estimated_hours": 24,
+            "actual_hours": 0,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": false,
+            "title": "[例行演练]核心系统日常需求开发",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-15T23:59:59+08:00",
+            "work_status": "assigned",
+            "deliverable": "本周约定需求交付、回归验证与验收记录"
+          }
+        ]
+      }
+    },
+    "dev": {
+      "week": {
+        "period_start": "2026-11-02",
+        "period_end": "2026-11-08",
+        "user": {
+          "id": 37,
+          "name": "演练·需求开发",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]需求开发",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 1,
+        "completed_count": 0,
+        "base_points": 36,
+        "earned_points": 0,
+        "estimated_hours": 20,
+        "actual_hours": 22,
+        "delivery": 0,
+        "timeliness": 0,
+        "quality": 0,
+        "process": 100,
+        "management": 0,
+        "raw_score": 15,
+        "adjustment": 0,
+        "score": 15,
+        "evidence": [
+          {
+            "task_id": 91,
+            "base_points": 36,
+            "estimated_hours": 20,
+            "actual_hours": 22,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统日常需求开发",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "in_progress",
+            "deliverable": "本周约定需求交付、回归验证与验收记录"
+          }
+        ]
+      },
+      "month": {
+        "period_start": "2026-11-01",
+        "period_end": "2026-11-30",
+        "user": {
+          "id": 37,
+          "name": "演练·需求开发",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]需求开发",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 2,
+        "completed_count": 0,
+        "base_points": 72,
+        "earned_points": 0,
+        "estimated_hours": 40,
+        "actual_hours": 40,
+        "delivery": 0,
+        "timeliness": 0,
+        "quality": 0,
+        "process": 100,
+        "management": 0,
+        "raw_score": 15,
+        "adjustment": 0,
+        "score": 15,
+        "evidence": [
+          {
+            "task_id": 87,
+            "base_points": 36,
+            "estimated_hours": 20,
+            "actual_hours": 18,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 1,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统日常需求开发",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-01T23:59:59+08:00",
+            "work_status": "awaiting_acceptance",
+            "deliverable": "本周约定需求交付、回归验证与验收记录"
+          },
+          {
+            "task_id": 91,
+            "base_points": 36,
+            "estimated_hours": 20,
+            "actual_hours": 22,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]核心系统日常需求开发",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "in_progress",
+            "deliverable": "本周约定需求交付、回归验证与验收记录"
+          }
+        ]
+      }
+    },
+    "it": {
+      "week": {
+        "period_start": "2026-11-02",
+        "period_end": "2026-11-08",
+        "user": {
+          "id": 38,
+          "name": "演练·网络桌面",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]网络桌面",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 1,
+        "completed_count": 0,
+        "base_points": 14.4,
+        "earned_points": 0,
+        "estimated_hours": 8,
+        "actual_hours": 0,
+        "delivery": 0,
+        "timeliness": 0,
+        "quality": 0,
+        "process": 100,
+        "management": 0,
+        "raw_score": 15,
+        "adjustment": 0,
+        "score": 15,
+        "evidence": [
+          {
+            "task_id": 92,
+            "base_points": 14.4,
+            "estimated_hours": 8,
+            "actual_hours": 0,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]网络与桌面运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "assigned",
+            "deliverable": "网络检查、终端支持与遗留问题记录"
+          }
+        ]
+      },
+      "month": {
+        "period_start": "2026-11-01",
+        "period_end": "2026-11-30",
+        "user": {
+          "id": 38,
+          "name": "演练·网络桌面",
+          "department": "科技产品中心",
+          "role": "member",
+          "wecom_userid": null,
+          "feishu_open_id": null
+        },
+        "position": "[例行演练]网络桌面",
+        "performance_role": "member",
+        "weights": {
+          "delivery": 40,
+          "quality": 25,
+          "timeliness": 20,
+          "process": 15,
+          "management": 0
+        },
+        "task_count": 3,
+        "completed_count": 1,
+        "base_points": 43.2,
+        "earned_points": 8.64,
+        "estimated_hours": 24,
+        "actual_hours": 9,
+        "delivery": 20,
+        "timeliness": 0,
+        "quality": 80,
+        "process": 66.7,
+        "management": 0,
+        "raw_score": 38,
+        "adjustment": 0,
+        "score": 38,
+        "evidence": [
+          {
+            "task_id": 88,
+            "base_points": 14.4,
+            "estimated_hours": 8,
+            "actual_hours": 9,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": true,
+            "on_time": false,
+            "quality_factor": 0.8,
+            "timeliness_factor": 0.75,
+            "earned_points": 8.64,
+            "days_late": 5,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]网络与桌面运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-01T23:59:59+08:00",
+            "work_status": "completed",
+            "deliverable": "网络检查、终端支持与遗留问题记录"
+          },
+          {
+            "task_id": 92,
+            "base_points": 14.4,
+            "estimated_hours": 8,
+            "actual_hours": 0,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": true,
+            "title": "[例行演练]网络与桌面运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-08T23:59:59+08:00",
+            "work_status": "assigned",
+            "deliverable": "网络检查、终端支持与遗留问题记录"
+          },
+          {
+            "task_id": 96,
+            "base_points": 14.4,
+            "estimated_hours": 8,
+            "actual_hours": 0,
+            "complexity_factor": 1.5,
+            "priority_factor": 1.2,
+            "type_factor": 1,
+            "completed": false,
+            "on_time": false,
+            "quality_factor": 0,
+            "timeliness_factor": 0.9,
+            "earned_points": 0,
+            "days_late": 0,
+            "progress_count": 0,
+            "risk_count": 0,
+            "process_recorded": false,
+            "title": "[例行演练]网络与桌面运维",
+            "task_type": "ROUTINE",
+            "priority": "P1",
+            "complexity": "general",
+            "due_at": "2026-11-15T23:59:59+08:00",
+            "work_status": "assigned",
+            "deliverable": "网络检查、终端支持与遗留问题记录"
+          }
+        ]
+      }
+    }
+  },
+  "auxiliary_templates": [
+    8,
+    9,
+    10
+  ],
+  "deleted_task_id": 105,
+  "task_snapshots": {
+    "85": {
+      "id": 85,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常运维",
+      "description": "",
+      "owner_id": 35,
+      "due_at": "2026-11-01T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "completed",
+      "risk_status": "normal",
+      "deliverable": "巡检、备份核验、接口异常处置与周结记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.892460+08:00",
+      "updated_at": "2026-11-06T08:14:02.106459+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.892460+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 4,
+      "estimated_hours": 16.5,
+      "actual_hours": 20,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-10-26",
+      "routine_week_end": "2026-11-01",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.092569+00:00"
+    },
+    "86": {
+      "id": 86,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统需求管理",
+      "description": "",
+      "owner_id": 36,
+      "due_at": "2026-11-01T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "in_progress",
+      "risk_status": "blocked",
+      "deliverable": "本周需求澄清、优先级清单与排期结论",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.892460+08:00",
+      "updated_at": "2026-11-06T08:14:02.125426+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 60,
+      "effective_percent": 60,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.892460+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 5,
+      "estimated_hours": 12,
+      "actual_hours": 8,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-10-26",
+      "routine_week_end": "2026-11-01",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.115922+00:00"
+    },
+    "87": {
+      "id": 87,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常需求开发",
+      "description": "",
+      "owner_id": 37,
+      "due_at": "2026-11-01T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "awaiting_acceptance",
+      "risk_status": "normal",
+      "deliverable": "本周约定需求交付、回归验证与验收记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.892460+08:00",
+      "updated_at": "2026-11-06T08:14:02.145706+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 100,
+      "effective_percent": 100,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.892460+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 6,
+      "estimated_hours": 20,
+      "actual_hours": 18,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-10-26",
+      "routine_week_end": "2026-11-01",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.134820+00:00"
+    },
+    "88": {
+      "id": 88,
+      "org_node_id": 10,
+      "title": "[例行演练]网络与桌面运维",
+      "description": "",
+      "owner_id": 38,
+      "due_at": "2026-11-01T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "completed",
+      "risk_status": "normal",
+      "deliverable": "网络检查、终端支持与遗留问题记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.892460+08:00",
+      "updated_at": "2026-11-06T08:14:02.182676+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.892460+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 7,
+      "estimated_hours": 8,
+      "actual_hours": 9,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-10-26",
+      "routine_week_end": "2026-11-01",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.155183+00:00"
+    },
+    "89": {
+      "id": 89,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常运维",
+      "description": "",
+      "owner_id": 35,
+      "due_at": "2026-11-08T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "completed",
+      "risk_status": "normal",
+      "deliverable": "巡检、备份核验、接口异常处置与周结记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.907503+08:00",
+      "updated_at": "2026-11-06T08:14:02.278627+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.907503+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 4,
+      "estimated_hours": 16.5,
+      "actual_hours": 18.5,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-02",
+      "routine_week_end": "2026-11-08",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.278627+00:00"
+    },
+    "90": {
+      "id": 90,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统需求管理",
+      "description": "",
+      "owner_id": 36,
+      "due_at": "2026-11-08T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "completed",
+      "risk_status": "normal",
+      "deliverable": "本周需求澄清、优先级清单与排期结论",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.907503+08:00",
+      "updated_at": "2026-11-06T08:14:02.051718+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.907503+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 5,
+      "estimated_hours": 12,
+      "actual_hours": 10,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-02",
+      "routine_week_end": "2026-11-08",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.037514+00:00"
+    },
+    "91": {
+      "id": 91,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常需求开发",
+      "description": "",
+      "owner_id": 37,
+      "due_at": "2026-11-08T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "in_progress",
+      "risk_status": "normal",
+      "deliverable": "本周约定需求交付、回归验证与验收记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.907503+08:00",
+      "updated_at": "2026-11-06T08:14:02.078645+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.907503+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 6,
+      "estimated_hours": 20,
+      "actual_hours": 22,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-02",
+      "routine_week_end": "2026-11-08",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.061556+00:00"
+    },
+    "92": {
+      "id": 92,
+      "org_node_id": 10,
+      "title": "[例行演练]网络与桌面运维",
+      "description": "",
+      "owner_id": 38,
+      "due_at": "2026-11-08T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "网络检查、终端支持与遗留问题记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.907503+08:00",
+      "updated_at": "2026-11-06T08:14:02.083182+00:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.907503+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 7,
+      "estimated_hours": 8,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-02",
+      "routine_week_end": "2026-11-08",
+      "routine_hours_updated_at": "2026-11-06T08:14:02.083182+00:00"
+    },
+    "93": {
+      "id": 93,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常运维",
+      "description": "",
+      "owner_id": 35,
+      "due_at": "2026-11-15T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "巡检、备份核验、接口异常处置与周结记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.933353+08:00",
+      "updated_at": "2026-11-06T16:14:01.933353+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.933353+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 4,
+      "estimated_hours": 20,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-09",
+      "routine_week_end": "2026-11-15",
+      "routine_hours_updated_at": null
+    },
+    "94": {
+      "id": 94,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统需求管理",
+      "description": "",
+      "owner_id": 36,
+      "due_at": "2026-11-15T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "本周需求澄清、优先级清单与排期结论",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.933353+08:00",
+      "updated_at": "2026-11-06T16:14:01.933353+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.933353+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 5,
+      "estimated_hours": 12,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-09",
+      "routine_week_end": "2026-11-15",
+      "routine_hours_updated_at": null
+    },
+    "95": {
+      "id": 95,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常需求开发",
+      "description": "",
+      "owner_id": 36,
+      "due_at": "2026-11-15T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "本周约定需求交付、回归验证与验收记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.933353+08:00",
+      "updated_at": "2026-11-06T16:14:01.933353+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.933353+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 6,
+      "estimated_hours": 24,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-09",
+      "routine_week_end": "2026-11-15",
+      "routine_hours_updated_at": null
+    },
+    "96": {
+      "id": 96,
+      "org_node_id": 10,
+      "title": "[例行演练]网络与桌面运维",
+      "description": "",
+      "owner_id": 38,
+      "due_at": "2026-11-15T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "网络检查、终端支持与遗留问题记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.933353+08:00",
+      "updated_at": "2026-11-06T16:14:01.933353+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.933353+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 7,
+      "estimated_hours": 8,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-09",
+      "routine_week_end": "2026-11-15",
+      "routine_hours_updated_at": null
+    },
+    "97": {
+      "id": 97,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常运维",
+      "description": "",
+      "owner_id": 35,
+      "due_at": "2026-12-06T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "巡检、备份核验、接口异常处置与周结记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.944666+08:00",
+      "updated_at": "2026-11-06T16:14:01.944666+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.944666+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 4,
+      "estimated_hours": 20,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-30",
+      "routine_week_end": "2026-12-06",
+      "routine_hours_updated_at": null
+    },
+    "98": {
+      "id": 98,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统需求管理",
+      "description": "",
+      "owner_id": 36,
+      "due_at": "2026-12-06T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "本周需求澄清、优先级清单与排期结论",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.944666+08:00",
+      "updated_at": "2026-11-06T16:14:01.944666+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.944666+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 5,
+      "estimated_hours": 12,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-30",
+      "routine_week_end": "2026-12-06",
+      "routine_hours_updated_at": null
+    },
+    "99": {
+      "id": 99,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常需求开发",
+      "description": "",
+      "owner_id": 37,
+      "due_at": "2026-12-06T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "本周约定需求交付、回归验证与验收记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.944666+08:00",
+      "updated_at": "2026-11-06T16:14:01.944666+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.944666+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 6,
+      "estimated_hours": 20,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-30",
+      "routine_week_end": "2026-12-06",
+      "routine_hours_updated_at": null
+    },
+    "100": {
+      "id": 100,
+      "org_node_id": 10,
+      "title": "[例行演练]网络与桌面运维",
+      "description": "",
+      "owner_id": 38,
+      "due_at": "2026-12-06T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "网络检查、终端支持与遗留问题记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.944666+08:00",
+      "updated_at": "2026-11-06T16:14:01.944666+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.944666+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 7,
+      "estimated_hours": 8,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-11-30",
+      "routine_week_end": "2026-12-06",
+      "routine_hours_updated_at": null
+    },
+    "101": {
+      "id": 101,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常运维",
+      "description": "",
+      "owner_id": 35,
+      "due_at": "2027-01-03T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "巡检、备份核验、接口异常处置与周结记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.949670+08:00",
+      "updated_at": "2026-11-06T16:14:01.949670+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.949670+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 4,
+      "estimated_hours": 20,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-12-28",
+      "routine_week_end": "2027-01-03",
+      "routine_hours_updated_at": null
+    },
+    "102": {
+      "id": 102,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统需求管理",
+      "description": "",
+      "owner_id": 36,
+      "due_at": "2027-01-03T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "本周需求澄清、优先级清单与排期结论",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.949670+08:00",
+      "updated_at": "2026-11-06T16:14:01.949670+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.949670+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 5,
+      "estimated_hours": 12,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-12-28",
+      "routine_week_end": "2027-01-03",
+      "routine_hours_updated_at": null
+    },
+    "103": {
+      "id": 103,
+      "org_node_id": 12,
+      "title": "[例行演练]核心系统日常需求开发",
+      "description": "",
+      "owner_id": 37,
+      "due_at": "2027-01-03T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "本周约定需求交付、回归验证与验收记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.949670+08:00",
+      "updated_at": "2026-11-06T16:14:01.949670+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.949670+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 6,
+      "estimated_hours": 20,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-12-28",
+      "routine_week_end": "2027-01-03",
+      "routine_hours_updated_at": null
+    },
+    "104": {
+      "id": 104,
+      "org_node_id": 10,
+      "title": "[例行演练]网络与桌面运维",
+      "description": "",
+      "owner_id": 38,
+      "due_at": "2027-01-03T23:59:59+08:00",
+      "priority": "P1",
+      "work_status": "assigned",
+      "risk_status": "normal",
+      "deliverable": "网络检查、终端支持与遗留问题记录",
+      "source": "routine_generator",
+      "created_at": "2026-11-06T16:14:01.949670+08:00",
+      "updated_at": "2026-11-06T16:14:01.949670+08:00",
+      "task_type": "ROUTINE",
+      "approval_status": "approved",
+      "approver_id": 33,
+      "progress_percent": 0,
+      "effective_percent": 0,
+      "expected_finish": null,
+      "confirmed_by": null,
+      "confirmed_at": "2026-11-06T16:14:01.949670+08:00",
+      "confirm_source": "routine_generator",
+      "parent_template_id": 7,
+      "estimated_hours": 8,
+      "actual_hours": 0,
+      "complexity": "general",
+      "business_impact": "",
+      "urgent_source": "",
+      "urgent_level": "",
+      "plan_impact": "",
+      "routine_week_start": "2026-12-28",
+      "routine_week_end": "2027-01-03",
+      "routine_hours_updated_at": null
+    }
+  },
+  "completed_at": "2026-11-06T08:14:02.345550+00:00",
+  "passed": true,
+  "notes": [
+    "停用/缺工时兼容性场景使用明确标注的数据库夹具；当前页面尚无模板停用和删除按钮。",
+    "已生成任务可以删除；删除实例本周不会自动重建，删除操作和模板保留审计。",
+    "绩效按任务截止日期所在周期统计；跨月周工时不按日拆分。月中分数属于过程预览。",
+    "仅四个主要业务模板保持生效，辅助模板停用；全部演练账号未绑定飞书。"
+  ],
+  "browser_checked_at": "2026-11-06T08:20:18.487Z"
+}

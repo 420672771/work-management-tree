@@ -143,6 +143,42 @@ class RoutineTests(unittest.TestCase):
         app.normalize_legacy_conversation_tasks(self.c)
         self.assertEqual(dict(self.c.execute('SELECT * FROM task WHERE id=?', (tid,)).fetchone()), first)
 
+    def test_employee_cannot_create_edit_or_manually_generate_templates(self):
+        template = self.template()
+        body = {**self.payload(), 'actor_id': self.manager}
+        self.assertEqual(self.api('/api/routine/templates', body, self.owner)[0], 403)
+        self.assertEqual(self.api('/api/routine/templates/' + str(template), body, self.owner)[0], 403)
+        self.assertEqual(self.api('/api/routine/generate', {'actor_id': self.manager}, self.owner)[0], 403)
+
+    def test_scoped_generation_does_not_touch_other_templates(self):
+        first = self.template(); second = self.template()
+        ids = app.generate_routines(self.c, '2026-11-09', template_ids=[second]); self.c.commit()
+        self.assertEqual(len(ids), 1)
+        self.assertEqual(self.c.execute('SELECT parent_template_id FROM task WHERE id=?', (ids[0],)).fetchone()[0], second)
+        self.assertFalse(self.c.execute('SELECT 1 FROM task_instance WHERE template_id=?', (first,)).fetchone())
+
+    def test_generated_standard_hours_are_frozen_but_weekly_reporting_counts_as_process(self):
+        self.template(); tid = self.generate()[0]
+        self.assertEqual(self.api(f'/api/tasks/{tid}', {'estimated_hours': 100}, self.owner)[0], 400)
+        self.assertEqual(self.api(f'/api/tasks/{tid}/hours', {'actual_hours': 0}, self.owner)[0], 200)
+        task = dict(self.c.execute('SELECT * FROM task WHERE id=?', (tid,)).fetchone())
+        result = app.task_performance(self.c, task)
+        self.assertTrue(result['process_recorded'])
+        self.assertEqual(result['estimated_hours'], 16.5)
+
+    def test_100_percent_routine_progress_waits_for_acceptance(self):
+        self.template(); tid = self.generate()[0]
+        status, progress = self.api(f'/api/tasks/{tid}/progress', {'percent': 100, 'comment': '交付物已提交'}, self.owner)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.api(f"/api/approvals/{progress['approval_id']}/confirm", {'result': 'approved'})[0], 200)
+        self.assertEqual(self.c.execute('SELECT work_status FROM task WHERE id=?', (tid,)).fetchone()[0], 'awaiting_acceptance')
+
+    def test_multiple_pms_do_not_recurse_in_management_performance(self):
+        self.c.execute("INSERT INTO user(name,role) VALUES('第二位管理PM','pm')"); self.c.commit()
+        pm = self.c.execute("SELECT id FROM user WHERE role='pm' LIMIT 1").fetchone()[0]
+        report = app.performance_summary(self.c, pm, '2026-11')
+        self.assertIn('management', report)
+
 
 if __name__ == '__main__':
     unittest.main()

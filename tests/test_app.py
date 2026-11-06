@@ -11,7 +11,7 @@ class WorkTreeTests(unittest.TestCase):
     def setUp(self):
         # Unit/API fixtures use deterministic rules. Model-specific tests below
         # provide their own configuration and mock the external response.
-        ai_environment=patch.dict(os.environ,{'AI_API_BASE':'','AI_API_KEY':'','AI_MODEL':'','FEISHU_APP_ID':'','FEISHU_APP_SECRET':'','FEISHU_VERIFICATION_TOKEN':'','WECOM_CORP_ID':'','WECOM_AGENT_ID':'','WECOM_SECRET':''})
+        ai_environment=patch.dict(os.environ,{'WMT_AUTH_MODE':'demo','WMT_MONTHLY_DEMO':'1','AI_API_BASE':'','AI_API_KEY':'','AI_MODEL':'','FEISHU_APP_ID':'','FEISHU_APP_SECRET':'','FEISHU_VERIFICATION_TOKEN':'','WECOM_CORP_ID':'','WECOM_AGENT_ID':'','WECOM_SECRET':''})
         ai_environment.start(); self.addCleanup(ai_environment.stop)
         temporary=tempfile.TemporaryDirectory()
         database_patch=patch.object(app,'DB_PATH',Path(temporary.name)/'test.db')
@@ -553,11 +553,11 @@ class WorkTreeTests(unittest.TestCase):
             self.assertGreater(delegate['id'],0)
             self.assertTrue(any(row['id']==delegate['id'] for row in call('/api/delegates')))
 
-            template=call('/api/routine/templates',{'org_node_id':child['id'],'title':'接口测试例行任务','owner_id':owner['id'],'deliverable':'测试记录','recurrence':'WEEKLY','estimated_hours':16})
+            template=call('/api/routine/templates',{'org_node_id':child['id'],'title':'接口测试例行任务','owner_id':owner['id'],'deliverable':'测试记录','recurrence':'WEEKLY','estimated_hours':16,'actor_id':manager['id']})
             self.assertGreater(template['id'],0)
-            generated=call('/api/routine/generate',{'instance_date':'2031-01-01'})
+            generated=call('/api/routine/generate',{'instance_date':'2031-01-01','actor_id':manager['id']})
             self.assertGreaterEqual(generated['count'],1)
-            self.assertEqual(call('/api/routine/generate',{'instance_date':'2031-01-01'})['count'],0)
+            self.assertEqual(call('/api/routine/generate',{'instance_date':'2031-01-01','actor_id':manager['id']})['count'],0)
 
             manual=call('/api/tasks',{'org_node_id':child['id'],'title':'接口测试手工任务','owner_id':owner['id'],'due_at':'2031-01-02T17:00:00+08:00','deliverable':'手工任务验收记录'})
             self.assertEqual(manual['approval_status'],'pending')

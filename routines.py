@@ -72,7 +72,7 @@ def target_week(instance_date=None, current_time=None):
     return sunday + timedelta(days=1)
 
 
-def generate(c, instance_date=None, current_time=None, approver_for=None):
+def generate(c, instance_date=None, current_time=None, approver_for=None, template_ids=None):
     monday = target_week(instance_date, current_time)
     sunday = monday + timedelta(days=6)
     stamp = (current_time or datetime.now(CHINA)).isoformat()
@@ -81,8 +81,15 @@ def generate(c, instance_date=None, current_time=None, approver_for=None):
     if not c.in_transaction:
         c.execute('BEGIN IMMEDIATE')
     created = []
+    selected = None
+    if template_ids is not None:
+        if not isinstance(template_ids, list) or any(type(i) is not int or i < 1 for i in template_ids):
+            raise ValueError('模板编号须为正整数列表')
+        selected = set(template_ids)
     for row in c.execute("SELECT * FROM task_template WHERE status='active'").fetchall():
         template = dict(row)
+        if selected is not None and template['id'] not in selected:
+            continue
         try:
             standard = hours(template.get('estimated_hours'))
         except ValueError:

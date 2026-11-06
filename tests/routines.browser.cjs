@@ -29,7 +29,7 @@ assert(config.base.startsWith('http://127.0.0.1:'));
     const template=await page.evaluate(()=>window.routineTemplates[0]);
     assert.equal(template.estimated_hours,16.5);assert.equal(template.recurrence,'WEEKLY');
     const generated=await page.evaluate(async()=>{
-      const r=await fetch('/api/routine/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance_date:'2026-11-09'})});return r.json();
+      const r=await fetch('/api/routine/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance_date:'2026-11-09',actor_id:currentActorId()})});return r.json();
     });
     assert(generated.count>=1);await page.evaluate(()=>load());const tid=await page.evaluate(id=>currentTasks.find(t=>t.parent_template_id===id&&t.routine_week_start==='2026-11-09').id,template.id);
     await page.evaluate(id=>editRoutineTemplate(id),template.id);
@@ -52,8 +52,9 @@ assert(config.base.startsWith('http://127.0.0.1:'));
     await page.locator('#taskEditForm [name="actual_hours"]').waitFor({state:'attached'});
     assert.equal(await page.locator('#taskEditForm [name="estimated_hours"]').inputValue(),'16.5');
     assert.equal(await page.locator('#taskEditForm [name="actual_hours"]').inputValue(),'0');
+    await page.evaluate(id=>setDemoActor(id),config.manager);
     const result=await page.evaluate(async()=>{
-      const request=async()=>{const r=await fetch('/api/routine/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance_date:'2026-11-16'})});return r.json()};
+      const request=async()=>{const r=await fetch('/api/routine/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance_date:'2026-11-16',actor_id:currentActorId()})});return r.json()};
       const first=await request(),second=await request();await load();return {first,second};
     });
     assert(result.first.count>=1);assert.equal(result.second.count,0);
