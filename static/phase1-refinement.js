@@ -17,7 +17,7 @@
     if(!existing){
       box.className='task-advanced-fields full';
       box.innerHTML='<summary>更多信息</summary><div class="task-advanced-content"></div>';
-      const actions=form.querySelector('.form-actions');
+      const actions=form.querySelector('.form-actions,.task-actions');
       actions?.before(box);
     }
     const content=box.querySelector('.task-advanced-content');

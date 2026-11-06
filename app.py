@@ -7,6 +7,7 @@ from xml.etree import ElementTree as ET
 import weekly_reports
 import monthly_reports
 import accounts
+import routines
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
@@ -73,6 +74,7 @@ def migrate(c):
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS user_feishu_identity ON user(feishu_open_id) WHERE feishu_open_id IS NOT NULL AND feishu_open_id<>''")
     c.execute('PRAGMA journal_mode=WAL')
     c.execute('PRAGMA synchronous=NORMAL')
+    routines.migrate(c)
 def rowdict(row): return dict(row) if row else None
 def audit(c, typ, oid, action, actor, before=None, after=None):
     c.execute("INSERT INTO audit_log(object_type,object_id,action,actor,before_json,after_json,created_at) VALUES(?,?,?,?,?,?,?)", (typ, oid, action, actor, json.dumps(before, ensure_ascii=False) if before else None, json.dumps(after, ensure_ascii=False) if after else None, now()))
@@ -153,18 +155,11 @@ def validate_task_fields(c, payload, *, require_all=False):
     if org_node_id not in (None,'') and not c.execute('SELECT 1 FROM org_node WHERE id=? AND inactive_at IS NULL',(org_node_id,)).fetchone():
         raise ValueError('挂载责任域不存在或已停用')
     return {'title':title,'description':description,'deliverable':deliverable,'priority':priority,'task_type':task_type,'due_at':due,'owner_id':owner_id,'org_node_id':org_node_id}
-def generate_routines(c, instance_date=None):
-    from datetime import date, timedelta
-    day=date.fromisoformat(instance_date) if instance_date else datetime.now(timezone.utc).date(); created=[]
-    weekday=day.strftime('%a').upper()
-    for template in c.execute("SELECT * FROM task_template WHERE status='active'"):
-        recurrence=template['recurrence'].upper()
-        if recurrence=='WEEKLY' and weekday!='MON': continue
-        if recurrence not in ('DAILY','WEEKLY'): continue
-        if c.execute('SELECT 1 FROM task_instance WHERE template_id=? AND instance_date=?',(template['id'],day.isoformat())).fetchone(): continue
-        due=(day+timedelta(days=template['due_offset_days'])).isoformat()+'T17:00:00+08:00'; t=now(); approver=approver_for(c,template['owner_id'])
-        tid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,deliverable,source,task_type,parent_template_id,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(template['org_node_id'],template['title'],template['description'],template['owner_id'],due,template['priority'],template['deliverable'],'routine_generator','ROUTINE',template['id'],'approved',approver,t,t)).lastrowid
-        c.execute('INSERT INTO task_instance(template_id,instance_date,task_id,created_at) VALUES(?,?,?,?)',(template['id'],day.isoformat(),tid,t)); audit(c,'task',tid,'routine_generated','system',after={'template_id':template['id'],'instance_date':day.isoformat()}); created.append(tid)
+def generate_routines(c, instance_date=None, current_time=None):
+    created=routines.generate(c,instance_date,current_time,approver_for)
+    for tid in created:
+        task=c.execute('SELECT parent_template_id,routine_week_start FROM task WHERE id=?',(tid,)).fetchone()
+        audit(c,'task',tid,'routine_generated','system',after={'template_id':task['parent_template_id'],'instance_date':task['routine_week_start']})
     return created
 def daily_targets(c, report_date=None):
     day=report_date or datetime.now(timezone.utc).date().isoformat(); rows=[]
@@ -572,7 +567,7 @@ def task_performance(c,task,config=None):
     config=config or performance_config(c); priority=config['priority'].get(task['priority'],1.0)
     complexity=config['complexity'].get(task.get('complexity') or 'general',1.5)
     task_type=config['type'].get(task.get('task_type') or 'PROJECT',1.2)
-    fallback={'ROUTINE':2,'PROJECT':8,'ADHOC':4}.get(task.get('task_type') or 'PROJECT',8)
+    fallback={'ROUTINE':0,'PROJECT':8,'ADHOC':4}.get(task.get('task_type') or 'PROJECT',8)
     hours=float(task.get('estimated_hours') or fallback)
     base=round(hours*complexity*priority*task_type,2)
     accepts=[rowdict(x) for x in c.execute('SELECT * FROM acceptance WHERE task_id=? ORDER BY id',(task['id'],))]
@@ -1508,7 +1503,7 @@ def detect_task_owner(c, text):
 
 def normalize_legacy_conversation_tasks(c):
     """One-time-safe cleanup for drafts created before title/detail separation."""
-    rows=c.execute("SELECT id,title,description FROM task WHERE source='conversation'").fetchall()
+    rows=c.execute("SELECT id,title,description,owner_id,approver_id FROM task WHERE source='conversation'").fetchall()
     for row in rows:
         source=row['description'] or row['title']
         # Older records may already have had their detail trimmed. Recover the
@@ -1518,10 +1513,12 @@ def normalize_legacy_conversation_tasks(c):
             if raw: source=raw['raw_text']
         title=concise_task_title(source) if len(row['title'])>40 else row['title']
         owner=detect_task_owner(c,source)
-        if owner:
-            c.execute('UPDATE task SET title=?,description=?,owner_id=?,approver_id=?,updated_at=? WHERE id=?',(title,task_detail(source),owner,approver_for(c,owner),now(),row['id']))
-        else:
-            c.execute('UPDATE task SET title=?,description=?,updated_at=? WHERE id=?',(title,task_detail(source),now(),row['id']))
+        changes={'title':title,'description':task_detail(source)}
+        if owner:changes.update(owner_id=owner,approver_id=approver_for(c,owner))
+        changes={key:value for key,value in changes.items() if row[key]!=value}
+        if changes:
+            changes['updated_at']=now()
+            c.execute('UPDATE task SET '+','.join(key+'=?' for key in changes)+' WHERE id=?',(*changes.values(),row['id']))
 
 def ai_draft(text, c=None):
     """Creates a non-binding task draft. Uses an OpenAI-compatible endpoint when configured."""
@@ -1981,6 +1978,8 @@ class Handler(BaseHTTPRequestHandler):
         if p.path=='/auth/feishu/bind':return self.start_feishu_login(bind=True)
         if p.path=='/static/monthly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'monthly-reports.js').read_bytes(),'no-cache')
+        if p.path=='/static/routine-tasks.js':
+            return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'routine-tasks.js').read_bytes(),'no-cache')
         if p.path=='/static/weekly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'weekly-reports.js').read_bytes(),'no-cache')
         if p.path=='/auth/feishu/start': return self.start_feishu_login()
@@ -2013,7 +2012,7 @@ class Handler(BaseHTTPRequestHandler):
             data=(ROOT/'static'/'manual-assets'/manual_assets[p.path]).read_bytes(); self.send_response(200); self.send_header('Content-Type','image/svg+xml'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/' or p.path=='/index.html':
             if not login_required() and not self.require_auth(): return
-            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-clean-labels"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261104-layout1"></script><script defer src="/static/layout-guard.js?v=20261104-layout3"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
+            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-weekly1"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261104-layout1"></script><script defer src="/static/layout-guard.js?v=20261104-layout3"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
         if p.path=='/manual' or p.path=='/manual.html':
             if not self.require_auth(): return
             data=(ROOT/'static'/'manual.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
@@ -2292,12 +2291,18 @@ class Handler(BaseHTTPRequestHandler):
                 if int(b['user_id'])==int(b['delegate_user_id']): return self.json(400,{'error':'delegate must be another user'})
                 if b['start_at']>=b['end_at']: return self.json(400,{'error':'delegate period is invalid'})
                 oid=c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(b['user_id'],b['delegate_user_id'],b.get('scope','approval'),b['start_at'],b['end_at'])).lastrowid; audit(c,'delegate',oid,'create','local',after=b); c.commit(); out={'id':oid}
-            elif p.path=='/api/routine/templates':
-                required=['org_node_id','title','owner_id','deliverable','recurrence']; missing=[x for x in required if not b.get(x)]
-                if missing: return self.json(400,{'error':'missing fields','fields':missing})
-                recurrence=b['recurrence'].upper()
-                if recurrence not in ('DAILY','WEEKLY'): return self.json(400,{'error':'recurrence must be DAILY or WEEKLY'})
-                oid=c.execute('INSERT INTO task_template(org_node_id,title,description,owner_id,deliverable,priority,recurrence,due_offset_days,review_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(b['org_node_id'],b['title'],b.get('description',''),b['owner_id'],b['deliverable'],b.get('priority','P1'),recurrence,int(b.get('due_offset_days',0)),b.get('review_at'),t)).lastrowid; audit(c,'task_template',oid,'create','local',after=b); c.commit(); out={'id':oid}
+            elif p.path=='/api/routine/templates' or re.fullmatch(r'/api/routine/templates/\d+',p.path):
+                fields=routines.template_fields(c,b)
+                if p.path=='/api/routine/templates':
+                    fields['created_at']=t
+                    oid=c.execute('INSERT INTO task_template('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',tuple(fields.values())).lastrowid
+                    audit(c,'task_template',oid,'create','local',after=fields)
+                else:
+                    oid=int(p.path.rsplit('/',1)[1]); old=c.execute('SELECT * FROM task_template WHERE id=?',(oid,)).fetchone()
+                    if not old:return self.json(404,{'error':'模板不存在'})
+                    c.execute('UPDATE task_template SET '+','.join(key+'=?' for key in fields)+' WHERE id=?',(*fields.values(),oid))
+                    audit(c,'task_template',oid,'update','local',before=rowdict(old),after=fields)
+                c.commit(); out={'id':oid,'status':'ok'}
             elif p.path=='/api/routine/generate':
                 generated=generate_routines(c,b.get('instance_date')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/ops/daily-run':
@@ -2444,6 +2449,11 @@ class Handler(BaseHTTPRequestHandler):
                 if b.get('action')=='delete':
                     if not can_manage: return self.json(403,{'error':'only the task owner or manager may delete a task'})
                     c.execute('DELETE FROM approval_record WHERE task_id=?',(tid,)); c.execute('DELETE FROM progress_record WHERE task_id=?',(tid,)); c.execute('DELETE FROM feedback WHERE task_id=?',(tid,)); c.execute('DELETE FROM acceptance WHERE task_id=?',(tid,)); c.execute('DELETE FROM task WHERE id=?',(tid,)); action='delete'
+                elif p.path.endswith('/hours'):
+                    if not can_manage:return self.json(403,{'error':'仅任务责任人、部门负责人或管理 PM 可填写工时'})
+                    if old['task_type']!='ROUTINE':return self.json(400,{'error':'此入口仅用于例行任务周工时'})
+                    actual=routines.hours(b.get('actual_hours'),actual=True)
+                    c.execute('UPDATE task SET actual_hours=?,routine_hours_updated_at=?,updated_at=? WHERE id=?',(actual,t,t,tid)); action='routine_hours'
                 elif p.path.endswith('/feedback'):
                     if not b.get('content'): return self.json(400,{'error':'content is required'})
                     feedback_user=self.actor_id(b.get('user_id'))
@@ -2473,6 +2483,11 @@ class Handler(BaseHTTPRequestHandler):
                     except ValueError as exc: return self.json(400,{'error':str(exc)})
                     for key in ('title','description','deliverable','priority','task_type','due_at','owner_id','org_node_id'):
                         if key in changes: changes[key]=validated[key]
+                    if old['task_type']=='ROUTINE':
+                        if 'estimated_hours' in changes:changes['estimated_hours']=routines.hours(changes['estimated_hours'])
+                        if 'actual_hours' in changes:
+                            changes['actual_hours']=routines.hours(changes['actual_hours'],actual=True)
+                            changes['routine_hours_updated_at']=t
                     if 'owner_id' in changes:
                         # A task that is still waiting for confirmation must keep its
                         # confirmation chain in sync with the responsible person.

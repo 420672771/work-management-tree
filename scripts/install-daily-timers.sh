@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for name in worktree-daily-morning worktree-daily-evening worktree-approval-reminder worktree-scheduled-reports worktree-weekly-report; do
+for name in worktree-daily-morning worktree-daily-evening worktree-approval-reminder worktree-scheduled-reports worktree-weekly-report worktree-routines; do
   systemctl --user link "$root_dir/deploy/$name.service"
   systemctl --user link "$root_dir/deploy/$name.timer"
   systemctl --user enable --now "$name.timer"

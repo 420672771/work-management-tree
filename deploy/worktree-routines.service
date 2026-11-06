@@ -1,0 +1,8 @@
+[Unit]
+Description=Generate next week's routine tasks with template hour snapshots
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/admin/work-management-tree
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /home/admin/work-management-tree/scripts/generate-routines.py

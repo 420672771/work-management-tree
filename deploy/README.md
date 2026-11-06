@@ -50,6 +50,24 @@ systemctl --user list-timers worktree-weekly-report.timer --no-pager
 
 服务执行 `scripts/generate-weekly-report.py`，生成待发布快照并记入审计日志，不自动发布、不发送外部消息。若本周草稿已提前补生成，则更新其任务快照并保留人工内容；已发布版本保持不变。同一周期重复执行不会覆盖编辑内容。负责人在首页收到提示后查看并发布，日常编辑自动保存；任务数据更新位于页面的“更多操作”。
 
+## 例行任务按周生成与工时
+
+“组织配置 → 例行任务模板”配置必填的每周标准工时（0.5—168 小时）。旧模板须编辑补齐，未配置工时的模板跳过生成，不使用默认工时。旧的每日模板转为每周模板，已有任务保持不变。
+
+```bash
+systemctl --user link /home/admin/work-management-tree/deploy/worktree-routines.service
+systemctl --user link /home/admin/work-management-tree/deploy/worktree-routines.timer
+systemctl --user daemon-reload
+systemctl --user enable --now worktree-routines.timer
+systemctl --user list-timers worktree-routines.timer --no-pager
+```
+
+定时器每周日 18:00（Asia/Shanghai）生成下一周周一至周日的任务，立即正式生效、状态为待开始，不建立任务确认审批。任务截止为该周日 23:59:59。负责人验收完成的流程保持不变。模板与周起始日期保证唯一，并发执行也不会重复生成；改模板仅影响未来任务，当前任务保留标准工时快照。
+
+实际工时在任务卡或任务详情点击“填写本周工时”，填入该周累计投入（0—168 小时）；保存替换原值，不累加、不自动改变任务状态。责任人、部门负责人和管理 PM 可操作，真实登录身份优先于提交的演示身份。
+
+定时器恢复时只补最近一次到期周期，不批量补历史空周。命令 `python3 scripts/generate-routines.py --week 2026-11-09` 可人工补指定日期所在周（不会发送外部消息）。与其他定时任务一样，自定义数据库时须通过 service 的 `Environment=WMT_DB=...` 指向网站相同数据库；更换部署目录也须同步修改 service 路径。
+
 ## VPS/公网主机
 
 将项目放到 `/opt/work-management-tree`，创建 `worktree` 用户，把 `worktree.service` 安装到 `/etc/systemd/system/`，再执行：

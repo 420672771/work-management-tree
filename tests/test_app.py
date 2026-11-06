@@ -297,7 +297,7 @@ class WorkTreeTests(unittest.TestCase):
         c=app.db()
         try:
             owner=2; node=c.execute("select id from org_node where node_type='domain' limit 1").fetchone()[0]
-            c.execute("insert into task_template(org_node_id,title,owner_id,deliverable,recurrence,created_at) values(?,?,?,?,?,?)",(node,'每日站会',owner,'站会纪要','DAILY',app.now()))
+            c.execute("insert into task_template(org_node_id,title,owner_id,deliverable,recurrence,estimated_hours,created_at) values(?,?,?,?,?,?,?)",(node,'每周例会',owner,'会议纪要','WEEKLY',2,app.now()))
             self.assertEqual(len(app.generate_routines(c,'2030-01-01')),1)
             self.assertEqual(len(app.generate_routines(c,'2030-01-01')),0)
             self.assertEqual(c.execute("select count(*) from task where task_type='ROUTINE'").fetchone()[0],1)
@@ -553,7 +553,7 @@ class WorkTreeTests(unittest.TestCase):
             self.assertGreater(delegate['id'],0)
             self.assertTrue(any(row['id']==delegate['id'] for row in call('/api/delegates')))
 
-            template=call('/api/routine/templates',{'org_node_id':child['id'],'title':'接口测试例行任务','owner_id':owner['id'],'deliverable':'测试记录','recurrence':'DAILY'})
+            template=call('/api/routine/templates',{'org_node_id':child['id'],'title':'接口测试例行任务','owner_id':owner['id'],'deliverable':'测试记录','recurrence':'WEEKLY','estimated_hours':16})
             self.assertGreater(template['id'],0)
             generated=call('/api/routine/generate',{'instance_date':'2031-01-01'})
             self.assertGreaterEqual(generated['count'],1)
