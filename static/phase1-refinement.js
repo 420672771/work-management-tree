@@ -4,10 +4,10 @@
   const $=selector=>document.querySelector(selector);
   const fieldFor=element=>element?.closest('.form-field')||element?.parentElement;
 
-  function optionalLabel(field,text){
+  function configureOptionalField(field,text){
     if(!field)return;
     const label=field.querySelector('label');
-    if(label)label.innerHTML=`${text}<span class="optional-note">（选填）</span>`;
+    if(label)label.textContent=text;
     field.querySelector('input,textarea,select')?.removeAttribute('required');
   }
 
@@ -16,7 +16,7 @@
     const box=existing||document.createElement('details');
     if(!existing){
       box.className='task-advanced-fields full';
-      box.innerHTML='<summary>更多信息（选填）</summary><div class="task-advanced-content"></div>';
+      box.innerHTML='<summary>更多信息</summary><div class="task-advanced-content"></div>';
       const actions=form.querySelector('.form-actions');
       actions?.before(box);
     }
@@ -29,15 +29,12 @@
     if(!form||form.dataset.phaseOneReady)return;
     form.dataset.phaseOneReady='1';
     const description=form.querySelector('[name="description"]');
-    optionalLabel(fieldFor(description),'任务详情');
+    configureOptionalField(fieldFor(description),'任务详情');
     const type=fieldFor(form.querySelector('[name="task_type"]'));
     const priority=fieldFor(form.querySelector('[name="priority"]'));
     const performance=$('#performanceTaskFields');
     if(performance){
       performance.querySelectorAll('[required]').forEach(input=>input.removeAttribute('required'));
-      performance.querySelectorAll('label').forEach(label=>{
-        if(!label.textContent.includes('选填'))label.insertAdjacentHTML('beforeend','<span class="optional-note">（选填）</span>');
-      });
     }
     moveIntoAdvanced(form,[type,priority,performance,fieldFor(description)]);
     const node=fieldFor(form.querySelector('[name="org_node_id"]'));
@@ -50,8 +47,8 @@
     const form=$('#taskEditForm');
     if(!form||form.dataset.phaseOneReady)return;
     form.dataset.phaseOneReady='1';
-    optionalLabel(fieldFor(form.querySelector('[name="description"]')),'任务详情');
-    optionalLabel(fieldFor(form.querySelector('[name="deliverable"]')),'交付物 / 验收标准');
+    configureOptionalField(fieldFor(form.querySelector('[name="description"]')),'任务详情');
+    configureOptionalField(fieldFor(form.querySelector('[name="deliverable"]')),'交付物 / 验收标准');
     const type=fieldFor(form.querySelector('[name="task_type"]'));
     const priority=fieldFor(form.querySelector('[name="priority"]'));
     const performance=form.querySelector('.performance-edit-fields');
@@ -95,7 +92,6 @@
     style.id='phase-one-refinement-style';
     style.textContent=`
       .workspace-header .stats{display:none!important}
-      #homePage #form .optional-note,#taskEditForm .optional-note{margin-left:4px;color:#78869a;font-size:12px;font-weight:400}
       #homePage #form.task-create-form{grid-template-columns:repeat(6,minmax(0,1fr))!important}
       #homePage #form.task-create-form .core-create-field{grid-column:span 2!important}
       #homePage #form .task-advanced-fields,#taskEditForm .task-advanced-fields{grid-column:1/-1;margin-top:12px;border:1px solid #e1e8f2;border-radius:10px;background:#f8faff}
