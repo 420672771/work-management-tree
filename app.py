@@ -1051,7 +1051,9 @@ def model_bot_operation_command(c, text, user_id, session_id=None):
         return None
 
 def task_number(text):
-    match=re.search(r'(?:任务|task)\s*[#编号：:\-]?\s*(\d+)',str(text or ''),re.I)
+    source=normalize_assistant_text(text)
+    match=re.search(r'(?:任务|task)\s*(?:编号\s*[:#]?\s*|[#:：\-]\s*)?(\d+)',source,re.I)
+    if not match:match=re.match(r'#\s*(\d+)',source)
     return int(match.group(1)) if match else None
 
 def user_by_name(c, name):
@@ -1136,10 +1138,108 @@ def plan_bot_task_fields(c, text, user_id, session_id, task_id):
     action={'type':'update_task','task_id':task_id,'changes':changes};save_bot_action(c,session_id,user_id,action)
     return action,f'拟修改任务#{task_id}《{task["title"]}》：\n'+ '\n'.join(display)+'\n回复“确认”执行，回复“取消”放弃。'
 
+BOT_EDIT_LABELS={'责任人':'owner_id','负责人':'owner_id','截止日期':'due_at','截止时间':'due_at','到期时间':'due_at',
+                 '任务标题':'title','标题':'title','任务详情':'description','详情':'description',
+                 '交付物':'deliverable','验收标准':'deliverable','优先级':'priority'}
+BOT_EDIT_NAMES={'owner_id':'责任人','due_at':'截止日期','title':'标题','description':'详情','deliverable':'交付物','priority':'优先级'}
+
+
+def plan_bot_edit_dialogue(c, source, user_id, session_id):
+    """Collect one task edit across messages without guessing missing parameters."""
+    if not user_id:return False,None,None
+    row=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id=? AND status='collecting' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,user_id,now())).fetchone()
+    prior=json.loads(row['action_json']) if row else None
+    if not prior or prior.get('type')!='collect_task_edit':prior=None
+    pattern='|'.join(re.escape(label) for label in sorted(BOT_EDIT_LABELS,key=len,reverse=True))
+    labels=list(re.finditer(pattern,source));fields={BOT_EDIT_LABELS[match[0]] for match in labels}
+    change=bool(re.search(r'修改|更改|更换|调整|变更|改为|改成|改到|改下|改一下|设置|换成|转交|转给|交给|指派给|改由',source))
+    transfer=re.search(r'(?:转交给?|转给|交给|指派给|改由)\s*(.+?)(?:负责|处理|跟进|完成)?[。！!]*$',source)
+    other=bool(re.search(r'^(?:(?:请|帮我|帮忙|麻烦)\s*)*(?:新建|新增|创建|添加|删除|作废|移除|开始|启动|提交|验收)\s*(?:任务|事项|#|部门|岗位|成员|员工|用户|责任域|例行)',source)
+               or re.search(r'^(?:任务|#)\s*#?\d+\s*(?:开始|启动|完成并提交|提交验收|删除|验收)',source)
+               or re.search(r'设置.*代理|(?:每天|每日|定时).*(?:汇总|进展|报告)',source))
+    reference=bool(re.match(r'(?:(?:请|帮我|帮忙|麻烦)\s*)*(?:修改|更新|调整|变更|设置|更改)\s*(?:部门|岗位|成员|员工|用户|责任域|例行.*模板)',source))
+    query=is_task_query_request(source) or bool(re.match(r'(?:查看|查询|看看|汇总|总结|列出)',source))
+    fresh=not reference and not other and not query and len(fields)<=1 and bool(
+        (fields and change) or transfer or (fields and task_number(source) and re.search(r'[:=]',source)))
+    bare=bool(re.fullmatch(r'(?:#\s*\d+|(?:任务|task)\s*(?:编号\s*[:#]?\s*|[#:：\-]\s*)?\d+)[。]?',source,re.I))
+    if prior and (other or reference or (change and not fresh and not re.match(r'^(?:改为|改成|改到|修改为|调整为|变更为|换成)',source))):
+        c.execute("UPDATE bot_pending_action SET status='superseded' WHERE id=?",(row['id'],));prior=None
+    if query:return False,None,None
+    if not fresh and not prior:
+        if not bare:return False,None,None
+        c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id=? AND status='pending'",(session_id,user_id))
+        tid=task_number(source);task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        if not task:return True,None,f'未找到任务#{tid}。'
+        if not bot_can_manage_task(c,user_id,task) and task['approver_id']!=user_id:return True,None,'无权查看该任务。'
+        save_bot_task_context(c,session_id,user_id,tid)
+        owner=c.execute('SELECT name FROM user WHERE id=?',(task['owner_id'],)).fetchone()
+        return True,None,f'任务#{tid}《{task["title"]}》，当前责任人：{owner[0] if owner else "未配置"}，截止日期：{str(task["due_at"])[:10]}。请说明要查询或修改的内容。'
+    if fresh:
+        c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id=? AND status IN ('pending','collecting')",(session_id,user_id))
+        scope=source[:labels[0].start()] if labels else source[:transfer.start()]
+        numbers=re.findall(r'(?:任务|task)\s*(?:编号\s*[:#]?\s*|[#:：\-]\s*)?(\d+)',scope,re.I)
+        if len(set(numbers))>1 or re.search(r'(?:任务|task)\s*#?\d+\s*[、,，和及]\s*(?:任务|#)?\s*\d+',scope,re.I):
+            if row:c.execute("UPDATE bot_pending_action SET status='superseded' WHERE id=?",(row['id'],))
+            return True,None,'请一次明确一条要修改的任务，例如“修改任务15的责任人”。'
+        field=next(iter(fields)) if fields else 'owner_id'
+        tid=task_number(source) or (prior.get('task_id') if prior else None) or referenced_task_id(c,session_id,user_id,source)
+        proposal={'type':'collect_task_edit','field':field,'task_id':tid,'value':None}
+        if labels:
+            suffix=source[labels[0].end():]
+            value=re.fullmatch(r'\s*[，,]?\s*(?:修改为|修改到|更改为|调整为|调整到|变更为|设置为|修改成|改为|改成|改到|换成|推迟到|提前到|延后到|为|是|到|[:=])\s*(.+)',suffix)
+            if value:proposal['value']=value[1]
+        elif transfer:proposal['value']=transfer[1]
+    else:
+        proposal=dict(prior);field=proposal['field']
+        if bare:proposal['task_id']=task_number(source)
+        elif labels:
+            if fields!={field}:return True,None,'当前正在补充任务的'+BOT_EDIT_NAMES[field]+'；如需修改其他内容，请重新说明完整要求，或回复“取消”。'
+            value=source[labels[0].end():]
+            proposal['value']=re.sub(r'^\s*(?:修改为|修改到|更改为|调整为|调整到|变更为|设置为|改为|改成|改到|换成|为|是|到|[:=])?\s*','',value)
+        else:proposal['value']=re.sub(r'^\s*(?:修改为|修改到|更改为|调整为|调整到|变更为|设置为|改为|改成|改到|换成|转给|交给)\s*','',source)
+    tid=proposal['task_id'];task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone() if tid else None
+    if tid and not task:
+        if row:c.execute("UPDATE bot_pending_action SET status='failed' WHERE id=?",(row['id'],))
+        return True,None,f'未找到任务#{tid}，请核对编号后重新说明修改要求。'
+    if task and not bot_can_manage_task(c,user_id,task):
+        if row:c.execute("UPDATE bot_pending_action SET status='failed' WHERE id=?",(row['id'],))
+        return True,None,'只有任务责任人、管理 PM 或部门负责人可以修改任务。'
+    if task:save_bot_task_context(c,session_id,user_id,tid)
+    value=str(proposal.get('value') or '').strip(' \t。！!，,；;')
+    example={'owner_id':'完整成员姓名，或“责任人：#成员编号”','due_at':'2030-01-15','priority':'P0、P1 或 P2'}.get(field,'修改后的完整内容')
+    def collect(reply):
+        assistant_management.store(c,session_id,user_id,proposal,'collecting')
+        return True,None,reply
+    if not task:return collect('要修改哪条任务的'+BOT_EDIT_NAMES[field]+'？请回复任务编号（如“#15”）或“任务15”。')
+    if not value:
+        current=''
+        if field=='owner_id':
+            owner=c.execute('SELECT name FROM user WHERE id=?',(task['owner_id'],)).fetchone();current='当前责任人是'+(owner[0] if owner else '未配置')+'。'
+        return collect(f'已定位任务#{tid}《{task["title"]}》。'+current+'请提供新的'+BOT_EDIT_NAMES[field]+'（'+example+'）；补齐后我会回显供你确认。')
+    try:
+        if field=='owner_id':
+            target=assistant_management.lookup(c,'user',value)
+            changes={'owner_id':target['id']};action={'type':'change_owner','task_id':tid,'owner_id':target['id']};display=target['name']
+        elif field=='due_at':
+            due=valid_due_at(value) if re.match(r'^\d{4}-\d{2}-\d{2}T',value) else parse_due(value)
+            if not due:raise ValueError('未识别新的截止日期，请提供明确日期，例如 2030-01-15。')
+            changes={'due_at':due};action={'type':'change_due','task_id':tid,'due_at':due};display=due[:10]
+        else:
+            changes={field:value.upper() if field=='priority' else value};action={'type':'update_task','task_id':tid,'changes':changes};display=value
+        bot_task_changes(c,task,changes)
+    except (ValueError,LookupError) as exc:
+        proposal['value']=None
+        return collect(str(exc)+' 请继续补充新的'+BOT_EDIT_NAMES[field]+'（'+example+'）。')
+    save_bot_action(c,session_id,user_id,action)
+    return True,action,f'拟将任务#{tid}《{task["title"]}》的{BOT_EDIT_NAMES[field]}改为：{display}。\n回复“确认”执行，回复“取消”放弃。'
+
+
 def plan_bot_action(c, text, user_id, session_id, allow_model=True):
     """Create an explicit, reviewable plan for non-creation work actions."""
     source=normalize_assistant_text(text)
     if re.fullmatch(r'(?:助手帮助|基础资料帮助|帮助|你能做什么|你会什么|怎么用|功能说明)[？?！!。]*',source): return None,BOT_HELP
+    handled,action,reply=plan_bot_edit_dialogue(c,source,user_id,session_id)
+    if handled:return action,reply
     handled,action,reply=assistant_management.plan(c,str(text),user_id,session_id,extract=model_management_proposal if allow_model and ai_configured() else None)
     if handled:return action,reply
     tid=task_number(source) or referenced_task_id(c,session_id,user_id,source); fallback_reply=None

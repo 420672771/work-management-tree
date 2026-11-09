@@ -68,7 +68,8 @@ def read_fields(text):
 
 
 def pending(c, session_id, user_id):
-    return c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id=? AND status='collecting' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,user_id,now())).fetchone()
+    row=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id=? AND status='collecting' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,user_id,now())).fetchone()
+    return row if row and 'proposal' in json.loads(row['action_json']) else None
 
 
 def store(c, session_id, user_id, action, status):

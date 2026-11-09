@@ -130,3 +130,9 @@ Environment=WMT_MONTHLY_DEMO=1
 先在测试模式的员工管理中配置负责人账号，或使用 `WMT_DB=<网站数据库> python3 scripts/set-user-account.py --user-id <ID> --username <账号>` 在服务器终端配置。随后将服务环境设置为 `WMT_AUTH_MODE=account`、`WMT_MONTHLY_DEMO=0`，重新加载服务环境，即可要求员工通过 `/login` 登录。`WMT_AUTH_MODE=feishu` 也兼容账号密码登录。
 
 飞书扫码登录和个人中心扫码绑定共用 `WMT_FEISHU_OAUTH_REDIRECT_URI`，或由 `WMT_PUBLIC_BASE_URL` 加 `/auth/feishu/callback` 构成回调地址。需在飞书应用后台登记完全一致的 URL，并配置现有 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`。缺少回调配置时，账号密码功能可正常运行，飞书扫码入口会提示配置状态。测试环境无需强制切换登录模式，可继续保留演示身份。
+
+## 飞书助手更新代码后生效
+
+`scripts/feishu-long-connection.py` 是独立于网站的常驻 Python 进程。修改 `app.py` 或 `assistant_management.py` 后，除更新网站进程外，还需重启实际部署的飞书长连接接收服务；只拉取代码、刷新网页或重启网站，不能替代接收服务的重启。确认网站与接收服务使用同一版本代码、同一个 `WMT_DB`，并按实际服务管理方式完成重启。
+
+多轮修改会按当前用户和会话保存缺少的参数。例如“修改任务15的责任人”后可直接补充姓名，也支持重复提供“#15”来定位任务。验证时先核对助手回显，只有明确回复“确认”后才会执行；不要用未经授权的真实任务做写入测试。

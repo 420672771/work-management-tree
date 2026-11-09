@@ -44,6 +44,96 @@ class AssistantManagementTests(unittest.TestCase):
         tid=self.c.execute('INSERT INTO task('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',tuple(fields.values())).lastrowid
         self.c.commit();return tid
 
+    def test_screenshot_owner_change_collects_missing_name_and_bare_task_number(self):
+        tid=self.task(id=15);target=self.c.execute("INSERT INTO user(name,role) VALUES('对话张三','member')").lastrowid;self.c.commit()
+        for text in ('修改任务15的责任人','#15'):
+            reply=self.say(text,user=self.pm)
+            self.assertIn('任务#15',reply);self.assertIn('请提供新的责任人',reply)
+            self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=15').fetchone()[0],self.member)
+        self.assertIn('请先补齐资料',self.say('确认',user=self.pm))
+        preview=self.say('对话张三',user=self.pm);self.assertIn('回复“确认”',preview);self.assertIn('对话张三',preview)
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=15').fetchone()[0],self.member)
+        self.assertIn('责任人已变更',self.say('确认',user=self.pm))
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=15').fetchone()[0],target)
+        self.assertIn('没有待确认',self.say('确认',user=self.pm))
+
+    def test_task_edit_can_collect_task_then_value_and_cancel_without_mutation(self):
+        tid=self.task(id=15)
+        self.assertIn('哪条任务',self.say('修改任务的责任人'))
+        self.assertIn('请提供新的责任人',self.say('#15'))
+        self.assertIn('回复“确认”',self.say('部门管理PM'))
+        self.say('取消');self.assertIn('没有待确认',self.say('确认'))
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member)
+
+    def test_owner_changes_understand_number_formats_transfer_and_explicit_member_ids(self):
+        tid=self.task(id=15)
+        for text in ('任务15','任务编号15','任务编号：15','task #15','#15','＃１５'):
+            self.assertEqual(app.task_number(text),15,text)
+        commands=['更换任务编号15的负责人为部门管理PM','把任务15转给部门管理PM',
+                  '把任务15交给部门管理PM负责',f'#15 责任人：#{self.pm}']
+        for index,text in enumerate(commands):
+            with self.subTest(text=text):
+                self.assertIn('回复“确认”',self.say(text,session='alias:'+str(index)))
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member)
+
+    def test_deadline_priority_and_text_edits_accept_short_followups(self):
+        tid=self.task()
+        for index,(field,value) in enumerate([('截止日期','2030-03-15'),('优先级','P0'),('标题','标题：提交方案'),('详情','等待业务确认后提交验收'),('交付物','评审纪要和问题清单')]):
+            session='field:'+str(index)
+            with self.subTest(field=field):
+                self.assertIn('请提供新的',self.say(f'修改任务{tid}的{field}',session=session))
+                self.assertIn('回复“确认”',self.say(value,session=session))
+                self.say('取消',session=session)
+        self.assertEqual(self.c.execute('SELECT title FROM task WHERE id=?',(tid,)).fetchone()[0],'助手任务')
+
+    def test_unknown_and_duplicate_owner_names_require_clarification_then_explicit_id(self):
+        tid=self.task();target=self.c.execute("INSERT INTO user(name) VALUES('重名成员')").lastrowid
+        self.c.execute("INSERT INTO user(name) VALUES('重名成员')");self.c.commit()
+        self.say(f'修改任务{tid}的责任人')
+        self.assertIn('未找到',self.say('不存在的成员'))
+        self.assertNotIn('回复“确认”',self.say('重名成员'))
+        self.assertIn('回复“确认”',self.say('责任人：#'+str(target)))
+        self.say('确认');self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],target)
+
+    def test_labelled_owner_followup_keeps_the_task_and_bare_reference_replaces_old_confirmation(self):
+        tid=self.task();self.say(f'修改任务{tid}的责任人')
+        self.assertIn(f'任务#{tid}',self.say('责任人改为部门管理PM'))
+        self.assertIsNotNone(self.c.execute("SELECT 1 FROM bot_pending_action WHERE status='pending'").fetchone())
+        other=self.task(title='另一条任务')
+        self.assertIn(f'任务#{other}',self.say('#'+str(other)))
+        self.assertIn('没有待确认',self.say('确认'))
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member)
+
+    def test_task_collection_survives_queries_but_is_isolated_cancelled_and_expired(self):
+        tid=self.task()
+        self.say(f'修改任务{tid}的责任人',session='same-chat')
+        self.assertNotIn('回复“确认”',self.say('部门管理PM',user=self.member,session='same-chat'))
+        self.assertNotIn('回复“确认”',self.say('部门管理PM',session='another-chat'))
+        self.say('我有哪些任务',session='same-chat')
+        self.assertIn('回复“确认”',self.say('部门管理PM',session='same-chat'));self.say('取消',session='same-chat')
+        self.say(f'修改任务{tid}的责任人',session='expired')
+        self.c.execute("UPDATE bot_pending_action SET expire_at='2000-01-01' WHERE session_id='expired'");self.c.commit()
+        self.assertNotIn('回复“确认”',self.say('部门管理PM',session='expired'))
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member)
+
+    def test_collection_rechecks_permissions_and_invalid_new_requests_cannot_confirm_old_changes(self):
+        tid=self.task();self.say(f'修改任务{tid}的责任人',user=self.pm)
+        self.c.execute("UPDATE user SET role='member' WHERE id=?",(self.pm,));self.c.commit()
+        self.assertIn('只有任务责任人',self.say('科技产品中心负责人',user=self.pm))
+        self.assertIn('没有待确认',self.say('确认',user=self.pm))
+        self.say(f'任务{tid} 责任人改为部门管理PM')
+        self.assertIn('未找到任务',self.say('修改任务999999的责任人'))
+        self.assertIn('没有待确认',self.say('确认'))
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member)
+
+    def test_new_reference_request_replaces_task_collection_and_multiple_tasks_are_not_guessed(self):
+        tid=self.task();self.say(f'修改任务{tid}的责任人')
+        self.assertIn('回复“确认”',self.say('新建部门 对话切换部门'));self.say('确认')
+        self.assertIsNotNone(self.c.execute("SELECT 1 FROM org_department WHERE name='对话切换部门'").fetchone())
+        for text in (f'修改任务{tid}和任务999的责任人为部门管理PM',f'修改任务{tid}、999的责任人'):
+            self.assertIn('一次明确一条',self.say(text))
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member)
+
     def test_create_all_reference_types_with_accounts_positions_and_routine_template(self):
         self.confirmed('新建部门 数据产品部，负责人：部门管理PM')
         self.confirmed('新建岗位 数据分析师，部门：数据产品部，默认角色：普通成员')
@@ -240,6 +330,15 @@ class AssistantManagementTests(unittest.TestCase):
         self.callback('确认','confirm')
         self.assertEqual(self.c.execute("SELECT count(*) FROM org_department WHERE name='回调部门'").fetchone()[0],1)
 
+    def test_http_callback_continues_incomplete_task_owner_change(self):
+        tid=self.task(id=15)
+        for index,text in enumerate(['修改任务15的责任人','#15','责任人改为部门管理PM']):
+            response,send=self.callback(text,'dialogue-http-'+str(index));self.assertEqual(response[0],200)
+            self.assertIn('请提供新的责任人' if index<2 else '回复“确认”',send.args[1])
+            self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member)
+        self.callback('确认','dialogue-http-confirm')
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.pm)
+
     def test_websocket_uses_same_workflow_and_deduplicates_events_without_remote_calls(self):
         path=Path(app.__file__).parent/'scripts'/'feishu-long-connection.py'
         spec=importlib.util.spec_from_file_location('assistant_ws',path)
@@ -253,6 +352,16 @@ class AssistantManagementTests(unittest.TestCase):
         self.assertIn('已新建',receive('确认','ws-confirm').args[1])
         self.assertIsNone(receive('确认','ws-confirm'))
         self.assertEqual(self.c.execute("SELECT count(*) FROM org_department WHERE name='长连接部门'").fetchone()[0],1)
+
+    def test_websocket_continues_incomplete_task_owner_change_without_remote_calls(self):
+        tid=self.task(id=15)
+        spec=importlib.util.spec_from_file_location('assistant_dialogue_ws',Path(app.__file__).parent/'scripts/feishu-long-connection.py')
+        ws=importlib.util.module_from_spec(spec);spec.loader.exec_module(ws)
+        for index,text in enumerate(['修改任务15的责任人','#15','部门管理PM','确认']):
+            raw={'header':{'event_id':'dialogue-ws-'+str(index)},'event':{'sender':{'sender_id':{'open_id':'assistant-manager'}},'message':{'message_type':'text','content':json.dumps({'text':text})}}}
+            with patch.object(ws.lark.JSON,'marshal',return_value=json.dumps(raw)),patch.object(app.FeishuAdapter,'send_text') as send:
+                ws.receive(object());self.assertIn('请提供新的责任人' if index<2 else ('回复“确认”' if index==2 else '责任人已变更'),send.call_args.args[1])
+            self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member if index<3 else self.pm)
 
 
 if __name__=='__main__':unittest.main()
