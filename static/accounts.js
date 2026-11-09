@@ -5,7 +5,26 @@
   document.head.append(style);
   const page=document.createElement('section');page.id='profilePage';page.className='hidden';page.innerHTML=`<main><section class="card"><h2>个人中心</h2><p class="muted">管理自己的账号密码与飞书绑定。</p><div id="profileContent"></div><p id="profileStatus" class="account-status" role="status"></p></section></main>`;document.body.append(page);
   const reset=document.createElement('dialog');reset.id='passwordResetDialog';reset.innerHTML=`<form id="passwordResetForm"><h3>重置员工密码</h3><p id="resetEmployee" class="muted"></p><input id="resetUserId" type="hidden"><label for="resetNewPassword">新密码</label><input id="resetNewPassword" type="password" autocomplete="new-password" minlength="6" maxlength="128" required><label for="resetConfirmPassword">再次输入新密码</label><input id="resetConfirmPassword" type="password" autocomplete="new-password" minlength="6" maxlength="128" required><p class="muted">重置后，该员工原有登录会话会失效。</p><p id="resetStatus" class="account-status" role="status"></p><div class="task-actions"><button id="resetSubmit" type="submit">确认重置</button><button class="secondary" type="button" id="resetCancel">取消</button></div></form>`;document.body.append(reset);
-  const managed=()=>{const actor=sessionUser||(demoAllowed?currentUsers.find(u=>Number(u.id)===Number(currentActorId())):null);return actor&&['manager','pm'].includes(actor.role);};
+  const managed=()=>{const id=sessionUser?.id||(demoAllowed?currentActorId():null),actor=currentUsers.find(u=>Number(u.id)===Number(id));return !!actor&&['manager','pm'].includes(actor.role);};
+  style.textContent+='#orgPosition[data-roster-readonly] .task-actions{display:none!important}';
+  const rosterPanel=$('#orgPosition'),rosterHint=document.createElement('p');
+  rosterHint.id='rosterPermissionHint';rosterHint.className='muted';rosterHint.textContent='岗位和成员资料仅部门负责人和管理 PM 可维护，当前为只读查看。';rosterPanel.querySelector('h2').after(rosterHint);
+  function refreshRosterAccess(){
+    const allowed=managed();rosterPanel.toggleAttribute('data-roster-readonly',!allowed);rosterHint.hidden=allowed;
+    for(const name of ['openPositionDialog','openMemberDialog'])rosterPanel.querySelector('[onclick="'+name+'()"]')?.toggleAttribute('disabled',!allowed);
+    if(!allowed)for(const id of ['positionDialog','memberDialog','reportingLineDialog','passwordResetDialog'])$('#'+id)?.close();
+  }
+  for(const name of ['openPositionDialog','editPosition','deletePosition','openMemberDialog','editMember','deleteMember','openReportingLineDialog','editReportingLine','deleteReportingLine']){
+    const original=window[name];if(original)window[name]=function(...args){if(!managed())return;return original.apply(this,args);};
+  }
+  for(const id of ['positionForm','memberForm','userPositionForm'])$('#'+id)?.addEventListener('submit',event=>{
+    if(!managed()){event.preventDefault();event.stopImmediatePropagation();refreshRosterAccess();}
+  },true);
+  const rosterWrite=url=>url==='/api/users'||url.startsWith('/api/users/')||
+    ['/api/org/positions','/api/org/user-positions','/api/reporting-lines'].includes(url)||
+    url.startsWith('/api/org/positions/')||url.startsWith('/api/reporting-lines/');
+  const postWithRosterIdentity=window.post;
+  window.post=(url,payload)=>postWithRosterIdentity(url,rosterWrite(url)?{...payload,actor_id:sessionUser?.id||currentActorId()}:payload);
   function status(selector,text,error=false){$(selector).textContent=text;$(selector).className='account-status'+(error?' account-error':'');}
   async function api(path,body){const response=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{cache:'no-store'}),value=await response.json();if(!response.ok){const error=new Error(value.error||'操作失败');error.status=response.status;throw error;}return value;}
   const bindingMessages={success:'飞书绑定成功，今后可以直接扫码登录。',already_bound:'该飞书账号已绑定其他员工，请使用本人飞书账号。',different_account:'当前已绑定另一个飞书账号，如需变更请联系负责人或管理 PM。',authorization_failed:'飞书授权未完成，请重新扫码。',cancelled:'已取消飞书绑定。',not_configured:'飞书网页登录尚未完成回调配置。'};
@@ -35,15 +54,15 @@
   const baseRender=window.renderOrgRosterEditable;
   window.renderOrgRosterEditable=async function(...args){
     await baseRender(...args);
+    refreshRosterAccess();
     document.querySelectorAll('#userPositions .account-details,#userPositions [data-reset-user]').forEach(node=>node.remove());
     for(const button of document.querySelectorAll('#userPositions [onclick^="editMember("]')){
       const id=Number(button.getAttribute('onclick').match(/\d+/)?.[0]),u=currentUsers.find(u=>Number(u.id)===id),row=button.closest('.org-info-row');if(!u||!row)continue;
       const details=document.createElement('div');details.className='account-details';details.textContent=u.username?'账号：'+u.username:'账号：未配置';row.querySelector('.task-actions').before(details);
       if(managed()){
         const action=document.createElement('button');action.type='button';action.className='secondary';action.textContent='重置密码';action.dataset.resetUser=id;action.disabled=!u.username;action.onclick=()=>openReset(id);row.querySelector('.task-actions').append(action);
-      }else row.querySelector('.task-actions').hidden=true;
+      }
     }
-    document.querySelector('#orgPosition [onclick="openMemberDialog()"]')?.toggleAttribute('disabled',!managed());
   };
   function openReset(id){if(!managed())return;const user=currentUsers.find(u=>Number(u.id)===id);$('#passwordResetForm').reset();$('#resetUserId').value=id;$('#resetEmployee').textContent=`${user.name} · ${user.username}`;status('#resetStatus','');reset.showModal();$('#resetNewPassword').focus();}
   $('#resetCancel').onclick=()=>reset.close();
@@ -54,6 +73,9 @@
   let routed=false;
   function routeProfile(){if(!routed&&new URLSearchParams(location.search).get('page')==='profile'){routed=true;openPersonalCenter();}}
   window.addEventListener('wmt:bootstrapped',routeProfile);
+  window.addEventListener('wmt:bootstrapped',refreshRosterAccess);
+  window.addEventListener('wmt:identity-changed',refreshRosterAccess);
   if(typeof sessionUser!=='undefined'&&sessionUser)setTimeout(routeProfile,0);
-  api('/api/session').then(state=>{demoAllowed=state.monthly_demo;}).catch(()=>{});
+  api('/api/session').then(state=>{demoAllowed=state.monthly_demo;refreshRosterAccess();}).catch(()=>{});
+  refreshRosterAccess();
 })();

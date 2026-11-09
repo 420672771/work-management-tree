@@ -508,6 +508,10 @@ class WorkTreeTests(unittest.TestCase):
         base=f'http://127.0.0.1:{server.server_port}'
         try:
             def call(path, body=None):
+                if body is not None and (path=='/api/users' or path.startswith('/api/users/') or
+                    path in ('/api/org/positions','/api/org/user-positions','/api/reporting-lines') or
+                    path.startswith(('/api/org/positions/','/api/reporting-lines/'))):
+                    body={'actor_id':manager['id'],**body}
                 data=None if body is None else json.dumps(body).encode()
                 request=Request(base+path,data=data,headers={'Content-Type':'application/json'} if data else {})
                 with urlopen(request,timeout=5) as response:

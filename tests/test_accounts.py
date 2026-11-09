@@ -115,6 +115,80 @@ class AccountTests(unittest.TestCase):
             self.assertEqual(self.request('/api/users/'+str(created['id'])+'/password-reset',{'new_password':'NewDemo2026!','actor_id':self.manager})[0],200)
             self.login('demo.account','NewDemo2026!')
 
+    def test_roster_employee_and_team_leader_cannot_write_or_forge_management_identity(self):
+        member=self.login('member.test','StaffTest2026!')
+        c=app.db()
+        position=c.execute("INSERT INTO org_position(name) VALUES('Builder Team leader')").lastrowid
+        c.execute('INSERT INTO user_position(user_id,position_id) VALUES(?,?)',(self.member,position))
+        line=c.execute('SELECT id FROM reporting_line WHERE user_id=? AND effective_to IS NULL',(self.member,)).fetchone()[0]
+        c.commit()
+        tables=('user','user_account','org_position','user_position','reporting_line','feishu_binding_history','audit_log')
+        before={table:[tuple(row) for row in c.execute('SELECT * FROM '+table+' ORDER BY 1')] for table in tables}
+        writes=[
+            ('/api/users',{'name':'越权新增','role':'manager'}),
+            (f'/api/users/{self.member}/manage',{'action':'update','name':'越权改名','role':'manager'}),
+            (f'/api/users/{self.member}/manage',{'action':'delete'}),
+            ('/api/org/positions',{'name':'越权新增岗位'}),
+            (f'/api/org/positions/{position}',{'action':'update','name':'越权岗位'}),
+            (f'/api/org/positions/{position}',{'action':'delete'}),
+            ('/api/org/user-positions',{'user_id':self.member,'position_id':position,'is_primary':True}),
+            (f'/api/users/{self.member}/reporting-line',{'direct_leader_id':self.pm}),
+            (f'/api/users/{self.member}/reporting-line',{'direct_leader_id':None}),
+            ('/api/reporting-lines',{'user_id':self.member,'direct_leader_id':self.pm}),
+            (f'/api/reporting-lines/{line}',{'action':'update','user_id':self.member,'direct_leader_id':self.pm}),
+            (f'/api/reporting-lines/{line}',{'action':'delete'}),
+            (f'/api/users/{self.member}/feishu-open-id',{'feishu_open_id':'ou_forbidden'}),
+            (f'/api/users/{self.member}/feishu-open-id/unbind',{}),
+        ]
+        for path,body in writes:
+            for identity in ({},{'actor_id':self.manager,'operator_id':self.manager,'user_id':self.manager}):
+                with self.subTest(path=path,body=body,forged=bool(identity)):
+                    status,result,_=self.request(path,{**body,**identity},member)
+                    self.assertEqual(status,403);self.assertIn('仅部门负责人和管理 PM',result['error'])
+        for table in tables:self.assertEqual(before[table],[tuple(row) for row in c.execute('SELECT * FROM '+table+' ORDER BY 1')],table)
+        c.close()
+        for path in ('/api/users','/api/org/positions','/api/org/user-positions','/api/reporting-lines'):
+            self.assertEqual(self.request(path,jar=member)[0],200)
+        self.assertEqual(self.request('/api/org/positions',{'name':'未登录新增'})[0],401)
+
+    def test_roster_manager_and_pm_can_create_update_assign_and_delete(self):
+        c=app.db();accounts.configure(c,self.pm,'pm.test','PmTest2026!',self.manager);c.commit();c.close()
+        for name,password in (('admin.test','AdminTest2026!'),('pm.test','PmTest2026!')):
+            jar=self.login(name,password)
+            with self.subTest(actor=name):
+                status,position,_=self.request('/api/org/positions',{'name':'授权维护岗位'},jar);self.assertEqual(status,200);pid=position['id']
+                self.assertEqual(self.request(f'/api/org/positions/{pid}',{'action':'update','name':'已修改岗位','level':'P6'},jar)[0],200)
+                status,user,_=self.request('/api/users',{'name':'授权维护成员','role':'member'},jar);self.assertEqual(status,200);uid=user['id']
+                self.assertEqual(self.request(f'/api/users/{uid}/manage',{'action':'update','name':'已修改成员','role':'member'},jar)[0],200)
+                self.assertEqual(self.request('/api/org/user-positions',{'user_id':uid,'position_id':pid},jar)[0],200)
+                self.assertEqual(self.request(f'/api/users/{uid}/reporting-line',{'direct_leader_id':self.manager},jar)[0],200)
+                self.assertEqual(self.request(f'/api/users/{uid}/reporting-line',{'direct_leader_id':None},jar)[0],200)
+                status,line,_=self.request('/api/reporting-lines',{'user_id':uid,'direct_leader_id':self.manager},jar);self.assertEqual(status,200)
+                status,updated,_=self.request('/api/reporting-lines/'+str(line['id']),{'action':'update','user_id':uid,'direct_leader_id':self.manager},jar);self.assertEqual(status,200)
+                self.assertEqual(self.request('/api/reporting-lines/'+str(updated['id']),{'action':'delete'},jar)[0],200)
+                self.assertEqual(self.request(f'/api/org/positions/{pid}',{'action':'delete'},jar)[0],200)
+                self.assertEqual(self.request(f'/api/users/{uid}/manage',{'action':'delete'},jar)[0],200)
+                c=app.db();self.assertIsNone(c.execute('SELECT id FROM user WHERE id=?',(uid,)).fetchone())
+                self.assertEqual(c.execute('SELECT status FROM org_position WHERE id=?',(pid,)).fetchone()[0],'inactive');c.close()
+
+    def test_roster_demo_has_no_unidentified_write_and_authenticated_identity_wins(self):
+        member=self.login('member.test','StaffTest2026!')
+        with patch.dict(os.environ,{'WMT_AUTH_MODE':'demo','WMT_MONTHLY_DEMO':'1'}):
+            for actor in (None,self.member):
+                body={'name':'越权岗位'}
+                if actor:body['actor_id']=actor
+                self.assertEqual(self.request('/api/org/positions',body)[0],403)
+                self.assertEqual(self.request('/api/users',{**body,'role':'member'})[0],403)
+            self.assertEqual(self.request('/api/org/positions',{'name':'伪造管理身份','actor_id':self.manager},member)[0],403)
+            self.assertEqual(self.request('/api/org/positions',{'name':'演示管理者岗位','actor_id':self.manager})[0],200)
+            self.assertEqual(self.request('/api/users',{'name':'演示 PM 成员','role':'member','actor_id':self.pm})[0],200)
+
+    def test_roster_role_revocation_applies_to_an_existing_login_session(self):
+        manager=self.login()
+        c=app.db();c.execute("UPDATE user SET role='member' WHERE id=?",(self.manager,));c.commit();c.close()
+        self.assertEqual(self.request('/api/org/positions',{'name':'旧管理者不能新增','actor_id':self.pm},manager)[0],403)
+        self.assertEqual(self.request('/api/users',{'name':'旧管理者不能新增','role':'member'},manager)[0],403)
+
     def test_bind_then_feishu_login_and_replayed_callback_rejected(self):
         member=self.login('member.test','StaffTest2026!');callback=self.oauth(member,bind=True)
         with patch.object(app.FeishuAdapter,'exchange_login_code',return_value={'access_token':'test-token'}),patch.object(app.FeishuAdapter,'login_open_id',return_value='ou_test_bound'):

@@ -2358,6 +2358,11 @@ class Handler(BaseHTTPRequestHandler):
             c.close(); return self.json(400,{'error':str(exc) or '请求格式不正确'})
         t=now(); response_code=200
         try:
+            roster_actor=None
+            if (p.path=='/api/users' or p.path.startswith('/api/users/') or
+                p.path in ('/api/org/positions','/api/org/user-positions','/api/reporting-lines') or
+                p.path.startswith(('/api/org/positions/','/api/reporting-lines/'))):
+                roster_actor=self.management_user(c,b,message='仅部门负责人和管理 PM 可新增、修改或删除岗位和成员资料')
             if p.path=='/api/task/input/extract':
                 if not files: return self.json(400,{'error':'请选择要识别的文件'})
                 upload=files[0]
@@ -2384,7 +2389,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not b.get('name'): return self.json(400,{'error':'name is required'})
                 oid=c.execute('INSERT INTO org_node(parent_id,node_type,name,boundary,owner_id,effective_at,created_at) VALUES(?,?,?,?,?,?,?)',(b.get('parent_id'),b.get('node_type','domain'),b['name'],b.get('boundary',''),b.get('owner_id'),t,t)).lastrowid; audit(c,'org_node',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/users':
-                account_actor=self.management_user(c,b) if getattr(self,'authenticated_user_id',None) or b.get('username') or b.get('password') else None
+                account_actor=roster_actor
                 required=['name']; missing=[x for x in required if not b.get(x)]
                 if missing: return self.json(400,{'error':'missing fields','fields':missing})
                 if b.get('role','member') not in ('manager','pm','member'): return self.json(400,{'error':'invalid role'})
@@ -2394,7 +2399,7 @@ class Handler(BaseHTTPRequestHandler):
                 if b.get('username') or b.get('password'):accounts.configure(c,oid,b.get('username'),b.get('password'),account_actor)
                 audit(c,'user',oid,'create',str(account_actor or 'local'),after={k:v for k,v in b.items() if 'password' not in k.lower()}); c.commit(); out={'id':oid}
             elif p.path.startswith('/api/users/') and p.path.endswith('/manage'):
-                account_actor=self.management_user(c,b) if getattr(self,'authenticated_user_id',None) or b.get('username') or b.get('password') else None
+                account_actor=roster_actor
                 uid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM user WHERE id=?',(uid,)).fetchone()
                 if not old: return self.json(404,{'error':'user not found'})
                 old_account=accounts.metadata(c,uid)
@@ -2426,7 +2431,6 @@ class Handler(BaseHTTPRequestHandler):
                     oid=c.execute('INSERT INTO reporting_line(user_id,direct_leader_id,approver_id,dotted_leader_id,effective_from) VALUES(?,?,?,?,?)',(uid,leader_id,leader_id,None,t)).lastrowid
                     audit(c,'reporting_line',oid,'set_from_member','local',before=rowdict(old) if old else None,after={'user_id':uid,'direct_leader_id':leader_id}); c.commit(); out={'id':oid,'status':'updated'}
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id/unbind'):
-                if getattr(self,'authenticated_user_id',None):self.management_user(c,b)
                 uid=int(p.path.split('/')[3])
                 user=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(uid,)).fetchone()
                 if not user: return self.json(404,{'error':'user not found'})
@@ -2437,7 +2441,6 @@ class Handler(BaseHTTPRequestHandler):
                 audit(c,'user',uid,'unbind_feishu','local',before={'bound':True},after={'bound':False})
                 c.commit(); out={'id':uid,'status':'unbound'}
             elif p.path.startswith('/api/users/') and p.path.endswith('/feishu-open-id'):
-                if getattr(self,'authenticated_user_id',None):self.management_user(c,b)
                 uid=int(p.path.split('/')[3])
                 if not b.get('feishu_open_id'): return self.json(400,{'error':'feishu_open_id is required'})
                 open_id=b['feishu_open_id'].strip()
