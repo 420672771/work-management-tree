@@ -61,9 +61,9 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
     #weeklyPage .weekly-items .weekly-item{min-width:0;margin:0;padding:14px 16px}
     #weeklyPage .weekly-item h4{line-height:1.5;margin-bottom:6px}
     #weeklyPage .weekly-item p{margin-top:6px;line-height:1.65}
-    #weeklyPage .weekly-domain-group{min-width:0}
+    #weeklyPage .weekly-domain-group{min-width:0;grid-column:1/-1}
     #weeklyPage .weekly-domain-group>h4{margin:0 0 10px;font-size:14px;color:#315a92}
-    #weeklyPage .weekly-domain-items{display:grid;gap:12px}
+    #weeklyPage .weekly-domain-items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}
     #weeklyPage .weekly-report-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:12px 0 20px}
     #weeklyPage .weekly-report-meta .tag{margin:0}
     #weeklyPage .weekly-report-meta>.weekly-meta{white-space:normal}
@@ -75,8 +75,8 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
     #weeklyPage .weekly-more{position:relative;color:#63738b}#weeklyPage .weekly-more summary{cursor:pointer;padding:8px}#weeklyPage .weekly-more[open]{flex-basis:100%}#weeklyPage .weekly-actions [hidden]{display:none!important}
     #weeklyPage .weekly-order{flex-wrap:wrap;margin-top:10px}
     #weeklyPage .weekly-item label{display:block;margin-top:10px;font-size:13px;color:#63738b}
-    @media(max-width:960px){#weeklyPage .weekly-items{grid-template-columns:minmax(0,1fr)}}
-    @media print{#weeklyPage .weekly-items{grid-template-columns:minmax(0,1fr)}#weeklyPage .weekly-item{break-inside:avoid}}
+    @media(max-width:960px){#weeklyPage .weekly-items,#weeklyPage .weekly-domain-items{grid-template-columns:minmax(0,1fr)}}
+    @media print{#weeklyPage .weekly-items,#weeklyPage .weekly-domain-items{grid-template-columns:minmax(0,1fr)}#weeklyPage .weekly-item{break-inside:avoid}}
   `;
   document.head.append(style);
   const nav = $('.nav-tabs');
