@@ -69,7 +69,7 @@
     const result=document.querySelector('#draftResult');
     const aiSection=document.createElement('section'); aiSection.className='ai-assist-section';
     const inputWrap=document.createElement('div'); inputWrap.className='ai-input-wrap'; if(text) inputWrap.append(text);
-    if(upload){upload.className='draft-attachment-button';upload.innerHTML='&#128206;';upload.title='支持 Word、PDF、图片识别';inputWrap.append(upload)}
+    if(upload){upload.className='draft-attachment-button';upload.innerHTML='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 11-8.5 8.5a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 0 1-2.8-2.8l8.3-8.3"/></svg>';upload.title='支持 Word、PDF、图片识别';upload.setAttribute('aria-label','添加附件材料');inputWrap.append(upload)}
     if(picker) inputWrap.append(picker);
     aiSection.innerHTML='<div class="ai-assist-heading"><h3>AI 辅助建单</h3><p>输入会议纪要或上传材料，系统提炼明确待办并生成可确认的任务草稿。</p></div>';
     aiSection.append(inputWrap); if(generate) aiSection.append(generate); if(fileStatus){fileStatus.hidden=true;aiSection.append(fileStatus)} if(result) aiSection.append(result);

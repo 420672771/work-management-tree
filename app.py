@@ -2197,18 +2197,11 @@ class Handler(BaseHTTPRequestHandler):
             data=(ROOT/'static'/'pending-approval-manage.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if p.path=='/static/layout-guard.js':
             data=(ROOT/'static'/'layout-guard.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','application/javascript; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
-        manual_assets={
-            '/static/manual-assets/task-lifecycle.svg':'task-lifecycle.svg',
-            '/static/manual-assets/home-guide.svg':'home-guide.svg',
-            '/static/manual-assets/ai-draft-flow.svg':'ai-draft-flow.svg',
-            '/static/manual-assets/manual-task-create.svg':'manual-task-create.svg',
-            '/static/manual-assets/draft-review.svg':'draft-review.svg',
-            '/static/manual-assets/confirmation-guide.svg':'confirmation-guide.svg',
-            '/static/manual-assets/feishu-guide.svg':'feishu-guide.svg',
-            '/static/manual-assets/feedback-guide.svg':'feedback-guide.svg',
-        }
-        if p.path in manual_assets:
-            data=(ROOT/'static'/'manual-assets'/manual_assets[p.path]).read_bytes(); self.send_response(200); self.send_header('Content-Type','image/svg+xml'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if re.fullmatch(r'/static/manual-assets/[a-z0-9][a-z0-9-]*\.(?:svg|png)',p.path):
+            asset=ROOT/'static'/'manual-assets'/p.path.rsplit('/',1)[1]
+            if not asset.is_file():return self.json(404,{'error':'手册图片不存在'})
+            content_type='image/png' if asset.suffix=='.png' else 'image/svg+xml'
+            return self.send_bytes(200,content_type,asset.read_bytes(),'no-cache')
         if p.path=='/' or p.path=='/index.html':
             if not login_required() and not self.require_auth(): return
             data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-people"></script><script defer src="/static/responsibility-domains.js?v=20261106-1"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261106-domains"></script><script defer src="/static/layout-guard.js?v=20261106-domains"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')

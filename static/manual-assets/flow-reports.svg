@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="574" viewBox="0 0 1120 574" role="img" aria-labelledby="title desc">
+<title id="title">周报与月报：编辑、保存、固定版本</title><desc id="desc">编辑后先确认“已自动保存”，再发布或归档；两类报表的处理人不同。。保存失败或版本冲突时保留输入并先处理提示；管理者查看他人月报时只读，不能替本人编辑。</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#5577ac" stroke-width="2"/></marker></defs>
+<rect width="1120" height="574" rx="18" fill="#f3f7fe"/>
+<g font-family="Microsoft YaHei,Noto Sans CJK SC,sans-serif">
+<text x="32" y="44" font-size="25" font-weight="700" fill="#17385e">周报与月报：编辑、保存、固定版本</text>
+<text x="32" y="76" font-size="16" fill="#536b89">编辑后先确认“已自动保存”，再发布或归档；两类报表的处理人不同。</text>
+<text x="34" y="124" font-size="17" font-weight="700" fill="#285ca2">部门周报：PM 整理，部门负责人发布</text>
+<rect x="32.0" y="140" width="241.5" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="55.0" cy="166" r="13" fill="#2b65c5"/><text x="55.0" y="171" text-anchor="middle" font-size="15" fill="#fff">1</text>
+<text x="77.0" y="172" font-size="19" font-weight="700" fill="#17385e">打开本周</text>
+<text x="49.0" y="202" font-size="16" fill="#4d6481">核对周期和任务快照</text>
+<text x="49.0" y="225" font-size="16" fill="#4d6481">缺少时自动补生成草稿</text>
+<path d="M276.5 194H298.5" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="303.5" y="140" width="241.5" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="326.5" cy="166" r="13" fill="#2b65c5"/><text x="326.5" y="171" text-anchor="middle" font-size="15" fill="#fff">2</text>
+<text x="348.5" y="172" font-size="19" font-weight="700" fill="#17385e">编辑并等保存</text>
+<text x="320.5" y="202" font-size="16" fill="#4d6481">补充摘要、总结和说明</text>
+<text x="320.5" y="225" font-size="16" fill="#4d6481">任务变化可更新任务数据</text>
+<path d="M548.0 194H570.0" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="575.0" y="140" width="241.5" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="598.0" cy="166" r="13" fill="#2b65c5"/><text x="598.0" y="171" text-anchor="middle" font-size="15" fill="#fff">3</text>
+<text x="620.0" y="172" font-size="19" font-weight="700" fill="#17385e">发布周报</text>
+<text x="592.0" y="202" font-size="16" fill="#4d6481">负责人点击发布</text>
+<text x="592.0" y="225" font-size="16" fill="#4d6481">发布版本只读</text>
+<path d="M819.5 194H841.5" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="846.5" y="140" width="241.5" height="108" rx="12" fill="#e9f6ef" stroke="#bfd0e8"/>
+<circle cx="869.5" cy="166" r="13" fill="#2b65c5"/><text x="869.5" y="171" text-anchor="middle" font-size="15" fill="#fff">4</text>
+<text x="891.5" y="172" font-size="19" font-weight="700" fill="#17385e">需要修改</text>
+<text x="863.5" y="202" font-size="16" fill="#4d6481">负责人点击“修订”</text>
+<text x="863.5" y="225" font-size="16" fill="#4d6481">形成修订稿后重新发布</text>
+<text x="34" y="300" font-size="17" font-weight="700" fill="#285ca2">个人月报：本人生成、编辑与归档</text>
+<rect x="32.0" y="316" width="241.5" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="55.0" cy="342" r="13" fill="#2b65c5"/><text x="55.0" y="347" text-anchor="middle" font-size="15" fill="#fff">1</text>
+<text x="77.0" y="348" font-size="19" font-weight="700" fill="#17385e">选择月份</text>
+<text x="49.0" y="378" font-size="16" fill="#4d6481">生成 / 打开我的月报</text>
+<text x="49.0" y="401" font-size="16" fill="#4d6481">只生成本人报告</text>
+<path d="M276.5 370H298.5" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="303.5" y="316" width="241.5" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="326.5" cy="342" r="13" fill="#2b65c5"/><text x="326.5" y="347" text-anchor="middle" font-size="15" fill="#fff">2</text>
+<text x="348.5" y="348" font-size="19" font-weight="700" fill="#17385e">编辑节点</text>
+<text x="320.5" y="378" font-size="16" fill="#4d6481">新增、删除和上下移动</text>
+<text x="320.5" y="401" font-size="16" fill="#4d6481">输入后等待自动保存</text>
+<path d="M548.0 370H570.0" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="575.0" y="316" width="241.5" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="598.0" cy="342" r="13" fill="#2b65c5"/><text x="598.0" y="347" text-anchor="middle" font-size="15" fill="#fff">3</text>
+<text x="620.0" y="348" font-size="19" font-weight="700" fill="#17385e">归档月报</text>
+<text x="592.0" y="378" font-size="16" fill="#4d6481">本人核对后归档</text>
+<text x="592.0" y="401" font-size="16" fill="#4d6481">归档版本只读</text>
+<path d="M819.5 370H841.5" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="846.5" y="316" width="241.5" height="108" rx="12" fill="#e9f6ef" stroke="#bfd0e8"/>
+<circle cx="869.5" cy="342" r="13" fill="#2b65c5"/><text x="869.5" y="347" text-anchor="middle" font-size="15" fill="#fff">4</text>
+<text x="891.5" y="348" font-size="19" font-weight="700" fill="#17385e">需要修改</text>
+<text x="863.5" y="378" font-size="16" fill="#4d6481">点击“新建修订稿”</text>
+<text x="863.5" y="401" font-size="16" fill="#4d6481">修改后再次归档</text>
+<rect x="32" y="506" width="1056" height="43" rx="8" fill="#fff6e6"/>
+<text x="48" y="534" font-size="16" fill="#805619">保存失败或版本冲突时保留输入并先处理提示；管理者查看他人月报时只读，不能替本人编辑。</text></g></svg>

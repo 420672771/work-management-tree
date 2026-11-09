@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="574" viewBox="0 0 1120 574" role="img" aria-labelledby="title desc">
+<title id="title">从创建到交付：谁来处理下一步</title><desc id="desc">责任人负责执行；指定确认人负责确认安排和验收结果。。每周例行任务的 100% 进度确认后仍需验收；其他任务的 100% 进度完成规则见正文。</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#5577ac" stroke-width="2"/></marker></defs>
+<rect width="1120" height="574" rx="18" fill="#f3f7fe"/>
+<g font-family="Microsoft YaHei,Noto Sans CJK SC,sans-serif">
+<text x="32" y="44" font-size="25" font-weight="700" fill="#17385e">从创建到交付：谁来处理下一步</text>
+<text x="32" y="76" font-size="16" fill="#536b89">责任人负责执行；指定确认人负责确认安排和验收结果。</text>
+<text x="34" y="124" font-size="17" font-weight="700" fill="#285ca2">安排工作</text>
+<rect x="32.0" y="140" width="332.0" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="55.0" cy="166" r="13" fill="#2b65c5"/><text x="55.0" y="171" text-anchor="middle" font-size="15" fill="#fff">1</text>
+<text x="77.0" y="172" font-size="19" font-weight="700" fill="#17385e">创建任务</text>
+<text x="49.0" y="202" font-size="16" fill="#4d6481">填写责任域、责任人</text>
+<text x="49.0" y="225" font-size="16" fill="#4d6481">截止日期与交付要求</text>
+<path d="M367.0 194H389.0" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="394.0" y="140" width="332.0" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="417.0" cy="166" r="13" fill="#2b65c5"/><text x="417.0" y="171" text-anchor="middle" font-size="15" fill="#fff">2</text>
+<text x="439.0" y="172" font-size="19" font-weight="700" fill="#17385e">确认安排</text>
+<text x="411.0" y="202" font-size="16" fill="#4d6481">指定确认人核对</text>
+<text x="411.0" y="225" font-size="16" fill="#4d6481">驳回则补充后重新提交</text>
+<path d="M729.0 194H751.0" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="756.0" y="140" width="332.0" height="108" rx="12" fill="#e9f6ef" stroke="#bfd0e8"/>
+<circle cx="779.0" cy="166" r="13" fill="#2b65c5"/><text x="779.0" y="171" text-anchor="middle" font-size="15" fill="#fff">3</text>
+<text x="801.0" y="172" font-size="19" font-weight="700" fill="#17385e">开始执行</text>
+<text x="773.0" y="202" font-size="16" fill="#4d6481">责任人点击“开始”</text>
+<text x="773.0" y="225" font-size="16" fill="#4d6481">任务进入“进行中”</text>
+<text x="34" y="300" font-size="17" font-weight="700" fill="#285ca2">交付闭环</text>
+<rect x="32.0" y="316" width="332.0" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="55.0" cy="342" r="13" fill="#2b65c5"/><text x="55.0" y="347" text-anchor="middle" font-size="15" fill="#fff">1</text>
+<text x="77.0" y="348" font-size="19" font-weight="700" fill="#17385e">反馈进展</text>
+<text x="49.0" y="378" font-size="16" fill="#4d6481">比例、说明与阻塞原因</text>
+<text x="49.0" y="401" font-size="16" fill="#4d6481">提交后等待进度确认</text>
+<path d="M367.0 370H389.0" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="394.0" y="316" width="332.0" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
+<circle cx="417.0" cy="342" r="13" fill="#2b65c5"/><text x="417.0" y="347" text-anchor="middle" font-size="15" fill="#fff">2</text>
+<text x="439.0" y="348" font-size="19" font-weight="700" fill="#17385e">提交交付</text>
+<text x="411.0" y="378" font-size="16" fill="#4d6481">补齐交付物或链接</text>
+<text x="411.0" y="401" font-size="16" fill="#4d6481">点击“完成并提交验收”</text>
+<path d="M729.0 370H751.0" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="756.0" y="316" width="332.0" height="108" rx="12" fill="#e9f6ef" stroke="#bfd0e8"/>
+<circle cx="779.0" cy="342" r="13" fill="#2b65c5"/><text x="779.0" y="347" text-anchor="middle" font-size="15" fill="#fff">3</text>
+<text x="801.0" y="348" font-size="19" font-weight="700" fill="#17385e">确认人验收</text>
+<text x="773.0" y="378" font-size="16" fill="#4d6481">通过 → 已完成</text>
+<text x="773.0" y="401" font-size="16" fill="#4d6481">驳回 → 继续处理并重提</text>
+<rect x="32" y="506" width="1056" height="43" rx="8" fill="#fff6e6"/>
+<text x="48" y="534" font-size="16" fill="#805619">每周例行任务的 100% 进度确认后仍需验收；其他任务的 100% 进度完成规则见正文。</text></g></svg>
