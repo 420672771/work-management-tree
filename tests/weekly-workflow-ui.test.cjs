@@ -76,6 +76,20 @@ test('failed autosave keeps the input, blocks publishing, and offers a retry',as
   assert.equal(b.model.editorial.summary,'保存失败也不能丢的内容');assert.equal(b.model.status,'published');
 });
 
+test('legacy weekly tasks render in numeric order without domain groups and retain explicit manual ordering',async()=>{
+  for(const custom of [null,[18,30,2]]){
+    const b=browser();
+    b.model.snapshot.tasks=[30,2,18].map(id=>({id,title:'编号排序 '+id,domain_name:id===2?'Z 责任域':'A 责任域',work_status:'in_progress',priority:'P0'}));
+    b.model.snapshot.sections.achievements=[30,2,18];
+    if(custom)b.model.editorial.orders.achievements=custom;
+    await b.context.openPage('weekly');
+    const html=b.elements.get('weeklyContent').innerHTML;
+    assert(!html.includes('weekly-domain-group'));assert(!html.includes('weekly-domain-items'));
+    assert.deepEqual([...html.matchAll(/<h4>#(\d+) /g)].map(match=>Number(match[1])),custom||[2,18,30]);
+    assert(html.includes('Z 责任域'));
+  }
+});
+
 test('leaving the page waits for autosave instead of asking to discard changes',async()=>{
   const b=browser();await b.context.openPage('weekly');const held=b.hold();b.edit('离开前的输入');
   const leaving=b.context.openPage('tasks');await tick();assert.equal(b.navigation.length,0);

@@ -181,11 +181,12 @@ def build_snapshot(c, start, end, generated_at, owner_id=None):
         tasks.append({k: t.get(k) for k in keys})
     completed = [t for t in tasks if t['completed_this_week']]
     sections = {
-        'achievements': [t['id'] for t in sorted(tasks, key=lambda t: (t['domain_name'], t['priority'], t['id']))
+        'achievements': [t['id'] for t in tasks
                          if (t['priority'] == 'P0' and t['work_status'] != 'completed') or t['completed_this_week']],
         'risks': [t['id'] for t in tasks if t['risk_reasons']],
-        'next_week': [t['id'] for t in sorted(tasks, key=lambda t: (t['priority'], t['due_at'], t['id'])) if t['next_week']],
+        'next_week': [t['id'] for t in tasks if t['next_week']],
     }
+    sections = {key: sorted(ids) for key, ids in sections.items()}
     metrics = {
         'new': [t['id'] for t in tasks if t['new_this_week']],
         'completed': [t['id'] for t in completed],
@@ -194,6 +195,7 @@ def build_snapshot(c, start, end, generated_at, owner_id=None):
         'awaiting_acceptance': [t['id'] for t in tasks if t['work_status'] == 'awaiting_acceptance'],
         'domains': [t['id'] for t in tasks if t['domain_id']],
     }
+    metrics = {key: sorted(ids) for key, ids in metrics.items()}
     hours = {'standard': round(sum(float(t['estimated_hours'] or 0) for t in completed), 1),
              'actual': round(sum(float(t['actual_hours'] or 0) for t in completed), 1)}
     highlights = [t['title'] for t in completed if t['id'] in sections['achievements']][:2]
@@ -393,7 +395,8 @@ def refresh_report(c, report_id, user_id, edit_revision, automatic=False, refres
     editorial['notes'] = {key: value for key, value in editorial.get('notes', {}).items() if key in task_ids}
     editorial['orders'] = {}
     for section, ids in snapshot['sections'].items():
-        old_order = old_editorial.get('orders', {}).get(section, report['snapshot']['sections'][section])
+        old_order = old_editorial.get('orders', {}).get(section)
+        if old_order is None:continue
         kept = [tid for tid in old_order if tid in ids]
         editorial['orders'][section] = kept + [tid for tid in ids if tid not in kept]
     snapshot['change_summary'] = changes
@@ -459,15 +462,11 @@ def meeting_text(report):
     tasks = {t['id']: t for t in s['tasks']}
     for key, title in (('achievements', '二、本周重点工作与成果'), ('risks', '三、任务进展与风险'), ('next_week', '四、下周重点计划')):
         lines += ['', title]
-        ids = e.get('orders', {}).get(key, s['sections'][key])
+        ids = e.get('orders', {}).get(key, sorted(s['sections'][key]))
         if not ids:
             lines.append('暂无符合条件的事项。')
-        last_domain = None
         for task_id in ids:
             t = tasks[task_id]
-            if key == 'achievements' and t['domain_name'] != last_domain:
-                lines.append(t['domain_name'])
-                last_domain = t['domain_name']
             lines.append(f"- #{t['id']} {t['title']}｜{t['owner_name'] or '未知责任人'}｜{t['domain_name']}｜{t['priority']}｜{WORK.get(t['work_status'], t['work_status'])}｜截止 {t['due_at'][:10]}")
             lines.append('  交付物/验收标准：' + (t['deliverable'] or '未填写'))
             if key == 'risks':

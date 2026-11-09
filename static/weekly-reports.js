@@ -61,9 +61,6 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
     #weeklyPage .weekly-items .weekly-item{min-width:0;margin:0;padding:14px 16px}
     #weeklyPage .weekly-item h4{line-height:1.5;margin-bottom:6px}
     #weeklyPage .weekly-item p{margin-top:6px;line-height:1.65}
-    #weeklyPage .weekly-domain-group{min-width:0;grid-column:1/-1}
-    #weeklyPage .weekly-domain-group>h4{margin:0 0 10px;font-size:14px;color:#315a92}
-    #weeklyPage .weekly-domain-items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}
     #weeklyPage .weekly-report-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:12px 0 20px}
     #weeklyPage .weekly-report-meta .tag{margin:0}
     #weeklyPage .weekly-report-meta>.weekly-meta{white-space:normal}
@@ -75,8 +72,8 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
     #weeklyPage .weekly-more{position:relative;color:#63738b}#weeklyPage .weekly-more summary{cursor:pointer;padding:8px}#weeklyPage .weekly-more[open]{flex-basis:100%}#weeklyPage .weekly-actions [hidden]{display:none!important}
     #weeklyPage .weekly-order{flex-wrap:wrap;margin-top:10px}
     #weeklyPage .weekly-item label{display:block;margin-top:10px;font-size:13px;color:#63738b}
-    @media(max-width:960px){#weeklyPage .weekly-items,#weeklyPage .weekly-domain-items{grid-template-columns:minmax(0,1fr)}}
-    @media print{#weeklyPage .weekly-items,#weeklyPage .weekly-domain-items{grid-template-columns:minmax(0,1fr)}#weeklyPage .weekly-item{break-inside:avoid}}
+    @media(max-width:960px){#weeklyPage .weekly-items{grid-template-columns:minmax(0,1fr)}}
+    @media print{#weeklyPage .weekly-items{grid-template-columns:minmax(0,1fr)}#weeklyPage .weekly-item{break-inside:avoid}}
   `;
   document.head.append(style);
   const nav = $('.nav-tabs');
@@ -108,16 +105,10 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
   }
   const editable = () => report && ['pending','reviewing'].includes(report.status);
   const taskMap = () => new Map(report.snapshot.tasks.map(t => [t.id,t]));
-  const ordered = key => report.editorial.orders?.[key] || report.snapshot.sections[key];
+  const ordered = key => report.editorial.orders?.[key] || [...report.snapshot.sections[key]].sort((a,b)=>a-b);
   function sectionCards(key, tasks) {
     const ids=ordered(key);
-    if(key!=='achievements')return ids.map((id,i)=>taskCard(tasks.get(id),key,i,ids.length)).join('');
-    const groups=[];
-    ids.forEach((id,i)=>{const task=tasks.get(id);let group=groups[groups.length-1];
-      if(!group || group.domain!==task.domain_name){group={domain:task.domain_name,cards:[]};groups.push(group);}
-      group.cards.push(taskCard(task,key,i,ids.length));
-    });
-    return groups.map(group=>`<section class="weekly-domain-group"><h4>${escape(group.domain)}</h4><div class="weekly-domain-items">${group.cards.join('')}</div></section>`).join('');
+    return ids.map((id,i)=>taskCard(tasks.get(id),key,i,ids.length)).join('');
   }
   function taskCard(t, section, index, total) {
     return `<article class="weekly-item"><h4>#${t.id} ${escape(t.title)}</h4><p class="weekly-meta">${escape(t.owner_name || '未知责任人')} · ${escape(t.domain_name)} · ${escape(t.priority)} · ${escape(workNames[t.work_status] || t.work_status)} · 截止 ${escape(t.due_at?.slice(0,10))}</p><p>交付物/验收标准：${escape(t.deliverable || '未填写')}</p>${section==='risks' ? `<p>关注原因：${escape(t.risk_reasons.join('；'))}</p><p>风险/最后进展：${escape(t.block_reason || t.latest_progress || '暂无进展记录')}</p><p>建议动作：${escape(t.suggested_action)}</p>` : ''}${section==='achievements' ? (t.completed_at ? `<p class="weekly-meta">完成时间：${escape(displayDate(t.completed_at))}（${escape(t.completion_source)}）</p>` : `<p>最后进展：${escape(t.latest_progress || '暂无进展记录')}</p>`) : ''}${editable() && section ? `<label>补充说明<textarea data-note="${t.id}" maxlength="4000">${escape(report.editorial.notes?.[t.id] || '')}</textarea></label><div class="weekly-order"><button type="button" class="secondary" data-section="${section}" data-index="${index}" data-move="-1" ${index===0?'disabled':''} aria-label="上移 ${escape(t.title)}">上移</button><button type="button" class="secondary" data-section="${section}" data-index="${index}" data-move="1" ${index===total-1?'disabled':''} aria-label="下移 ${escape(t.title)}">下移</button></div>` : report.editorial.notes?.[t.id] ? `<p>补充说明：${escape(report.editorial.notes[t.id])}</p>` : ''}</article>`;
@@ -128,7 +119,7 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
     if (!report) { box.innerHTML = '<p class="muted">正在打开本周周报…</p>'; return; }
     const s=report.snapshot, e=report.editorial, m=s.metrics, tasks=taskMap();
     const numbers=[['new','本周新增任务',m.new],['completed','本周完成任务',m.completed],['in_progress','进行中任务',m.in_progress],['overdue','已逾期任务',m.overdue],['awaiting_acceptance','待验收任务',m.awaiting_acceptance],['hours','完成标准 / 实际工时',`${m.completed_hours.standard}h / ${m.completed_hours.actual}h`],['domains','责任域覆盖',m.domains]];
-    box.innerHTML = `<h2>${escape(s.title)}</h2>${reportMeta(report)}<div class="weekly-editor"><label>本周一句话摘要${editable()?`<textarea data-editorial="summary" maxlength="10000">${escape(e.summary ?? s.summary)}</textarea>`:`<p class="weekly-summary">${escape(e.summary ?? s.summary)}</p>`}</label></div><div class="weekly-metrics">${numbers.map(([key,label,value])=>`<button type="button" class="weekly-metric" data-metric="${key}" aria-expanded="false"><b>${escape(value)}</b>${label}</button>`).join('')}</div><div id="weeklyMetricDetails"></div>${[['achievements','本周重点工作与成果'],['risks','任务进展与风险'],['next_week','下周重点计划']].map(([key,title])=>{const ids=ordered(key);return `<section class="weekly-section"><h3>${title}</h3>${key==='achievements' && s.rules.achievements ? `<p class="muted">${escape(s.rules.achievements)}</p>` : ''}${ids.length ? `<div class="weekly-items">${sectionCards(key,tasks)}</div>` : '<p class="muted">暂无符合条件的事项。</p>'}</section>`;}).join('')}<section class="weekly-section weekly-editor"><h3>负责人总结</h3>${[['conclusion','本周管理结论'],['requirements','下周工作要求'],['support','需上级或其他部门支持']].map(([key,label])=>`<label>${label}${editable()?`<textarea data-editorial="${key}" maxlength="10000">${escape(e[key] || '')}</textarea>`:`<p class="weekly-summary">${escape(e[key] || '未补充')}</p>`}</label>`).join('')}</section><p class="muted">重点工作与成果按责任域归类。统计数字及展开任务均来自此版本快照，后续任务修改或删除不会改写本报告。</p>`;
+    box.innerHTML = `<h2>${escape(s.title)}</h2>${reportMeta(report)}<div class="weekly-editor"><label>本周一句话摘要${editable()?`<textarea data-editorial="summary" maxlength="10000">${escape(e.summary ?? s.summary)}</textarea>`:`<p class="weekly-summary">${escape(e.summary ?? s.summary)}</p>`}</label></div><div class="weekly-metrics">${numbers.map(([key,label,value])=>`<button type="button" class="weekly-metric" data-metric="${key}" aria-expanded="false"><b>${escape(value)}</b>${label}</button>`).join('')}</div><div id="weeklyMetricDetails"></div>${[['achievements','本周重点工作与成果'],['risks','任务进展与风险'],['next_week','下周重点计划']].map(([key,title])=>{const ids=ordered(key);return `<section class="weekly-section"><h3>${title}</h3>${key==='achievements' && s.rules.achievements ? `<p class="muted">${escape(s.rules.achievements)}</p>` : ''}${ids.length ? `<div class="weekly-items">${sectionCards(key,tasks)}</div>` : '<p class="muted">暂无符合条件的事项。</p>'}</section>`;}).join('')}<section class="weekly-section weekly-editor"><h3>负责人总结</h3>${[['conclusion','本周管理结论'],['requirements','下周工作要求'],['support','需上级或其他部门支持']].map(([key,label])=>`<label>${label}${editable()?`<textarea data-editorial="${key}" maxlength="10000">${escape(e[key] || '')}</textarea>`:`<p class="weekly-summary">${escape(e[key] || '未补充')}</p>`}</label>`).join('')}</section><p class="muted">任务默认按编号从小到大展示，不再按责任域分组；可用上移、下移调整展示顺序。统计数字及展开任务均来自此版本快照，后续任务修改或删除不会改写本报告。</p>`;
   }
   function saveState(state,error){
     const status=$('#weeklySaveStatus');
@@ -238,7 +229,7 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
   });
   $('#weeklyContent').addEventListener('click',event=>{
     const button=event.target.closest('button');if(!button||!report||busy)return;
-    if(button.dataset.metric){const key=button.dataset.metric,expanded=button.getAttribute('aria-expanded')==='true';document.querySelectorAll('[data-metric]').forEach(b=>b.setAttribute('aria-expanded','false'));$('#weeklyMetricDetails').innerHTML='';if(expanded)return;button.setAttribute('aria-expanded','true');const ids=report.snapshot.metric_tasks[key==='hours'?'completed':key]||[],tasks=taskMap();$('#weeklyMetricDetails').innerHTML=`<h3>${escape(button.textContent)}</h3>${ids.length?`<div class="weekly-items">${ids.map(id=>taskCard(tasks.get(id),'',0,0)).join('')}</div>`:'<p class="muted">暂无对应任务。</p>'}`;}
+    if(button.dataset.metric){const key=button.dataset.metric,expanded=button.getAttribute('aria-expanded')==='true';document.querySelectorAll('[data-metric]').forEach(b=>b.setAttribute('aria-expanded','false'));$('#weeklyMetricDetails').innerHTML='';if(expanded)return;button.setAttribute('aria-expanded','true');const ids=[...(report.snapshot.metric_tasks[key==='hours'?'completed':key]||[])].sort((a,b)=>a-b),tasks=taskMap();$('#weeklyMetricDetails').innerHTML=`<h3>${escape(button.textContent)}</h3>${ids.length?`<div class="weekly-items">${ids.map(id=>taskCard(tasks.get(id),'',0,0)).join('')}</div>`:'<p class="muted">暂无对应任务。</p>'}`;}
     if(button.dataset.move&&editable()){const key=button.dataset.section,ids=[...ordered(key)],i=Number(button.dataset.index),to=i+Number(button.dataset.move);if(to<0||to>=ids.length)return;[ids[i],ids[to]]=[ids[to],ids[i]];report.editorial.orders||={};report.editorial.orders[key]=ids;autosave.edit();renderReport();}
   });
   async function history(){

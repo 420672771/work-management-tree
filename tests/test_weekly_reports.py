@@ -123,6 +123,40 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertTrue(set(report['snapshot']['sections']['achievements']).isdisjoint(excluded))
         self.assertEqual(report['snapshot']['metrics']['completed'],3)
 
+    def test_default_section_and_metric_orders_use_numeric_task_ids(self):
+        other=self.c.execute("SELECT id FROM org_node WHERE node_type='domain' AND id<>? LIMIT 1",(self.domain,)).fetchone()[0]
+        for tid,node,due in ((30,other,'2026-11-09'),(2,self.domain,'2026-11-12'),(18,other,'2026-11-10')):
+            self.task(id=tid,org_node_id=node,title='编号排序 '+str(tid),priority='P0',work_status='awaiting_acceptance',due_at=due+'T17:00:00+08:00')
+        report=self.generate()
+        for key in ('achievements','risks','next_week'):
+            self.assertEqual(report['snapshot']['sections'][key],[2,18,30],key)
+        for key in ('new','awaiting_acceptance'):
+            self.assertEqual(report['snapshot']['metric_tasks'][key],[2,18,30],key)
+
+    def test_legacy_export_sorts_by_id_without_domain_headings_and_preserves_custom_edits(self):
+        import re
+        for tid in (30,2,18):self.task(id=tid,title='编号排序 '+str(tid),priority='P0')
+        report=self.generate()
+        report['snapshot']['sections']['achievements']=[30,2,18]
+        before=json.loads(json.dumps(report))
+        def ids(value):
+            section=reports.meeting_text(value).split('二、本周重点工作与成果\n')[1].split('\n三、任务进展与风险')[0]
+            return [int(x) for x in re.findall(r'^- #(\d+) ',section,re.M)]
+        self.assertEqual(ids(report),[2,18,30])
+        text=reports.meeting_text(report)
+        for task in report['snapshot']['tasks']:self.assertNotIn('\n'+task['domain_name']+'\n',text)
+        self.assertEqual(report,before)
+        report['editorial']['orders']['achievements']=[18,30,2]
+        report['editorial']['notes']['18']='人工补充仍然保留'
+        self.assertEqual(ids(report),[18,30,2]);self.assertIn('人工补充仍然保留',reports.meeting_text(report))
+
+    def test_refresh_without_manual_sort_keeps_numeric_default_for_new_tasks(self):
+        for tid in (30,18):self.task(id=tid,priority='P0')
+        report=self.generate();self.task(id=5,priority='P0')
+        refreshed=reports.refresh_report(self.c,report['id'],self.manager,0,refreshed_at=self.generated);self.c.commit()
+        self.assertEqual(refreshed['snapshot']['sections']['achievements'],[5,18,30])
+        self.assertEqual(refreshed['editorial']['orders'],{})
+
     def test_risks_next_week_and_weekly_progress(self):
         current = self.task()
         self.c.execute('''INSERT INTO progress_record(task_id,reported_percent,report_text,is_blocked,block_reason,reported_at)
@@ -134,7 +168,7 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertNotIn('本周无进展填报', tasks[current]['risk_reasons'])
         self.assertEqual(tasks[current]['block_reason'], '等待业务数据')
         self.assertIn('本周无进展填报', tasks[no_progress]['risk_reasons'])
-        self.assertEqual(r['snapshot']['sections']['next_week'], [no_progress, current])
+        self.assertEqual(r['snapshot']['sections']['next_week'], [current, no_progress])
         self.assertNotIn(routine, r['snapshot']['sections']['risks'])
 
     def test_manager_publish_pm_edit_and_snapshot_numbers_cannot_change(self):
