@@ -24,6 +24,28 @@ CREATION = re.compile(r'^(?:(?:请|帮我|帮忙|麻烦|给我)\s*)*(?:新建|�
 REQUIRED = ('title','owner_id','due_at')
 
 
+def task_matches(c,title,owner_id,actor_id,api,*,exact_only=False):
+    """Match an intended owner's work, never disclosing inaccessible tasks."""
+    normalized=api.normalized_task_title(title)
+    if not normalized or not owner_id or not actor_id:return []
+    actor=c.execute('SELECT role FROM user WHERE id=?',(actor_id,)).fetchone()
+    manager=bool(actor and actor['role'] in ('manager','pm'))
+    rows=c.execute("SELECT id,title,owner_id,approver_id,approval_status,work_status,effective_percent,due_at FROM task "
+                   "WHERE owner_id=? AND approval_status<>'rejected' AND work_status<>'cancelled' "
+                   "AND (owner_id=? OR approver_id=? OR ?) ORDER BY id DESC",(owner_id,actor_id,actor_id,int(manager))).fetchall()
+    exact=[];similar=[]
+    for row in rows:
+        candidate=api.normalized_task_title(row['title'])
+        if candidate==normalized:exact.append(dict(row));continue
+        if exact_only or min(len(candidate),len(normalized))<4:continue
+        contained=(candidate in normalized or normalized in candidate) and min(len(candidate),len(normalized))/max(len(candidate),len(normalized))>=.4
+        left=api.task_title_tokens(title);right=api.task_title_tokens(row['title']);common=len(left & right)
+        if contained or (common>=3 and common/max(1,min(len(left),len(right)))>=.75):similar.append(dict(row))
+    matches=exact or similar
+    active=[row for row in matches if row['work_status']!='completed']
+    return active or matches
+
+
 def creation_clarification(text):
     return bool(re.fullmatch(r'(?:这|这个|这条|这项|上面|上述|刚才|前面)?(?:说的|发的|提到的)?(?:是|算是|属于|按|作为)?\s*(?:一[个条项])?\s*(?:新增|新建|新的)(?:的)?\s*(?:任务|事项)[。！!]*',text.strip()))
 
@@ -130,27 +152,49 @@ class TaskDialogue:
             'elapsed_ms':int((time.monotonic()-started)*1000),'session':hashlib.sha256(self.session_id.encode()).hexdigest()[:16]})
         return proposal
 
-    def ask_intent(self,text):
-        self.store({'type':'collect_task_intent','material':text})
-        fields=labelled_fields(text);label='《'+fields['title']+'》' if fields.get('title') else '这项工作'
-        return f'我已保留{label}的内容。你希望新建任务，还是更新已有任务的进度或内容？可以回复“这是新增任务”，或“更新任务#编号”。'
+    def ask_intent(self,text,*,title=None,owner_id=None,creation_requested=False):
+        fields=labelled_fields(text);title=title or fields.get('title');owner_id=owner_id or self.user_id
+        if fields.get('owner_name') and fields['owner_name'] not in ('我','本人'):
+            try:owner_id=self.api.assistant_management.lookup(self.c,'user',fields['owner_name'])['id']
+            except (ValueError,LookupError) as exc:return str(exc)+' 请核对责任人。'
+        report=self.api.structured_progress_report(text)
+        if report and not 0<=report['percent']<=100:
+            return self.api.process_structured_progress_report(self.c,text,self.user_id,self.session_id)
+        matches=task_matches(self.c,title,owner_id,self.user_id,self.api)
+        state={'type':'collect_task_intent','material':text,'title':title,'owner_id':owner_id}
+        if not title:
+            self.store({**state,'decision':'identify'})
+            return '请先提供这项工作的任务名称或任务编号，我会先匹配任务清单，再确认后续操作。前面的内容已保留。'
+        if not matches:
+            self.store({**state,'decision':'create'})
+            return f'未在你可操作的任务清单中匹配到《{title}》。是否将它新建为任务？回复“确认新建”，我会沿用前面的内容补全草稿。'
+        if self.draft:self.api.discard_draft(self.c,self.draft['id'],str(self.user_id))
+        state.update(decision='update',mode='progress',candidate_ids=[row['id'] for row in matches])
+        prefix='已存在对应任务，先核对已有任务，避免重复新建。\n' if creation_requested else ''
+        if len(matches)>1:
+            self.store({**state,'decision':'choose'})
+            choices='\n'.join(f'#{row["id"]}《{row["title"]}》（截止{str(row["due_at"])[:10]}）' for row in matches[:8])
+            return prefix+'找到多条同名或相近任务：\n'+choices+'\n请回复任务编号，确认要更新哪项任务的进度。'
+        task=matches[0];state['task_id']=task['id'];self.store(state)
+        if task['work_status']=='completed':return prefix+f'已找到任务#{task["id"]}《{task["title"]}》，该任务已完成，不能继续填报进度。若是新的工作阶段，请提供能区分的任务名称。'
+        if task['approval_status']!='approved':return prefix+f'已找到任务#{task["id"]}《{task["title"]}》，该任务尚待确认生效，请先在网页完成任务确认，无需重复新建。'
+        if task['owner_id']!=self.user_id:return prefix+f'已找到任务#{task["id"]}《{task["title"]}》。进度须由任务责任人填报；如需修改任务资料，请明确说明修改内容。'
+        return prefix+f'已匹配到任务#{task["id"]}《{task["title"]}》，当前有效进度{task["effective_percent"]}%。是否要更新这项任务的进度？回复“确认更新”，或直接补充本次完成比例。'
 
     def store(self,action):
         aid=self.api.save_bot_action(self.c,self.session_id,self.user_id,action)
         self.c.execute("UPDATE bot_pending_action SET status='collecting' WHERE id=?",(aid,))
 
     def clarify(self,text):
-        if self.action.get('type')=='collect_progress_report':
-            return '前面的进度汇报已保留。你是要补充对应任务编号，还是把这项工作新建为任务？请回复“#任务编号”或“这是新增任务”。'
-        if self.action.get('type')=='collect_task_intent':
-            return '前面的事项内容已保留。你希望新建任务，还是更新已有任务？请先明确操作目标；更新时也可提供任务编号。'
-        return self.ask_intent(text)
+        return self.ask_intent(self.material() or text)
 
     def existing_task(self,text):
         """Clarify update type, then reuse the permission-checked business operations."""
         source=self.api.normalize_assistant_text(text)
         tid=self.api.task_number(source) or self.action.get('task_id')
-        state={**self.action,'task_id':tid}
+        state={**self.action,'decision':'update','task_id':tid}
+        if re.search(r'填报|汇报|反馈|进度',source) or re.search(r'-?\d+\s*[%％]',source):state['mode']='progress'
+        elif re.search(r'修改|资料|内容',source):state['mode']='edit'
         if not tid:
             self.store(state);return '你希望更新哪一条已有任务？请回复任务编号，例如“#15”。我会保留前面的事项内容。'
         task=self.c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
@@ -161,15 +205,20 @@ class TaskDialogue:
         elif re.search(r'修改|资料|内容',source):state['mode']='edit'
         material=state.get('material','');report=self.api.structured_progress_report(material)
         if not state.get('mode') and report:state['mode']='progress'
+        state.setdefault('mode','progress')
         if state.get('mode')=='progress':
             if task['owner_id']!=self.user_id:return f'任务#{tid}《{task["title"]}》不是你的责任任务，不能代为填报。'
+            if task['work_status'] in ('completed','cancelled'):
+                return f'任务#{tid}《{task["title"]}》已完成或取消，当前不支持填报进度。'
+            if task['approval_status']!='approved':
+                return f'任务#{tid}《{task["title"]}》尚待确认生效，暂不支持填报进度。'
             value=int(percent[1]) if percent else (report['percent'] if report else None)
             if value is None:
                 self.store(state);return f'已定位任务#{tid}《{task["title"]}》。本次完成比例是多少？例如回复“20%”，前面的情况说明会一并保留。'
             if not 0<=value<=100:
                 self.store(state);return '进度百分比须在0%到100%之间，请重新补充完成比例。'
             fields=labelled_fields(material)
-            report={'title':task['title'],'task_id':tid,'percent':value,'comment':material+'\n'+text,
+            report={'title':task['title'],'task_id':tid,'percent':value,'comment':material+'\n'+text if percent else material,
                     'expected_finish':self.api.parse_due(fields.get('due_at',''))}
             self.store({'type':'collect_progress_report','report':report})
             return self.api.process_structured_progress_report(self.c,'#'+str(tid),self.user_id,self.session_id)
@@ -186,8 +235,7 @@ class TaskDialogue:
             self.api.save_bot_action(self.c,self.session_id,self.user_id,{'type':'update_task','task_id':tid,'changes':changes})
             labels={'description':'任务详情','deliverable':'交付物','priority':'优先级','task_type':'任务类型','due_at':'截止日期'}
             return f'拟修改任务#{tid}《{task["title"]}》：\n'+'\n'.join(labels[key]+'：'+str(value) for key,value in changes.items())+'\n回复“确认”执行，回复“取消”放弃。'
-        self.store(state)
-        return f'已定位任务#{tid}《{task["title"]}》。你要“填报进度”，还是“修改任务资料”？我会沿用前面提供的内容。'
+        return self.ask_intent(material)
 
     def preview(self,slots,missing):
         owner=self.c.execute('SELECT name FROM user WHERE id=?',(slots.get('owner_id'),)).fetchone()
@@ -253,9 +301,17 @@ class TaskDialogue:
                 if key=='owner_name':slots['owner_id']=None
                 elif key=='due_at':slots['due_at']=None
                 errors.append(str(exc))
+        raw=(self.draft['raw_text']+'\n'+text) if self.draft else text
+        if task_matches(self.c,slots.get('title'),slots.get('owner_id'),self.user_id,self.api):
+            return self.ask_intent(raw,title=slots['title'],owner_id=slots['owner_id'],creation_requested=True)
+        if not self.draft and slots.get('title'):
+            for draft in self.c.execute("SELECT * FROM conversation_draft WHERE session_id=? AND user_id=? AND status IN ('collecting','preview') AND expire_at>? ORDER BY id DESC",(self.session_id,self.user_id,self.api.now())):
+                previous=json.loads(draft['slots_json'])
+                if previous.get('owner_id')==slots.get('owner_id') and self.api.normalized_task_title(previous.get('title'))==self.api.normalized_task_title(slots['title']):
+                    self.draft=draft;slots={**previous,**{key:value for key,value in slots.items() if value not in (None,'')}}
+                    raw=draft['raw_text']+'\n'+text;break
         missing=[key for key in REQUIRED if not slots.get(key)]
         stamp=self.api.now();expiry=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat()
-        raw=(self.draft['raw_text']+'\n'+text) if self.draft else text
         if self.draft:
             did=self.draft['id']
             self.c.execute('UPDATE conversation_draft SET raw_text=?,slots_json=?,missing_slots=?,status=?,expire_at=?,updated_at=? WHERE id=?',
@@ -272,12 +328,18 @@ class TaskDialogue:
         if re.fullmatch(r'(?:取消|取消操作|不确认|否)[。！!]?',source):
             if self.draft:self.api.discard_draft(self.c,self.draft['id'],str(self.user_id))
             return None
-        if re.fullmatch(r'(?:确认|确认执行|好的，?确认|是)[。！!]?',source):
+        if re.fullmatch(r'(?:确认|确认执行|好的，?确认|是|是的|可以|好的|确认更新|确认新建)[。！!]?',source):
             if self.draft:
-                slots=json.loads(self.draft['slots_json']);return self.preview(slots,[key for key in REQUIRED if not slots.get(key)])
+                slots=json.loads(self.draft['slots_json'])
+                if task_matches(self.c,slots.get('title'),slots.get('owner_id'),self.user_id,self.api):
+                    return self.ask_intent(self.draft['raw_text'],title=slots['title'],owner_id=slots.get('owner_id'),creation_requested=True)
+                return self.preview(slots,[key for key in REQUIRED if not slots.get(key)])
             if self.action.get('type')=='collect_task_intent':
-                if self.action.get('task_id') or self.action.get('mode'):return self.existing_task(text)
-                return '还需要明确你的操作目标：是“新建任务”，还是“更新已有任务”？前面的事项内容已保留。'
+                if source=='确认新建':return self.update(self.material(),start=True)
+                if source=='确认更新':return self.existing_task(text)
+                if self.action.get('decision')=='create':return self.update(self.material(),start=True)
+                if self.action.get('decision')!='choose' and (self.action.get('task_id') or self.action.get('decision')=='update'):return self.existing_task(text)
+                return self.ask_intent(self.material(),title=self.action.get('title'),owner_id=self.action.get('owner_id'))
             return None
         if self.action.get('type')=='collect_task_intent' and (
             re.match(r'^(?:更新|已有任务|现有任务|填报|汇报进度|反馈进度|修改任务资料|修改任务内容)',source)
@@ -312,11 +374,11 @@ class TaskDialogue:
             if self.action.get('mode'):
                 self.action['material']=self.material()+'\n'+text
                 return self.existing_task(text)
+            if self.action.get('decision')=='identify' and not brief:
+                return self.ask_intent(self.material()+'\n任务名称：'+source)
             if brief:return self.ask_intent(self.material()+'\n'+text)
-        # A labelled report with a percentage retains the established progress workflow.
-        if brief and self.api.structured_progress_report(text):return None
-        proposal=self.model(text)
         if brief:return self.ask_intent(text)
+        proposal=self.model(text)
         if proposal and proposal['intent']=='create_task':
             material=self.material() if self.action.get('type') in ('collect_task_intent','collect_progress_report') else ''
             return self.update(material+'\n'+text if material else text,start=True,proposal=proposal)

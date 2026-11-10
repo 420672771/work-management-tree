@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="608" viewBox="0 0 1120 608" role="img" aria-labelledby="title desc">
-<title id="title">智能助手：多轮补全，核对后确认</title><desc id="desc">上方展示资料维护和修改任务的确认流程；下方展示新建任务时澄清意图、逐项补全并在网页核对生成的过程。示例为操作示意，并非飞书界面截图。上下文按用户和会话隔离，10分钟内有效。</desc>
+<title id="title">智能助手：先匹配任务，多轮补全</title><desc id="desc">上方展示资料维护和修改任务的确认流程；下方展示先匹配任务清单，已有任务确认更新进度、无匹配任务确认新建，之后逐项补全并核对生成的过程。示例为操作示意，并非飞书界面截图。上下文按用户和会话隔离，10分钟内有效。</desc>
 <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#5577ac" stroke-width="2"/></marker></defs>
 <rect width="1120" height="608" rx="18" fill="#f3f7fe"/>
 <g font-family="Microsoft YaHei,Noto Sans CJK SC,sans-serif">
@@ -36,22 +36,22 @@
 <text x="50" y="404" font-size="16" fill="#4d6481">可先发详情、优先级和时间</text>
 <path d="M276.5 385H298.5" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
 <rect x="303.5" y="310" width="241.5" height="150" rx="12" fill="#fff" stroke="#bfd0e8"/>
-<text x="321" y="342" font-size="19" font-weight="700" fill="#17385e">2　澄清意图</text>
-<text x="321" y="376" font-size="16" fill="#4d6481">助手：新建还是更新？</text>
-<text x="321" y="404" font-size="16" fill="#4d6481">回复：这是一条新增任务</text>
-<text x="321" y="432" font-size="16" fill="#4d6481">沿用前文，不用重新填写</text>
+<text x="321" y="342" font-size="19" font-weight="700" fill="#17385e">2　先匹配任务清单</text>
+<text x="321" y="376" font-size="16" fill="#4d6481">已匹配：询问是否更新进度</text>
+<text x="321" y="404" font-size="16" fill="#4d6481">无匹配：询问是否新建任务</text>
+<text x="321" y="432" font-size="16" fill="#4d6481">多条匹配：先核对任务编号</text>
 <path d="M548 385H570" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
 <rect x="575" y="310" width="241.5" height="150" rx="12" fill="#fff" stroke="#bfd0e8"/>
-<text x="592" y="342" font-size="19" font-weight="700" fill="#17385e">3　只补缺失信息</text>
-<text x="592" y="376" font-size="16" fill="#4d6481">助手：截止日期是什么？</text>
-<text x="592" y="404" font-size="16" fill="#4d6481">回复：11月30日</text>
-<text x="592" y="432" font-size="16" fill="#4d6481">也可继续纠正人员或优先级</text>
+<text x="592" y="342" font-size="19" font-weight="700" fill="#17385e">3　确认并补齐信息</text>
+<text x="592" y="376" font-size="16" fill="#4d6481">按匹配结果确认后续操作</text>
+<text x="592" y="404" font-size="16" fill="#4d6481">只补日期、完成比例等缺项</text>
+<text x="592" y="432" font-size="16" fill="#4d6481">已有信息保留，不用重填</text>
 <path d="M819.5 385H841.5" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
 <rect x="846.5" y="310" width="241.5" height="150" rx="12" fill="#e9f6ef" stroke="#bfd0e8"/>
-<text x="864" y="342" font-size="19" font-weight="700" fill="#17385e">4　网页核对生成</text>
-<text x="864" y="376" font-size="16" fill="#4d6481">确认中心 → 会话任务草稿</text>
-<text x="864" y="404" font-size="16" fill="#4d6481">核对标题、人员和日期</text>
-<text x="864" y="432" font-size="16" fill="#4d6481">确认生成后进入任务确认流</text>
+<text x="864" y="342" font-size="19" font-weight="700" fill="#17385e">4　核对并提交</text>
+<text x="864" y="376" font-size="16" fill="#4d6481">进度：提交上级确认</text>
+<text x="864" y="404" font-size="16" fill="#4d6481">新任务：网页核对草稿生成</text>
+<text x="864" y="432" font-size="16" fill="#4d6481">新建前仍会再次检查重复</text>
 <path d="M695 466V487H425V466" fill="none" stroke="#5577ac" stroke-width="2" marker-end="url(#arrow)"/>
 <text x="350" y="518" font-size="16" fill="#4d6481">同一份草稿可以多轮补充；回复“取消”放弃</text>
 <rect x="32" y="542" width="1056" height="43" rx="8" fill="#fff6e6"/>

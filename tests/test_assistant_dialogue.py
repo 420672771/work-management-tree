@@ -36,7 +36,7 @@ class AssistantDialogueTests(unittest.TestCase):
 
     def test_exact_screenshot_corrects_intent_and_reuses_the_previous_report(self):
         report=self.BRIEF+'\n4、进度百分比：20%'
-        self.assertIn('任务编号',self.say(report))
+        self.assertIn('是否将它新建为任务',self.say(report))
         reply=self.say('这是一条新增任务')
         self.assertIn('新任务草稿：AI智能客服',reply);self.assertNotIn('请补充：截止日期',reply)
         before,slots=self.draft();self.assertEqual(slots['title'],'AI智能客服')
@@ -50,7 +50,7 @@ class AssistantDialogueTests(unittest.TestCase):
 
     def test_ambiguous_brief_asks_intent_then_uses_retained_information(self):
         question=self.say(self.BRIEF)
-        self.assertIn('新建任务，还是更新已有任务',question)
+        self.assertIn('是否将它新建为任务',question)
         self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],0)
         self.assertIn('资料已补齐',self.say('这是新增任务'))
         _,slots=self.draft();self.assertEqual(slots['title'],'AI智能客服')
@@ -154,9 +154,8 @@ class AssistantDialogueTests(unittest.TestCase):
 
     def test_existing_progress_collects_target_and_percentage_with_original_report(self):
         tid=self.task()
-        self.say(self.BRIEF);self.assertIn('任务编号',self.say('更新已有任务'))
-        self.assertIn('填报进度',self.say('#'+str(tid)))
-        self.assertIn('完成比例',self.say('填报进度'));self.assertIn('0%到100%',self.say('120%'))
+        self.assertIn('是否要更新这项任务的进度',self.say(self.BRIEF))
+        self.assertIn('完成比例',self.say('确认更新'));self.assertIn('0%到100%',self.say('120%'))
         self.assertIn('进度 20%',self.say('20%'))
         record=self.c.execute('SELECT * FROM progress_record').fetchone()
         self.assertEqual(record['task_id'],tid);self.assertEqual(record['reported_percent'],20)
@@ -172,14 +171,14 @@ class AssistantDialogueTests(unittest.TestCase):
         self.assertIn('已修改',self.say('确认'))
         self.assertIn('几大卡点',self.c.execute('SELECT description FROM task WHERE id=?',(tid,)).fetchone()[0])
 
-    def test_intent_confirmation_does_not_guess_creation_or_update(self):
-        self.say(self.BRIEF);self.assertIn('还需要明确',self.say('确认'))
-        self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],0)
+    def test_confirmation_follows_no_match_creation_proposal(self):
+        self.assertIn('是否将它新建为任务',self.say(self.BRIEF));self.assertIn('资料已补齐',self.say('确认'))
+        self.assertEqual(self.c.execute('SELECT count(*) FROM task').fetchone()[0],0)
 
     def test_unknown_input_asks_a_question_and_model_failure_does_not_retry_other_model_paths(self):
         with self.model_env(),patch.object(app,'ai_chat_completion',side_effect=TimeoutError('unavailable')) as model:
             reply=self.say('帮我处理一下刚才的事情')
-        self.assertEqual(model.call_count,1);self.assertIn('新建任务，还是更新已有任务',reply)
+        self.assertEqual(model.call_count,1);self.assertIn('任务名称或任务编号',reply)
         self.assertEqual(self.c.execute('SELECT count(*) FROM task').fetchone()[0],0)
 
     def test_legacy_screenshot_draft_is_repaired_in_place_on_next_supplement(self):
@@ -196,6 +195,82 @@ class AssistantDialogueTests(unittest.TestCase):
         self.assertIn('待补充任务标题',reply)
         _,slots=self.draft();self.assertIsNone(slots['title'])
 
+    def test_existing_task_is_matched_before_asking_and_explicit_creation_cannot_duplicate_it(self):
+        tid=self.task()
+        for text in (self.BRIEF,'这是一条新增任务','确认新建','新建任务 '+self.BRIEF):
+            reply=self.say(text)
+            self.assertIn('#'+str(tid),reply);self.assertIn('是否要更新这项任务的进度',reply)
+            self.assertNotIn('新建任务，还是更新',reply)
+            self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],0)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+        self.assertIn('完成比例',self.say('确认更新'))
+        self.assertIn('进度 20%',self.say('20%'))
+
+    def test_matching_uses_short_title_and_does_not_depend_on_same_deadline(self):
+        tid=self.task();self.c.execute('UPDATE task SET title=? WHERE id=?',('AI智能客服功能需求调研和方案设计',tid));self.c.commit()
+        reply=self.say(self.BRIEF)
+        self.assertIn('#'+str(tid),reply);self.assertIn('是否要更新这项任务的进度',reply)
+        self.assertIn('避免重复新建',self.say('新建任务 '+self.BRIEF))
+
+    def test_active_task_is_preferred_over_completed_occurrences_with_same_name(self):
+        old=self.task();self.c.execute("UPDATE task SET work_status='completed' WHERE id=?",(old,));self.c.commit()
+        current=self.task();reply=self.say(self.BRIEF)
+        self.assertIn('#'+str(current),reply);self.assertNotIn('#'+str(old),reply)
+        self.assertIn('是否要更新这项任务的进度',reply)
+
+    def test_multiple_matches_require_a_number_and_confirmation_does_not_choose_one(self):
+        first=self.task();second=self.task()
+        reply=self.say(self.BRIEF+'\n4、进度百分比：20%')
+        self.assertIn('#'+str(first),reply);self.assertIn('#'+str(second),reply)
+        self.assertIn('请回复任务编号',self.say('确认'))
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+        self.assertIn('进度 20%',self.say('#'+str(second)))
+        self.assertEqual(self.c.execute('SELECT task_id FROM progress_record').fetchone()[0],second)
+
+    def test_task_appearing_between_no_match_and_creation_confirmation_is_rechecked(self):
+        self.assertIn('是否将它新建为任务',self.say(self.BRIEF))
+        tid=self.task()
+        reply=self.say('确认新建')
+        self.assertIn('#'+str(tid),reply);self.assertIn('是否要更新',reply)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],0)
+
+    def test_repeated_explicit_creation_reuses_same_live_draft(self):
+        self.say('新建任务 '+self.BRIEF)
+        before,_=self.draft()
+        self.say('新建任务 '+self.BRIEF.replace('P1','P0'))
+        after,slots=self.draft();self.assertEqual(before['id'],after['id']);self.assertEqual(slots['priority'],'P0')
+
+    def test_same_name_for_another_owner_is_not_a_duplicate_and_private_task_is_not_exposed(self):
+        tid=self.task()
+        reply=self.say(self.BRIEF,user=self.member,session='private')
+        self.assertIn('是否将它新建为任务',reply);self.assertNotIn('#'+str(tid),reply)
+        self.assertIn('新任务草稿',self.say('确认新建',user=self.member,session='private'))
+        _,slots=self.draft();self.assertEqual(slots['owner_id'],self.member)
+
+    def test_completed_and_pending_tasks_are_not_duplicated_or_given_new_progress(self):
+        tid=self.task()
+        for status,approval,expected in (('completed','approved','已完成'),('assigned','pending','尚待确认生效')):
+            self.c.execute('UPDATE task SET work_status=?,approval_status=? WHERE id=?',(status,approval,tid));self.c.commit()
+            self.assertIn(expected,self.say(self.BRIEF))
+            self.assertIn(expected,self.say('确认新建'))
+            self.assertNotIn('已记录',self.say('确认更新'))
+        self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],0)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+
+    def test_web_confirmation_rechecks_duplicate_after_other_task_is_created(self):
+        self.say('新建任务 '+self.BRIEF);draft,_=self.draft();tid=self.task()
+        handler=object.__new__(app.Handler);handler.path='/api/task/draft/'+str(draft['id'])+'/confirm'
+        handler.require_auth=lambda:True;handler.body=lambda:{};responses=[]
+        handler.json=lambda status,body:responses.append((status,body))
+        handler.do_POST()
+        self.assertEqual(responses[0][0],409);self.assertEqual(responses[0][1]['duplicates'][0]['id'],tid)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM task').fetchone()[0],1)
+
+    def test_unknown_title_is_collected_before_matching(self):
+        self.assertIn('任务名称或任务编号',self.say('帮我处理一下刚才的事情'))
+        self.assertIn('是否将它新建为任务',self.say('AI智能客服'))
+        self.assertIn('新任务草稿：AI智能客服',self.say('确认新建'))
+
     def test_model_understands_natural_intent_correction_using_retained_material(self):
         self.say(self.BRIEF)
         with self.model_env(),patch.object(app,'ai_chat_completion',return_value='{"intent":"create_task","fields":{"title":"AI智能客服"}}'):
@@ -208,7 +283,7 @@ class AssistantDialogueTests(unittest.TestCase):
         self.c.execute('UPDATE user SET feishu_open_id=? WHERE id=?',('dialogue-user',self.pm));self.c.commit()
         spec=importlib.util.spec_from_file_location('dialogue_ws',Path(app.__file__).parent/'scripts/feishu-long-connection.py')
         ws=importlib.util.module_from_spec(spec);spec.loader.exec_module(ws)
-        for i,(text,expected) in enumerate(((self.BRIEF,'新建任务，还是更新已有任务'),('这是一条新增任务','新任务草稿：AI智能客服'),('优先级：P0','优先级：P0'))):
+        for i,(text,expected) in enumerate(((self.BRIEF,'是否将它新建为任务'),('这是一条新增任务','新任务草稿：AI智能客服'),('优先级：P0','优先级：P0'))):
             raw={'header':{'event_id':'dialogue-'+str(i)},'event':{'sender':{'sender_id':{'open_id':'dialogue-user'}},
                 'message':{'message_type':'text','content':json.dumps({'text':text})}}}
             with patch.object(ws.lark.JSON,'marshal',return_value=json.dumps(raw)),patch.object(app.FeishuAdapter,'send_text') as send:

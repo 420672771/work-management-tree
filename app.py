@@ -2813,6 +2813,9 @@ class Handler(BaseHTTPRequestHandler):
                 if missing: return self.json(400,{'error':'missing slots','fields':missing})
                 try: fields=validate_task_fields(c,{**slots,'priority':slots.get('priority') or 'P1','task_type':slots.get('task_type') or 'PROJECT'},require_all=True)
                 except ValueError as exc: return self.json(400,{'error':str(exc)})
+                if draft['source_type']=='feishu':
+                    existing=assistant_dialogue.task_matches(c,fields['title'],fields['owner_id'],draft['user_id'],sys.modules[__name__],exact_only=True)
+                    if existing:return self.json(409,{'error':'已存在同名任务，请核对已有任务，未重复创建','duplicates':existing})
                 matches=task_duplicate_candidates(c,fields,exclude_draft_id=did)
                 if matches['exact']:
                     return self.json(409,{'error':'已存在相同任务，未重复创建','duplicates':matches['exact']})

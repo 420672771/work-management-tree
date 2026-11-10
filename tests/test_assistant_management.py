@@ -53,7 +53,8 @@ class AssistantManagementTests(unittest.TestCase):
         for existing in (False,True):
             if existing:tid=self.task(owner=self.pm,title='无关任务')
             reply=self.say(self.REPORT,user=self.pm)
-            self.assertIn('进度汇报（20%）',reply);self.assertIn('任务编号',reply);self.assertIn('新建任务',reply)
+            self.assertIn('未在你可操作的任务清单中匹配到',reply);self.assertIn('是否将它新建为任务',reply)
+            self.say('取消',user=self.pm)
             self.assertIn('没有待确认',self.say('确认',user=self.pm))
             self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
             self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],0)
@@ -63,6 +64,9 @@ class AssistantManagementTests(unittest.TestCase):
     def test_labelled_report_matches_own_title_and_submits_progress_without_changing_task_fields(self):
         tid=self.task(owner=self.pm,title='AI智能客服',priority='P0',approver_id=self.manager)
         reply=self.say(self.REPORT,user=self.pm)
+        self.assertIn('是否要更新这项任务的进度',reply)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+        reply=self.say('确认更新',user=self.pm)
         self.assertIn('已记录《AI智能客服》进度 20%',reply)
         record=self.c.execute('SELECT * FROM progress_record WHERE task_id=?',(tid,)).fetchone()
         self.assertEqual(record['reported_percent'],20);self.assertEqual(record['report_text'],self.REPORT)
@@ -76,7 +80,7 @@ class AssistantManagementTests(unittest.TestCase):
     def test_labelled_report_keeps_content_for_bare_number_followup_and_checks_ownership(self):
         tid=self.task(owner=self.pm,id=15,approver_id=self.manager)
         foreign=self.task(owner=self.member)
-        self.assertIn('任务编号',self.say(self.REPORT,user=self.pm))
+        self.assertIn('是否将它新建为任务',self.say(self.REPORT,user=self.pm))
         self.assertIn('不是你的责任任务',self.say('#'+str(foreign),user=self.pm))
         self.assertIn('已记录',self.say('#15',user=self.pm))
         record=self.c.execute('SELECT * FROM progress_record').fetchone()
@@ -89,7 +93,7 @@ class AssistantManagementTests(unittest.TestCase):
         first=self.task(owner=self.pm,title='AI智能客服')
         second=self.task(owner=self.pm,title='AI智能客服')
         reply=self.say(self.REPORT,user=self.pm)
-        self.assertIn('多条同名任务',reply);self.assertIn('#'+str(first),reply);self.assertIn('#'+str(second),reply)
+        self.assertIn('多条同名或相近任务',reply);self.assertIn('#'+str(first),reply);self.assertIn('#'+str(second),reply)
         self.c.execute("UPDATE task SET work_status='completed' WHERE id=?",(first,));self.c.commit()
         self.assertIn('不支持填报进度',self.say('#'+str(first),user=self.pm))
         self.assertIn('已记录',self.say('#'+str(second),user=self.pm))
@@ -111,7 +115,8 @@ class AssistantManagementTests(unittest.TestCase):
         tid=self.task(owner=self.pm,title='无关任务')
         self.assertIn('回复“确认”',self.say(f'任务#{tid} 优先级改为P0',user=self.pm))
         self.say(self.REPORT,user=self.pm)
-        self.assertIn('没有待确认',self.say('确认',user=self.pm))
+        self.assertIn('新任务草稿',self.say('确认新建',user=self.pm))
+        self.assertEqual(self.c.execute('SELECT priority FROM task WHERE id=?',(tid,)).fetchone()[0],'P1')
         reply=self.say('新建任务 '+self.REPORT,user=self.pm)
         self.assertIn('新任务草稿',reply)
         self.assertEqual(self.c.execute('SELECT count(*) FROM task').fetchone()[0],1)
@@ -441,8 +446,10 @@ class AssistantManagementTests(unittest.TestCase):
     def test_http_callback_submits_labelled_report_once(self):
         tid=self.task(owner=self.manager,title='AI智能客服',approver_id=self.pm)
         response,send=self.callback(self.REPORT,'report-http')
-        self.assertEqual(response[0],200);self.assertIn('进度 20%',send.args[1])
+        self.assertEqual(response[0],200);self.assertIn('是否要更新这项任务的进度',send.args[1])
         self.callback(self.REPORT,'report-http')
+        _,send=self.callback('确认更新','report-http-confirm');self.assertIn('进度 20%',send.args[1])
+        self.callback('确认更新','report-http-confirm')
         self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record WHERE task_id=?',(tid,)).fetchone()[0],1)
 
     def test_websocket_uses_same_workflow_and_deduplicates_events_without_remote_calls(self):
@@ -473,7 +480,7 @@ class AssistantManagementTests(unittest.TestCase):
         tid=self.task(id=15,owner=self.manager,approver_id=self.pm)
         spec=importlib.util.spec_from_file_location('assistant_report_ws',Path(app.__file__).parent/'scripts/feishu-long-connection.py')
         ws=importlib.util.module_from_spec(spec);spec.loader.exec_module(ws)
-        for text,event_id,expected in ((self.REPORT,'report-ws','任务编号'),('#15','report-ws-number','进度 20%'),('#15','report-ws-number',None)):
+        for text,event_id,expected in ((self.REPORT,'report-ws','是否将它新建为任务'),('#15','report-ws-number','进度 20%'),('#15','report-ws-number',None)):
             raw={'header':{'event_id':event_id},'event':{'sender':{'sender_id':{'open_id':'assistant-manager'}},
                  'message':{'message_type':'text','content':json.dumps({'text':text})}}}
             with patch.object(ws.lark.JSON,'marshal',return_value=json.dumps(raw)),patch.object(app.FeishuAdapter,'send_text') as send:
