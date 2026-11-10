@@ -228,6 +228,46 @@ class AccountTests(unittest.TestCase):
             self.assertFalse(self.request('/api/auth/options')[1]['feishu_ready'])
             self.assertIn('not_configured',self.request('/auth/feishu/start')[2]['Location'])
 
+    def test_qr_binding_and_login_use_the_same_verified_callback(self):
+        member=self.login('member.test','StaffTest2026!')
+        for flow,jar in (('bind',member),('login',{})):
+            status,data,headers=self.request('/auth/feishu/qr?flow='+flow,jar=jar)
+            self.assertEqual(status,200);self.assertEqual(data['expires_in'],600)
+            self.assertNotIn('test-only-secret',json.dumps(data));self.assertIn('no-store',headers['Cache-Control'])
+            cookie=headers['Set-Cookie'];self.assertIn('HttpOnly',cookie);self.assertIn('Path=/auth/feishu',cookie)
+            url=urlparse(data['authorization_url']);self.assertEqual(url.netloc,'accounts.feishu.cn')
+            query=parse_qs(url.query);self.assertEqual(query['client_id'],['cli_test'])
+            self.assertEqual(query['state'],[jar['wmt_oauth_state']])
+            c=app.db();row=c.execute('SELECT * FROM login_state WHERE state_hash=?',(app.hashlib.sha256(jar['wmt_oauth_state'].encode()).hexdigest(),)).fetchone();c.close()
+            self.assertEqual(row['flow_type'],flow);self.assertEqual(row['user_id'],self.member if flow=='bind' else None)
+            callback='/auth/feishu/callback?'+urlencode({'state':query['state'][0],'code':'mock-scanned-code'})
+            with patch.object(app.FeishuAdapter,'exchange_login_code',return_value={'access_token':'test-token'}),patch.object(app.FeishuAdapter,'login_open_id',return_value='ou_qr_bound'):
+                result=self.request(callback,jar=jar)[2]['Location']
+                self.assertEqual(result,'/?page=profile&binding=success' if flow=='bind' else '/')
+                self.assertIn('expired',self.request(callback,jar=jar)[2]['Location'])
+            self.assertEqual(self.request('/api/me',jar=jar)[1]['user']['id'],self.member)
+
+    def test_qr_refresh_invalidates_previous_state_and_cannot_cross_browser(self):
+        jar={};_,first,_=self.request('/auth/feishu/qr',jar=jar);old=jar.copy()
+        _,second,_=self.request('/auth/feishu/qr',jar=jar)
+        self.assertNotEqual(first['authorization_url'],second['authorization_url'])
+        c=app.db();self.assertEqual(c.execute('SELECT COUNT(*) FROM login_state').fetchone()[0],1);c.close()
+        with patch.object(app.FeishuAdapter,'exchange_login_code') as exchange:
+            callback='/auth/feishu/callback?'+urlencode({'state':old['wmt_oauth_state'],'code':'old-code'})
+            self.assertIn('expired',self.request(callback,jar=old)[2]['Location'])
+            callback='/auth/feishu/callback?'+urlencode({'state':jar['wmt_oauth_state'],'code':'wrong-browser-code'})
+            self.assertIn('expired',self.request(callback,jar={})[2]['Location']);exchange.assert_not_called()
+
+    def test_qr_requires_binding_session_and_valid_configuration(self):
+        self.assertEqual(self.request('/static/feishu-login.js')[0],200)
+        self.assertEqual(self.request('/auth/feishu/qr?flow=bind')[0],401)
+        self.assertEqual(self.request('/auth/feishu/qr?flow=invalid')[0],400)
+        with patch.dict(os.environ,{'FEISHU_APP_SECRET':''}):
+            self.assertEqual(self.request('/auth/feishu/qr')[0],503)
+        c=app.db();self.assertEqual(c.execute('SELECT COUNT(*) FROM login_state').fetchone()[0],0);c.close()
+        with patch.dict(os.environ,{'WMT_FEISHU_OAUTH_REDIRECT_URI':'https://work.example.com/auth/feishu/callback'}):
+            self.assertIn('Secure',self.request('/auth/feishu/qr')[2]['Set-Cookie'])
+
     def test_hashes_use_independent_salts(self):
         first=accounts.hash_password('SameTest2026!');second=accounts.hash_password('SameTest2026!')
         self.assertNotEqual(first,second);self.assertTrue(accounts.verify_password('SameTest2026!',first));self.assertFalse(accounts.verify_password('wrong',first))

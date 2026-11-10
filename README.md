@@ -164,7 +164,7 @@ WMT_DB=/tmp/worktree-pilot.db python3 scripts/run-demo-pilot.py
 
 ### 飞书扫码登录
 
-系统支持把已绑定的飞书成员作为登录账号。启用前须为服务提供 HTTPS 公网地址，并在飞书自建应用中开启网页应用/扫码登录能力，将回调地址配置为：
+系统支持把已绑定的飞书成员作为登录账号。启用前需确定用户浏览器实际访问的固定地址，并在飞书自建应用中开启网页应用能力，将完整回调地址登记到“安全设置 → 重定向 URL”。推荐使用 HTTPS 域名；内网 HTTP 地址也须与实际访问的协议、主机及端口一致，例如 `http://192.168.1.197:8080/auth/feishu/callback`。域名示例：
 
 ```text
 https://你的域名/auth/feishu/callback
@@ -173,13 +173,17 @@ https://你的域名/auth/feishu/callback
 服务环境变量：
 
 ```bash
-WMT_AUTH_MODE=feishu
+WMT_AUTH_MODE=account
 WMT_PUBLIC_BASE_URL=https://你的域名
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
 ```
 
-登录页同时支持账号密码和飞书扫码。员工先使用账号密码登录，再在“个人中心”中扫码绑定；也可由负责人/PM 在现有“飞书成员绑定”中维护。一个飞书账号只能绑定一位员工。回调校验一次性 state、发起浏览器和绑定时的登录会话，未绑定账号不会自动创建员工。会话有效期为 8 小时，通过 HttpOnly Cookie 保存；飞书网页扫码使用 OAuth 授权回调流程。
+登录页同时支持账号密码和飞书扫码（`WMT_AUTH_MODE=feishu` 亦兼容）。点击扫码登录或个人中心的扫码绑定时，页面通过[飞书官方二维码 SDK](https://open.feishu.cn/document/common-capabilities/sso/web-application-sso/qr-sdk-documentation)弹出二维码，由手机飞书“扫一扫”确认，然后完成 OAuth 授权回调。浏览器已有飞书登录状态也先展示二维码；扫码后飞书仍可能要求确认授权。窗口支持刷新、取消、过期提示，以及手机上的授权页入口。客户端网络须能访问飞书与 `lf-package-cn.feishucdn.com`，加载失败时可刷新或使用账号密码。
+
+员工先使用账号密码登录，再在“个人中心”中扫码绑定；也可由负责人/PM 在“飞书成员绑定”中维护。一个飞书账号只能绑定一位员工。扫码消息校验精确来源与二维码 iframe，回调校验一次性 state、发起浏览器和绑定时的登录会话；刷新二维码会使该浏览器上一个 state 失效，未绑定账号不会自动创建员工。会话有效期为 8 小时，通过 HttpOnly Cookie 保存。
+
+`/api/auth/options` 的 `feishu_ready` 为 `true` 才表示网页进程的凭据与回调配置齐全。修改 Docker Compose 的 `.env` 后需执行 `docker compose up -d --force-recreate worktree` 重新创建容器；直接运行 Python 时，需将变量注入进程环境，程序不会自动加载 `.env`。本功能继续使用原 `/auth/feishu/callback`，无需新增回调地址，也无需迁移业务数据。
 
 如使用 Cloudflare Quick Tunnel：先启动带认证的本地服务，再运行 `scripts/start-cloudflare-preview.sh`。Quick Tunnel 适合临时验证，无固定域名和 uptime 保证。
 

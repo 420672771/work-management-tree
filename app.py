@@ -2146,18 +2146,24 @@ class Handler(BaseHTTPRequestHandler):
         except LookupError as exc:return self.json(404,{'error':str(exc)})
         except (ValueError,TypeError) as exc:return self.json(400,{'error':str(exc)})
         finally:c.close()
-    def start_feishu_login(self,bind=False):
+    def start_feishu_login(self,bind=False,qr=False):
         user=self.session_user()
-        if bind and not user:return self.redirect('/login')
-        if not FeishuAdapter().login_configured():return self.redirect('/?page=profile&binding=not_configured' if bind else '/login?login_error=not_configured')
+        if bind and not user:
+            return self.json(401,{'error':'请先登录个人账号，再扫码绑定。'}) if qr else self.redirect('/login')
+        if not FeishuAdapter().login_configured():
+            return self.json(503,{'error':'飞书网页登录尚未完成配置，请先使用账号密码。'}) if qr else self.redirect('/?page=profile&binding=not_configured' if bind else '/login?login_error=not_configured')
         state=secrets.token_urlsafe(32);c=db()
         try:
             c.execute('DELETE FROM login_state WHERE expire_at<=?',(now(),))
+            # Refreshing a QR code invalidates this browser's previous attempt.
+            c.execute('DELETE FROM login_state WHERE state_hash=?',(hashlib.sha256(self.cookie('wmt_oauth_state').encode()).hexdigest(),))
             c.execute('INSERT INTO login_state(state_hash,expire_at,created_at,flow_type,user_id,session_hash) VALUES(?,?,?,?,?,?)',
                 (hashlib.sha256(state.encode()).hexdigest(),(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat(),now(),
                  'bind' if bind else 'login',user['id'] if bind else None,hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest() if bind else None));c.commit()
         finally:c.close()
-        self.redirect(FeishuAdapter().authorization_url(state),self.account_cookie(state,600,'wmt_oauth_state','/auth/feishu'))
+        url=FeishuAdapter().authorization_url(state);cookie=self.account_cookie(state,600,'wmt_oauth_state','/auth/feishu')
+        if qr:return self.json(200,{'authorization_url':url,'expires_in':600},cookie)
+        self.redirect(url,cookie)
     def finish_feishu_login(self,query):
         state=query.get('state',[''])[0];code=query.get('code',[''])[0]
         if not state or not secrets.compare_digest(state,self.cookie('wmt_oauth_state')):return self.redirect('/login?login_error=expired')
@@ -2267,7 +2273,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(200,'image/png',(ROOT/'static'/'brand'/'unifortune-logo.png').read_bytes(),'public, max-age=86400')
         if p.path=='/static/accounts.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'accounts.js').read_bytes(),'no-cache')
+        if p.path=='/static/feishu-login.js':
+            return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'feishu-login.js').read_bytes(),'no-cache')
         if p.path in ('/api/auth/options','/api/me'):return self.handle_account_api(p.path)
+        if p.path=='/auth/feishu/qr':
+            flow=q.get('flow',['login'])[0]
+            if flow not in ('login','bind'):return self.json(400,{'error':'不支持的扫码操作'})
+            return self.start_feishu_login(bind=flow=='bind',qr=True)
         if p.path=='/auth/feishu/bind':return self.start_feishu_login(bind=True)
         if p.path=='/static/monthly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'monthly-reports.js').read_bytes(),'no-cache')
