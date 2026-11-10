@@ -1,0 +1,58 @@
+// Use a disposable local account-mode fixture; never run against production data.
+const {chromium}=require(process.env.WMT_PLAYWRIGHT_MODULE||'playwright');
+const assert=require('node:assert/strict'),fs=require('node:fs');
+const fixture=JSON.parse(fs.readFileSync(process.env.WMT_WEEKLY_CARDS_FIXTURE,'utf8'));
+const {base,report,tasks}=fixture;
+assert(base.startsWith('http://127.0.0.1:'));
+(async()=>{
+ const browser=await chromium.launch({headless:true});
+ try{
+  const page=await browser.newPage({viewport:{width:1440,height:1050}}),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(base+'/login');await page.locator('#loginName').fill('weekly.cards');
+  await page.locator('#loginPassword').fill('WeeklyCards2026!');await page.locator('#loginSubmit').click();
+  await page.waitForURL(base+'/');await page.locator('#weeklyTab').click();
+  const section=page.locator('.weekly-section').filter({has:page.getByRole('heading',{name:'本周重点工作与成果',exact:true})});
+  const cards=section.locator('.weekly-task-card');await cards.nth(4).waitFor();
+  const card=id=>section.locator(`[data-task-id="${id}"]`);
+  const read=async()=>{const response=await page.request.get(base+'/api/weekly-reports/'+report);assert(response.ok());return response.json();};
+  const original=await read();
+  const ids=()=>cards.evaluateAll(items=>items.map(item=>Number(item.dataset.taskId)));
+  assert.deepEqual(await ids(),[...original.snapshot.sections.achievements].sort((a,b)=>a-b));
+  assert.equal(await card(tasks.blocked).getByRole('progressbar').getAttribute('aria-valuenow'),'35');
+  assert(await card(tasks.blocked).getByText('当前卡点',{exact:true}).isVisible());
+  assert(await card(tasks.blocked).getByText('建议下一步',{exact:true}).isVisible());
+  assert.equal(await card(tasks.legacy).getByRole('progressbar').count(),0);
+  assert(await card(tasks.legacy).getByText('暂无已确认进度').isVisible());
+  assert.equal(await card(tasks.awaiting).getByRole('progressbar').getAttribute('aria-valuenow'),'100');
+  assert(await card(tasks.awaiting).getByText('待验收',{exact:true}).isVisible());
+  assert(await card(tasks.done).getByText('已完成',{exact:true}).isVisible());
+  assert.equal(await card(tasks.done).getByText('建议下一步',{exact:true}).count(),0);
+  const boxes=await cards.evaluateAll(items=>items.map(item=>{const box=item.getBoundingClientRect();return{x:box.x,y:box.y,bottom:box.bottom};}));
+  assert(boxes[1].y>=boxes[0].bottom);assert(Math.abs(boxes[0].x-boxes[1].x)<2);
+  await card(tasks.blocked).screenshot({path:'/tmp/wmt-weekly-card-desktop.png'});
+  await section.screenshot({path:'/tmp/wmt-weekly-cards-section.png'});
+  const editor=card(tasks.blocked).locator('.weekly-note-editor');
+  assert.equal(await editor.getAttribute('open'),null);await editor.locator('summary').click();
+  const saved=()=>page.waitForFunction(()=>document.querySelector('#weeklySaveStatus')?.textContent==='已自动保存');
+  await editor.locator('textarea').fill('周会结论：周四与业务方复核样本并明确方案边界。');await saved();
+  assert((await read()).editorial.notes[tasks.blocked].includes('周会结论'));
+  await card(tasks.blocked).locator('[data-move="1"]').click();await saved();
+  const expected=[...original.snapshot.sections.achievements].sort((a,b)=>a-b);[expected[0],expected[1]]=[expected[1],expected[0]];
+  assert.deepEqual(await ids(),expected);
+  await page.reload();await page.locator('#weeklyTab').click();await cards.nth(4).waitFor();
+  assert.deepEqual(await ids(),expected);assert.deepEqual((await read()).snapshot,original.snapshot);
+  assert(await card(tasks.blocked).locator('textarea').inputValue());
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await card(tasks.blocked).screenshot({path:'/tmp/wmt-weekly-card-mobile.png'});
+  await page.setViewportSize({width:1440,height:1050});
+  await page.locator('#weeklyPublish').click();await page.waitForFunction(()=>document.querySelector('#weeklyActions [data-action="revise"]'));
+  assert.equal(await section.locator('textarea').count(),0);
+  assert(await card(tasks.blocked).locator('.weekly-task-note').isVisible());
+  await page.emulateMedia({media:'print'});
+  assert.equal(await section.locator('.weekly-order').count(),0);
+  assert.deepEqual(errors,[]);
+  console.log('PASS: card hierarchy, confirmed/unknown progress, 100% awaiting acceptance, blocked details, numeric order, note autosave, move/reload, frozen snapshot, mobile, published and print views');
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exit(1);});

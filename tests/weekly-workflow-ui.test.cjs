@@ -96,3 +96,27 @@ test('leaving the page waits for autosave instead of asking to discard changes',
   held.resolve();await leaving;assert.deepEqual(b.navigation,['tasks']);assert.equal(b.confirmations.length,0);
   assert.equal(b.model.editorial.summary,'离开前的输入');
 });
+
+test('task cards distinguish confirmed, pending and unavailable progress without equating 100% with acceptance',async()=>{
+  const b=browser();
+  b.model.snapshot.tasks=[
+    {id:41,title:'方案联调',effective_percent:30,latest_progress:'填报80%，尚待确认',work_status:'in_progress',priority:'P0'},
+    {id:42,title:'历史快照',latest_progress:'曾填报60%',work_status:'in_progress',priority:'P1'},
+    {id:43,title:'等待验收',effective_percent:100,work_status:'awaiting_acceptance',priority:'P1'}
+  ];
+  b.model.snapshot.sections.achievements=[41,42,43];await b.context.openPage('weekly');
+  const html=b.elements.get('weeklyContent').innerHTML;
+  const card=id=>html.split(`data-task-id="${id}"`)[1].split('</article>')[0];
+  assert(card(41).includes('aria-valuenow="30"'));assert(card(41).includes('填报80%，尚待确认'));
+  assert(card(42).includes('暂无已确认进度'));assert(!card(42).includes('role="progressbar"'));
+  assert(card(43).includes('aria-valuenow="100"'));assert(card(43).includes('待验收'));assert(!card(43).includes('status-completed'));
+});
+
+test('task card descriptions and editorial notes remain escaped and ordering controls remain available',async()=>{
+  const b=browser(),unsafe='<img src=x onerror=alert(1)>';
+  b.model.snapshot.tasks=[{id:44,title:unsafe,latest_progress:unsafe,block_reason:unsafe,work_status:'in_progress',priority:'P0',risk_reasons:['逾期未完成'],overdue:true}];
+  b.model.snapshot.sections.risks=[44];b.model.editorial.notes[44]='</textarea>'+unsafe;
+  await b.context.openPage('weekly');const html=b.elements.get('weeklyContent').innerHTML;
+  assert(!html.includes(unsafe));assert(html.includes('&lt;img'));assert(html.includes('data-note="44"'));
+  assert(html.includes('当前卡点'));assert(html.includes('data-move="-1"'));assert(html.includes('data-move="1"'));
+});

@@ -131,6 +131,17 @@ def build_snapshot(c, start, end, generated_at, owner_id=None):
         latest = progress[-1] if progress else None
         t['latest_progress'] = latest['report_text'] if latest else ''
         t['latest_progress_at'] = latest['reported_at'] if latest else None
+        confirmed_progress = [p for p in progress if p['status'] in ('approved', 'auto_approved')
+                              and p['effective_percent'] is not None and p['confirmed_at']
+                              and local_time(p['confirmed_at']) and local_time(p['confirmed_at']) <= cutoff]
+        confirmed_progress.sort(key=lambda p: (local_time(p['confirmed_at']), p['id']))
+        if t['work_status'] == 'completed':
+            t['effective_percent'] = 100
+        elif confirmed_progress:
+            t['effective_percent'] = confirmed_progress[-1]['effective_percent']
+        elif not local_time(t['updated_at']) or local_time(t['updated_at']) > cutoff:
+            # Never borrow a current task percentage for an earlier frozen report.
+            t['effective_percent'] = None
         t['block_reason'] = latest['block_reason'] if latest and latest['is_blocked'] else ''
         t['reported_this_week'] = any(local_time(p['reported_at']) >= week_start for p in progress)
         due = local_time(t['due_at'])
@@ -175,7 +186,7 @@ def build_snapshot(c, start, end, generated_at, owner_id=None):
         # Keep only meeting facts, never mutable database rows or personal IDs.
         keys = ('id', 'title', 'owner_id', 'owner_name', 'org_node_id', 'domain_id', 'domain_name', 'due_at', 'priority',
                 'work_status', 'risk_status', 'deliverable', 'estimated_hours', 'actual_hours', 'complexity',
-                'completed_at', 'completion_source', 'latest_progress', 'latest_progress_at', 'block_reason',
+                'completed_at', 'completion_source', 'latest_progress', 'latest_progress_at', 'effective_percent', 'block_reason',
                 'reported_this_week', 'overdue', 'completed_this_week', 'new_this_week', 'risk_reasons',
                 'suggested_action', 'next_week', 'accepted')
         tasks.append({k: t.get(k) for k in keys})

@@ -106,6 +106,29 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertEqual(len(r['snapshot']['tasks']), 3)
         self.assertEqual(next(t for t in r['snapshot']['tasks'] if t['id'] == late_progress)['latest_progress'], '')
 
+    def test_card_progress_uses_confirmed_percentage_instead_of_pending_report(self):
+        tid=self.task(effective_percent=30)
+        self.c.execute('INSERT INTO progress_record(task_id,reported_percent,report_text,status,effective_percent,reported_at,confirmed_at) VALUES(?,?,?,?,?,?,?)',
+                       (tid,30,'已确认的进展','approved',30,'2026-11-05T10:00:00+08:00','2026-11-05T11:00:00+08:00'))
+        self.c.execute('INSERT INTO progress_record(task_id,reported_percent,report_text,status,reported_at) VALUES(?,?,?,?,?)',
+                       (tid,80,'填报80%，尚待确认','pending','2026-11-07T10:00:00+08:00'));self.c.commit()
+        task=self.generate()['snapshot']['tasks'][0]
+        self.assertEqual(task['effective_percent'],30);self.assertEqual(task['latest_progress'],'填报80%，尚待确认')
+
+    def test_card_progress_excludes_confirmation_after_snapshot_cutoff(self):
+        tid=self.task(effective_percent=90,updated_at='2026-11-09T10:00:00+08:00')
+        for percent,reported,confirmed in ((20,'2026-11-04T10:00:00+08:00','2026-11-04T11:00:00+08:00'),
+                                           (90,'2026-11-07T10:00:00+08:00','2026-11-09T10:00:00+08:00')):
+            self.c.execute('INSERT INTO progress_record(task_id,reported_percent,report_text,status,effective_percent,reported_at,confirmed_at) VALUES(?,?,?,?,?,?,?)',
+                           (tid,percent,'进展'+str(percent),'approved',percent,reported,confirmed))
+        self.c.commit();report=self.generate();self.assertEqual(report['snapshot']['tasks'][0]['effective_percent'],20)
+        self.c.execute('UPDATE task SET effective_percent=100 WHERE id=?',(tid,));self.c.commit()
+        self.assertEqual(reports.get_report(self.c,report['id'],self.manager)['snapshot'],report['snapshot'])
+
+    def test_card_progress_does_not_borrow_live_percentage_when_earlier_progress_is_unknown(self):
+        tid=self.task(effective_percent=75,updated_at='2026-11-09T10:00:00+08:00')
+        self.assertIsNone(self.generate()['snapshot']['tasks'][0]['effective_percent'])
+
     def test_key_work_includes_active_p0_and_all_weekly_completions_only(self):
         active = [self.task(priority='P0',work_status=status,estimated_hours=0,complexity='simple')
                   for status in ('assigned','in_progress','awaiting_acceptance')]
