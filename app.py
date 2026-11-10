@@ -1,4 +1,4 @@
-import base64, gzip, hashlib, io, json, mimetypes, os, re, secrets, sqlite3, struct, subprocess, tempfile, urllib.request, urllib.parse, zipfile
+import base64, gzip, hashlib, io, json, mimetypes, os, re, secrets, sqlite3, struct, subprocess, sys, tempfile, urllib.request, urllib.parse, zipfile
 from base64 import b64decode
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,6 +9,7 @@ import monthly_reports
 import accounts
 import routines
 import assistant_management
+import assistant_dialogue
 import responsibility_domains
 
 ROOT = Path(__file__).parent
@@ -69,7 +70,7 @@ def db():
 
 def migrate(c):
     """Schema work must run once at service startup, never on every request."""
-    c.executescript(SCHEMA + weekly_reports.SCHEMA + monthly_reports.SCHEMA + accounts.SCHEMA + responsibility_domains.SCHEMA)
+    c.executescript(SCHEMA + weekly_reports.SCHEMA + monthly_reports.SCHEMA + accounts.SCHEMA + responsibility_domains.SCHEMA + assistant_dialogue.SCHEMA)
     for statement in ("ALTER TABLE login_state ADD COLUMN flow_type TEXT NOT NULL DEFAULT 'login'", "ALTER TABLE login_state ADD COLUMN user_id INTEGER", "ALTER TABLE login_state ADD COLUMN session_hash TEXT", "ALTER TABLE user ADD COLUMN feishu_open_id TEXT", "ALTER TABLE org_node ADD COLUMN domain_code TEXT DEFAULT ''", "ALTER TABLE org_node ADD COLUMN operating_line TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN task_type TEXT NOT NULL DEFAULT 'PROJECT'", "ALTER TABLE task ADD COLUMN parent_template_id INTEGER", "ALTER TABLE task ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'", "ALTER TABLE task ADD COLUMN approver_id INTEGER", "ALTER TABLE task ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN effective_percent INTEGER NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN expected_finish TEXT", "ALTER TABLE task ADD COLUMN confirmed_by INTEGER", "ALTER TABLE task ADD COLUMN confirmed_at TEXT", "ALTER TABLE task ADD COLUMN confirm_source TEXT", "ALTER TABLE task ADD COLUMN estimated_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN actual_hours REAL NOT NULL DEFAULT 0", "ALTER TABLE task ADD COLUMN complexity TEXT NOT NULL DEFAULT 'general'", "ALTER TABLE task ADD COLUMN business_impact TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_source TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN urgent_level TEXT DEFAULT ''", "ALTER TABLE task ADD COLUMN plan_impact TEXT DEFAULT ''", "ALTER TABLE test_issue ADD COLUMN record_type TEXT NOT NULL DEFAULT 'issue'"):
         try: c.execute(statement)
         except sqlite3.OperationalError: pass
@@ -1517,16 +1518,19 @@ def confirm_bot_action(c, user_id, session_id):
 
 
 def create_bot_task_draft(c,text,user_id,session_id):
-    if not user_id:return '你的飞书账号尚未绑定系统成员，暂不能新建任务。'
-    c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id=? AND status IN ('pending','collecting')",(session_id,user_id))
-    slots,missing=draft_slots(text,user_id,c);expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-    c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,user_id,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
-    domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-    return '已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+    return assistant_dialogue.TaskDialogue(c,user_id,session_id,sys.modules[__name__]).update(text,start=True)
 
 def process_bot_message(c, text, user_id, session_id):
     """Shared text workflow for the Feishu callback and WebSocket receiver."""
+    reply=_process_bot_message(c,text,user_id,session_id)
+    assistant_dialogue.record(c,session_id,user_id,text,reply,now())
+    return reply
+
+def _process_bot_message(c, text, user_id, session_id):
     source=normalize_assistant_text(text)
+    dialogue=assistant_dialogue.TaskDialogue(c,user_id,session_id,sys.modules[__name__])
+    dialogue_reply=dialogue.handle(text)
+    if dialogue_reply:return dialogue_reply
     if re.fullmatch(r'(?:确认|确认执行|好的，?确认|是)[。！!]?',source):return confirm_bot_action(c,user_id,session_id)
     if re.fullmatch(r'(?:取消|取消操作|不确认|否)[。！!]?',source):
         c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status IN ('pending','collecting')",(now(),session_id,user_id))
@@ -1540,7 +1544,7 @@ def process_bot_message(c, text, user_id, session_id):
         row=c.execute("SELECT id,action_json FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='collecting' ORDER BY id DESC LIMIT 1",(session_id,user_id)).fetchone()
         if row and json.loads(row['action_json']).get('type')=='collect_progress_report':
             c.execute("UPDATE bot_pending_action SET status='superseded' WHERE id=?",(row['id'],))
-    action,reply=plan_bot_action(c,text,user_id,session_id)
+    action,reply=plan_bot_action(c,text,user_id,session_id,allow_model=not dialogue.model_failed)
     if action or reply:return reply
     progress,error=resolve_progress_message(c,source,user_id,session_id)
     if progress:
@@ -1549,13 +1553,13 @@ def process_bot_message(c, text, user_id, session_id):
             return f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
         except (ValueError,PermissionError) as exc:return str(exc)
     if error:return error
-    intent=classify_bot_intent(source)
+    intent=rule_bot_intent(source) if dialogue.model_failed else classify_bot_intent(source)
     if is_department_progress_query(source):return feishu_department_progress(c,user_id)
     if is_team_progress_query(source):return feishu_team_progress(c,user_id)
     if intent=='task_query':return feishu_task_list(c,user_id,session_id)
     if intent=='help':return BOT_HELP
     if intent=='task_creation':return create_bot_task_draft(c,source,user_id,session_id)
-    return assistant_clarification(source)
+    return dialogue.clarify(text)
 
 
 def model_management_proposal(text):
