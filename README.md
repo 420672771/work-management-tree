@@ -181,6 +181,10 @@ FEISHU_APP_SECRET=xxx
 
 登录页同时支持账号密码和飞书扫码（`WMT_AUTH_MODE=feishu` 亦兼容）。点击扫码登录或个人中心的扫码绑定时，页面通过[飞书官方二维码 SDK](https://open.feishu.cn/document/common-capabilities/sso/web-application-sso/qr-sdk-documentation)弹出二维码，由手机飞书“扫一扫”确认，然后完成 OAuth 授权回调。浏览器已有飞书登录状态也先展示二维码；扫码后飞书仍可能要求确认授权。窗口支持刷新、取消、过期提示，以及手机上的授权页入口。客户端网络须能访问飞书与 `lf-package-cn.feishucdn.com`，加载失败时可刷新或使用账号密码。
 
+二维码 SDK 1.0.3 官方文档注明暂不支持新版登录流程，因此扫码使用配套的 `passport.feishu.cn/suite/passport/oauth/authorize`、`token` 和 `userinfo` 接口。登录页另有“使用已登录的飞书账号授权”选项，保留现有新版 OAuth 接口；服务端按已存储的流程类型选择接口，不会对同一授权码重试其他接口。两种流程使用同一员工绑定、回调地址和会话校验。旧链接 `/auth/feishu/start` 与 `/auth/feishu/bind` 也会先显示二维码；只有用户主动选择授权时，才经 `/auth/feishu/authorize` 进入直接授权流程。
+
+对已配置真实飞书应用的本地测试服务，可设置 `WMT_LIVE_FEISHU_URL=http://127.0.0.1:5100`，运行 `node tests/feishu-qr-live.browser.cjs` 检查官方 SDK 和真实二维码是否加载成功（需安装 Playwright）。此检查使用全新浏览器会话，不模拟飞书响应，也不会扫码或授权账号；手机确认及回调登录仍需人工验收。
+
 员工先使用账号密码登录，再在“个人中心”中扫码绑定；也可由负责人/PM 在“飞书成员绑定”中维护。一个飞书账号只能绑定一位员工。扫码消息校验精确来源与二维码 iframe，回调校验一次性 state、发起浏览器和绑定时的登录会话；刷新二维码会使该浏览器上一个 state 失效，未绑定账号不会自动创建员工。会话有效期为 8 小时，通过 HttpOnly Cookie 保存。
 
 `/api/auth/options` 的 `feishu_ready` 为 `true` 才表示网页进程的凭据与回调配置齐全。修改 Docker Compose 的 `.env` 后需执行 `docker compose up -d --force-recreate worktree` 重新创建容器；直接运行 Python 时，需将变量注入进程环境，程序不会自动加载 `.env`。本功能继续使用原 `/auth/feishu/callback`，无需新增回调地址，也无需迁移业务数据。

@@ -43,7 +43,7 @@
     try{
       const data=await request;if(attempt!==generation||!dialog.open||!data)return;
       const goto=new URL(data.authorization_url);
-      if(goto.origin!=='https://accounts.feishu.cn'||goto.pathname!=='/open-apis/authen/v1/authorize')throw new Error('飞书登录地址无效，请联系运维。');
+      if(goto.origin!=='https://passport.feishu.cn'||goto.pathname!=='/suite/passport/oauth/authorize')throw new Error('飞书扫码地址无效，请联系运维。');
       fallback.href=goto.href;fallback.hidden=false;
       await loadSdk();if(attempt!==generation||!dialog.open)return;
       const sdk=window.QRLogin({id:container.id,goto:goto.href,width:'300',height:'340',style:'border:0;display:block;'});

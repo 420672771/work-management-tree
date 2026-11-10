@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>飞书登录 · 工作管理树</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#f1f5fb;color:#203954;font:15px/1.6 -apple-system,BlinkMacSystemFont,'Microsoft YaHei',sans-serif}main{width:min(420px,100%);padding:32px;background:#fff;border:1px solid #dde6f2;border-radius:16px;text-align:center}h1{font-size:24px}p{color:#6c7d92}main button,main a{display:block;width:100%;margin-top:16px;border-radius:8px;padding:11px;font:inherit;text-decoration:none;cursor:pointer}main button{border:0;background:#245dcc;color:#fff}main a{color:#245dcc;border:1px solid #dce5f2}
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="entryTitle">飞书扫码登录</h1>
+    <p>使用手机飞书“扫一扫”，扫描弹出窗口中的二维码并确认。</p>
+    <button id="entryScan" type="button">显示二维码</button>
+    <a id="entryAuthorize" href="/auth/feishu/authorize">使用已登录的飞书账号授权</a>
+    <a id="entryBack" href="/login">返回账号登录</a>
+  </main>
+  <script src="/static/feishu-login.js?v=20261110-qr2"></script>
+  <script>
+    const entryFlow=location.pathname==='/auth/feishu/bind'?'bind':'login';
+    if(entryFlow==='bind'){
+      document.title='飞书绑定 · 工作管理树';document.querySelector('#entryTitle').textContent='飞书扫码绑定';
+      document.querySelector('#entryAuthorize').href='/auth/feishu/authorize?flow=bind';
+      const back=document.querySelector('#entryBack');back.href='/?page=profile';back.textContent='返回个人中心';
+    }
+    document.querySelector('#entryScan').onclick=()=>openFeishuQr(entryFlow);
+    openFeishuQr(entryFlow);
+  </script>
+</body>
+</html>

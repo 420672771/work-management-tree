@@ -5,7 +5,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const base=process.env.WMT_TEST_URL||'http://127.0.0.1:5125';
 const sdkPattern='https://lf-package-cn.feishucdn.com/**/LarkSSOSDKWebQRCode-1.0.3.js';
-const sdkMock=`window.QRLogin=({id,goto,width,height})=>{const f=document.createElement('iframe');f.src='https://accounts.feishu.cn/accounts/auth_login/qr?goto='+encodeURIComponent(goto);f.width=width;f.height=height;document.getElementById(id).append(f);return {matchOrigin:o=>o.startsWith('https://accounts.feishu.cn'),matchData:d=>d?.source==='qrcode'&&!!d.tmp_code};};`;
+const sdkMock=`window.QRLogin=({id,goto,width,height})=>{const f=document.createElement('iframe');f.src='https://passport.feishu.cn/suite/passport/sso/qr?goto='+encodeURIComponent(goto);f.width=width;f.height=height;document.getElementById(id).append(f);return {matchOrigin:o=>o.startsWith('https://passport.feishu.cn'),matchData:d=>d?.source==='qrcode'&&!!d.tmp_code};};`;
 const sdk=process.env.WMT_FEISHU_SDK_FILE?fs.readFileSync(process.env.WMT_FEISHU_SDK_FILE,'utf8'):sdkMock;
 (async()=>{
   const browser=await chromium.launch();
@@ -13,7 +13,11 @@ const sdk=process.env.WMT_FEISHU_SDK_FILE?fs.readFileSync(process.env.WMT_FEISHU
     const context=await browser.newContext({viewport:{width:1200,height:1000}}),page=await context.newPage(),errors=[];
     page.on('pageerror',error=>errors.push(error.message));
     await context.route(sdkPattern,route=>route.fulfill({contentType:'application/javascript',body:sdk}));
-    await context.route('https://accounts.feishu.cn/accounts/auth_login/qr**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><p>Isolated QR provider fixture</p>'}));
+    await context.route('https://passport.feishu.cn/suite/passport/sso/qr**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><p>Isolated QR provider fixture</p>'}));
+    // Old bookmarks and login_url responses must reach a QR page, even with old frontend code.
+    await page.goto(base+'/auth/feishu/start');await page.locator('#feishuQrContainer iframe').waitFor();
+    assert.equal(new URL(page.url()).pathname,'/auth/feishu/start');
+    assert.equal(await page.locator('#feishuQrTitle').textContent(),'飞书扫码登录');
     await page.goto(base+'/login');await page.locator('#feishuLogin:not([disabled])').waitFor();
     await page.locator('#feishuLogin').click();await page.locator('#feishuQrContainer iframe').waitFor();
     assert.equal(new URL(page.url()).pathname,'/login');
@@ -25,10 +29,10 @@ const sdk=process.env.WMT_FEISHU_SDK_FILE?fs.readFileSync(process.env.WMT_FEISHU
     await page.evaluate(()=>{
       const source=document.querySelector('#feishuQrContainer iframe').contentWindow;
       for(const options of [
-        {origin:'https://accounts.feishu.cn.evil.example',source},
-        {origin:'https://accounts.feishu.cn',source:window},
-        {origin:'https://accounts.feishu.cn',source,data:{source:'other',tmp_code:'forged'}},
-        {origin:'https://accounts.feishu.cn',source,data:{source:'qrcode',tmp_code:{bad:true}}},
+        {origin:'https://passport.feishu.cn.evil.example',source},
+        {origin:'https://passport.feishu.cn',source:window},
+        {origin:'https://passport.feishu.cn',source,data:{source:'other',tmp_code:'forged'}},
+        {origin:'https://passport.feishu.cn',source,data:{source:'qrcode',tmp_code:{bad:true}}},
       ])window.dispatchEvent(new MessageEvent('message',{data:{source:'qrcode',tmp_code:'forged'},...options}));
     });
     assert.equal(new URL(page.url()).pathname,'/login');
@@ -43,14 +47,15 @@ const sdk=process.env.WMT_FEISHU_SDK_FILE?fs.readFileSync(process.env.WMT_FEISHU
     await page.waitForFunction(()=>!document.querySelector('#feishuQrContainer iframe'));
     assert.equal(await page.locator('#feishuQrContainer iframe').count(),0);
     await page.locator('#feishuLogin').click();await page.locator('#feishuQrContainer iframe').waitFor();
-    const targetPromise=page.waitForRequest(request=>request.url().startsWith('https://accounts.feishu.cn/open-apis/authen/v1/authorize?'));
+    const targetPromise=page.waitForRequest(request=>request.url().startsWith('https://passport.feishu.cn/suite/passport/oauth/authorize?'));
     await context.route('https://accounts.feishu.cn/open-apis/authen/v1/authorize?**',route=>route.fulfill({contentType:'text/html',body:'Authorization handoff fixture'}));
     await page.frameLocator('#feishuQrContainer iframe').locator('p').waitFor();
-    const qrFrame=page.frames().find(frame=>frame.url().includes('/accounts/auth_login/qr'));
+    await context.route('https://passport.feishu.cn/suite/passport/oauth/authorize?**',route=>route.fulfill({contentType:'text/html',body:'QR authorization handoff fixture'}));
+    const qrFrame=page.frames().find(frame=>frame.url().includes('/suite/passport/sso/qr'));
     await qrFrame.evaluate(()=>parent.postMessage({source:'qrcode',tmp_code:'verified+code&safe'},'http://'+new URL(document.referrer).host));
     const target=new URL((await targetPromise).url());assert.equal(target.searchParams.get('tmp_code'),'verified+code&safe');
     assert.equal(target.searchParams.get('state'),(await context.cookies(base+'/auth/feishu/callback')).find(c=>c.name==='wmt_oauth_state').value);
-    await page.waitForURL('https://accounts.feishu.cn/open-apis/authen/v1/authorize?**');
+    await page.waitForURL('https://passport.feishu.cn/suite/passport/oauth/authorize?**');
 
     // Profile binding uses a real logged-in session, the same modal, and a distinct bind flow.
     await page.goto(base+'/login');await page.locator('#loginName').fill('admin.browser');await page.locator('#loginPassword').fill('AdminBrowser2026!');await page.locator('#loginSubmit').click();await page.waitForURL(base+'/');
@@ -59,6 +64,14 @@ const sdk=process.env.WMT_FEISHU_SDK_FILE?fs.readFileSync(process.env.WMT_FEISHU
     await page.locator('#profileBindFeishu').click();assert.equal((await binding).status(),200);
     await page.locator('#feishuQrContainer iframe').waitFor();assert.equal(await page.locator('#feishuQrTitle').textContent(),'飞书扫码绑定');
     await page.locator('#feishuQrCancel').click();await page.waitForFunction(()=>!document.querySelector('#feishuQrContainer iframe'));
+    await page.goto(base+'/auth/feishu/bind');await page.locator('#feishuQrContainer iframe').waitFor();
+    assert.equal(new URL(page.url()).pathname,'/auth/feishu/bind');
+    assert.equal(await page.locator('#feishuQrTitle').textContent(),'飞书扫码绑定');
+    await page.locator('#feishuQrCancel').click();await page.locator('#entryAuthorize').click();
+    await page.waitForURL('https://accounts.feishu.cn/open-apis/authen/v1/authorize?**');
+    assert.equal(new URL(page.url()).searchParams.has('tmp_code'),false);
+    await page.goto(base+'/login');await page.locator('#feishuAuthorize:not([disabled])').waitFor();await page.locator('#feishuAuthorize').click();
+    await page.waitForURL('https://accounts.feishu.cn/open-apis/authen/v1/authorize?**');
 
     // The QR window fits a phone; script failure gives a retry and a deliberate authorization link.
     const mobile=await context.newPage({viewport:{width:375,height:812}});await mobile.clock.install();await mobile.goto(base+'/login');

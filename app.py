@@ -1886,6 +1886,24 @@ class FeishuAdapter:
         if not self.login_configured(): raise RuntimeError('Feishu login is not configured')
         query=urllib.parse.urlencode({'client_id':self.app_id,'redirect_uri':feishu_redirect_uri(),'state':state,'response_type':'code'})
         return 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?'+query
+    def qr_authorization_url(self, state):
+        # QR SDK 1.0.3 explicitly supports the earlier OAuth login process only.
+        query=urllib.parse.urlencode({'client_id':self.app_id,'redirect_uri':feishu_redirect_uri(),'state':state,'response_type':'code'})
+        return 'https://passport.feishu.cn/suite/passport/oauth/authorize?'+query
+    def exchange_qr_login_code(self, code):
+        payload={'grant_type':'authorization_code','client_id':self.app_id,'client_secret':self.secret,
+                 'code':code,'redirect_uri':feishu_redirect_uri()}
+        req=urllib.request.Request('https://passport.feishu.cn/suite/passport/oauth/token',
+            urllib.parse.urlencode(payload).encode(),{'Content-Type':'application/x-www-form-urlencoded'})
+        with urllib.request.urlopen(req,timeout=10) as response:out=json.load(response)
+        if out.get('error') or not out.get('access_token'):raise RuntimeError('Feishu QR authorization failed')
+        return out
+    def qr_login_open_id(self, access_token):
+        req=urllib.request.Request('https://passport.feishu.cn/suite/passport/oauth/userinfo',
+            headers={'Authorization':'Bearer '+access_token})
+        with urllib.request.urlopen(req,timeout=10) as response:out=json.load(response)
+        if out.get('error') or not out.get('open_id'):raise RuntimeError('Feishu QR identity unavailable')
+        return out['open_id']
     def exchange_login_code(self, code):
         if not self.login_configured(): raise RuntimeError('Feishu login is not configured')
         payload={'grant_type':'authorization_code','code':code,'client_id':self.app_id,'client_secret':self.secret,'redirect_uri':feishu_redirect_uri()}
@@ -2146,6 +2164,10 @@ class Handler(BaseHTTPRequestHandler):
         except LookupError as exc:return self.json(404,{'error':str(exc)})
         except (ValueError,TypeError) as exc:return self.json(400,{'error':str(exc)})
         finally:c.close()
+    def show_feishu_entry(self,bind=False):
+        if bind and not self.session_user():return self.redirect('/login')
+        if not FeishuAdapter().login_configured():return self.redirect('/?page=profile&binding=not_configured' if bind else '/login?login_error=not_configured')
+        return self.send_bytes(200,'text/html; charset=utf-8',(ROOT/'static'/'feishu-entry.html').read_bytes(),'no-store')
     def start_feishu_login(self,bind=False,qr=False):
         user=self.session_user()
         if bind and not user:
@@ -2159,9 +2181,10 @@ class Handler(BaseHTTPRequestHandler):
             c.execute('DELETE FROM login_state WHERE state_hash=?',(hashlib.sha256(self.cookie('wmt_oauth_state').encode()).hexdigest(),))
             c.execute('INSERT INTO login_state(state_hash,expire_at,created_at,flow_type,user_id,session_hash) VALUES(?,?,?,?,?,?)',
                 (hashlib.sha256(state.encode()).hexdigest(),(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat(),now(),
-                 'bind' if bind else 'login',user['id'] if bind else None,hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest() if bind else None));c.commit()
+                 ('qr_bind' if bind else 'qr_login') if qr else ('bind' if bind else 'login'),user['id'] if bind else None,hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest() if bind else None));c.commit()
         finally:c.close()
-        url=FeishuAdapter().authorization_url(state);cookie=self.account_cookie(state,600,'wmt_oauth_state','/auth/feishu')
+        adapter=FeishuAdapter();url=adapter.qr_authorization_url(state) if qr else adapter.authorization_url(state)
+        cookie=self.account_cookie(state,600,'wmt_oauth_state','/auth/feishu')
         if qr:return self.json(200,{'authorization_url':url,'expires_in':600},cookie)
         self.redirect(url,cookie)
     def finish_feishu_login(self,query):
@@ -2175,14 +2198,18 @@ class Handler(BaseHTTPRequestHandler):
         finally:c.close()
         clear=self.account_cookie('',0,'wmt_oauth_state','/auth/feishu')
         if not valid:return self.redirect('/login?login_error=expired',clear)
-        binding=valid['flow_type']=='bind'
+        binding=valid['flow_type'] in ('bind','qr_bind')
         target='/?page=profile&binding=' if binding else '/login?login_error='
         if binding and (not current or current['id']!=valid['user_id'] or
             not secrets.compare_digest(valid['session_hash'] or '',hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest())):
             return self.redirect('/login?login_error=expired',clear)
         if not code:return self.redirect(target+'cancelled',clear)
         try:
-            adapter=FeishuAdapter();token=adapter.exchange_login_code(code);open_id=adapter.login_open_id(token['access_token'])
+            adapter=FeishuAdapter()
+            if valid['flow_type'] in ('qr_login','qr_bind'):
+                token=adapter.exchange_qr_login_code(code);open_id=adapter.qr_login_open_id(token['access_token'])
+            else:
+                token=adapter.exchange_login_code(code);open_id=adapter.login_open_id(token['access_token'])
         except Exception:return self.redirect(target+'authorization_failed',clear)
         c=db()
         try:
@@ -2280,7 +2307,11 @@ class Handler(BaseHTTPRequestHandler):
             flow=q.get('flow',['login'])[0]
             if flow not in ('login','bind'):return self.json(400,{'error':'不支持的扫码操作'})
             return self.start_feishu_login(bind=flow=='bind',qr=True)
-        if p.path=='/auth/feishu/bind':return self.start_feishu_login(bind=True)
+        if p.path=='/auth/feishu/bind':return self.show_feishu_entry(bind=True)
+        if p.path=='/auth/feishu/authorize':
+            flow=q.get('flow',['login'])[0]
+            if flow not in ('login','bind'):return self.json(400,{'error':'不支持的授权操作'})
+            return self.start_feishu_login(bind=flow=='bind')
         if p.path=='/static/monthly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'monthly-reports.js').read_bytes(),'no-cache')
         if p.path=='/routine-test-report':
@@ -2293,7 +2324,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'routine-tasks.js').read_bytes(),'no-cache')
         if p.path=='/static/weekly-reports.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'weekly-reports.js').read_bytes(),'no-cache')
-        if p.path=='/auth/feishu/start': return self.start_feishu_login()
+        if p.path=='/auth/feishu/start': return self.show_feishu_entry()
         if p.path=='/auth/feishu/callback': return self.finish_feishu_login(q)
         if p.path=='/auth/logout': return self.logout()
         if p.path=='/api/session': return self.json(200,self.session_payload())
