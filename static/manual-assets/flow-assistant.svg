@@ -4,7 +4,7 @@
 <rect width="1120" height="608" rx="18" fill="#f3f7fe"/>
 <g font-family="Microsoft YaHei,Noto Sans CJK SC,sans-serif">
 <text x="32" y="44" font-size="25" font-weight="700" fill="#17385e">智能助手：多轮补全，核对后确认</text>
-<text x="32" y="76" font-size="16" fill="#536b89">在飞书打开“科技产品中心智能助手”；示例为对话步骤示意，并非飞书界面截图。</text>
+<text x="32" y="76" font-size="16" fill="#536b89">在飞书打开“生产-科技产品中心智能助手”；以下为操作步骤示意，并非飞书界面截图。</text>
 <text x="34" y="124" font-size="17" font-weight="700" fill="#285ca2">维护基础资料 / 修改或删除任务</text>
 <rect x="32.0" y="140" width="241.5" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
 <circle cx="55.0" cy="166" r="13" fill="#2b65c5"/><text x="55.0" y="171" text-anchor="middle" font-size="15" fill="#fff">1</text>
