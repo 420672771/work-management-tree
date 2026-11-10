@@ -44,6 +44,105 @@ class AssistantManagementTests(unittest.TestCase):
         tid=self.c.execute('INSERT INTO task('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',tuple(fields.values())).lastrowid
         self.c.commit();return tid
 
+    REPORT=('AI智能客服：\n'
+            '1、任务情况：AI智能客服功能需求调研和方案设计，目前碰到几大卡点，暂且找不到合适解决方案，还在与业务方持续沟通中\n'
+            '2、优先级：P1\n3、计划完成时间：11月30日\n4、进度百分比：20%')
+
+    def test_screenshot_report_does_not_plan_deadline_change_or_guess_unrelated_task(self):
+        self.assertFalse(app.is_deadline_change_request(self.REPORT))
+        for existing in (False,True):
+            if existing:tid=self.task(owner=self.pm,title='无关任务')
+            reply=self.say(self.REPORT,user=self.pm)
+            self.assertIn('进度汇报（20%）',reply);self.assertIn('任务编号',reply);self.assertIn('新建任务',reply)
+            self.assertIn('没有待确认',self.say('确认',user=self.pm))
+            self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+            self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],0)
+            self.assertEqual(self.c.execute('SELECT count(*) FROM task').fetchone()[0],int(existing))
+            if existing:self.assertEqual(self.c.execute('SELECT due_at FROM task WHERE id=?',(tid,)).fetchone()[0],'2030-01-01T17:00:00+08:00')
+
+    def test_labelled_report_matches_own_title_and_submits_progress_without_changing_task_fields(self):
+        tid=self.task(owner=self.pm,title='AI智能客服',priority='P0',approver_id=self.manager)
+        reply=self.say(self.REPORT,user=self.pm)
+        self.assertIn('已记录《AI智能客服》进度 20%',reply)
+        record=self.c.execute('SELECT * FROM progress_record WHERE task_id=?',(tid,)).fetchone()
+        self.assertEqual(record['reported_percent'],20);self.assertEqual(record['report_text'],self.REPORT)
+        self.assertEqual(record['status'],'pending');self.assertEqual(record['source'],'feishu')
+        self.assertEqual(record['expected_finish'],app.parse_due('11月30日'))
+        task=self.c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+        self.assertEqual(task['due_at'],'2030-01-01T17:00:00+08:00');self.assertEqual(task['priority'],'P0')
+        self.assertEqual(task['effective_percent'],0)
+        self.assertEqual(self.c.execute("SELECT approver_id FROM approval_record WHERE biz_type='progress_confirm'").fetchone()[0],self.manager)
+
+    def test_labelled_report_keeps_content_for_bare_number_followup_and_checks_ownership(self):
+        tid=self.task(owner=self.pm,id=15,approver_id=self.manager)
+        foreign=self.task(owner=self.member)
+        self.assertIn('任务编号',self.say(self.REPORT,user=self.pm))
+        self.assertIn('不是你的责任任务',self.say('#'+str(foreign),user=self.pm))
+        self.assertIn('已记录',self.say('#15',user=self.pm))
+        record=self.c.execute('SELECT * FROM progress_record').fetchone()
+        self.assertEqual(record['task_id'],tid);self.assertEqual(record['report_text'],self.REPORT)
+        self.assertEqual(record['reported_percent'],20)
+        self.say('#15',user=self.pm)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],1)
+
+    def test_labelled_report_requires_number_for_duplicate_titles_and_rechecks_state(self):
+        first=self.task(owner=self.pm,title='AI智能客服')
+        second=self.task(owner=self.pm,title='AI智能客服')
+        reply=self.say(self.REPORT,user=self.pm)
+        self.assertIn('多条同名任务',reply);self.assertIn('#'+str(first),reply);self.assertIn('#'+str(second),reply)
+        self.c.execute("UPDATE task SET work_status='completed' WHERE id=?",(first,));self.c.commit()
+        self.assertIn('不支持填报进度',self.say('#'+str(first),user=self.pm))
+        self.assertIn('已记录',self.say('#'+str(second),user=self.pm))
+        self.assertEqual(self.c.execute('SELECT task_id FROM progress_record').fetchone()[0],second)
+
+    def test_labelled_report_collection_is_isolated_expiring_and_cancellable(self):
+        tid=self.task(owner=self.pm)
+        self.say(self.REPORT,user=self.pm,session='report-chat')
+        self.say('#'+str(tid),user=self.pm,session='another-chat')
+        self.say('#'+str(tid),user=self.member,session='report-chat')
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+        self.say('取消',user=self.pm,session='report-chat');self.say('#'+str(tid),user=self.pm,session='report-chat')
+        self.say(self.REPORT,user=self.pm,session='expired-report')
+        self.c.execute("UPDATE bot_pending_action SET expire_at='2000-01-01' WHERE session_id='expired-report'");self.c.commit()
+        self.say('#'+str(tid),user=self.pm,session='expired-report')
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+
+    def test_labelled_report_replaces_stale_edit_and_explicit_creation_only_makes_draft(self):
+        tid=self.task(owner=self.pm,title='无关任务')
+        self.assertIn('回复“确认”',self.say(f'任务#{tid} 优先级改为P0',user=self.pm))
+        self.say(self.REPORT,user=self.pm)
+        self.assertIn('没有待确认',self.say('确认',user=self.pm))
+        reply=self.say('新建任务 '+self.REPORT,user=self.pm)
+        self.assertIn('新任务草稿',reply)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM task').fetchone()[0],1)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM conversation_draft').fetchone()[0],1)
+        self.say('#'+str(tid),user=self.pm)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+
+    def test_labelled_report_rejects_out_of_range_progress(self):
+        self.task(owner=self.pm,title='AI智能客服')
+        for percent in ('101%','-20%'):
+            self.assertIn('0%到100%',self.say(self.REPORT.replace('20%',percent),user=self.pm))
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+
+    def test_invalid_report_and_new_operations_discard_previous_actions(self):
+        tid=self.task(owner=self.pm)
+        self.assertIn('回复“确认”',self.say(f'任务#{tid} 优先级改为P0',user=self.pm))
+        self.say(self.REPORT.replace('20%','101%'),user=self.pm)
+        self.assertIn('没有待确认',self.say('确认',user=self.pm))
+        self.say(self.REPORT,user=self.pm)
+        self.say('修改任务999999的责任人',user=self.pm)
+        self.say('#'+str(tid),user=self.pm)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record').fetchone()[0],0)
+
+    def test_explicit_deadline_edits_still_preview_and_require_confirmation(self):
+        tid=self.task(owner=self.pm)
+        for index,command in enumerate(('截止日期延后到11月30日','计划完成时间调整为11月30日','截止日期改到11月30日')):
+            session='deadline-report-regression:'+str(index)
+            self.assertIn('回复“确认”',self.say(f'任务#{tid} '+command,user=self.pm,session=session))
+            self.assertEqual(self.c.execute('SELECT due_at FROM task WHERE id=?',(tid,)).fetchone()[0],'2030-01-01T17:00:00+08:00')
+            self.say('取消',user=self.pm,session=session)
+
     def test_screenshot_owner_change_collects_missing_name_and_bare_task_number(self):
         tid=self.task(id=15);target=self.c.execute("INSERT INTO user(name,role) VALUES('对话张三','member')").lastrowid;self.c.commit()
         for text in ('修改任务15的责任人','#15'):
@@ -339,6 +438,13 @@ class AssistantManagementTests(unittest.TestCase):
         self.callback('确认','dialogue-http-confirm')
         self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.pm)
 
+    def test_http_callback_submits_labelled_report_once(self):
+        tid=self.task(owner=self.manager,title='AI智能客服',approver_id=self.pm)
+        response,send=self.callback(self.REPORT,'report-http')
+        self.assertEqual(response[0],200);self.assertIn('进度 20%',send.args[1])
+        self.callback(self.REPORT,'report-http')
+        self.assertEqual(self.c.execute('SELECT count(*) FROM progress_record WHERE task_id=?',(tid,)).fetchone()[0],1)
+
     def test_websocket_uses_same_workflow_and_deduplicates_events_without_remote_calls(self):
         path=Path(app.__file__).parent/'scripts'/'feishu-long-connection.py'
         spec=importlib.util.spec_from_file_location('assistant_ws',path)
@@ -362,6 +468,21 @@ class AssistantManagementTests(unittest.TestCase):
             with patch.object(ws.lark.JSON,'marshal',return_value=json.dumps(raw)),patch.object(app.FeishuAdapter,'send_text') as send:
                 ws.receive(object());self.assertIn('请提供新的责任人' if index<2 else ('回复“确认”' if index==2 else '责任人已变更'),send.call_args.args[1])
             self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(tid,)).fetchone()[0],self.member if index<3 else self.pm)
+
+    def test_websocket_collects_labelled_report_then_number_and_deduplicates_without_remote_calls(self):
+        tid=self.task(id=15,owner=self.manager,approver_id=self.pm)
+        spec=importlib.util.spec_from_file_location('assistant_report_ws',Path(app.__file__).parent/'scripts/feishu-long-connection.py')
+        ws=importlib.util.module_from_spec(spec);spec.loader.exec_module(ws)
+        for text,event_id,expected in ((self.REPORT,'report-ws','任务编号'),('#15','report-ws-number','进度 20%'),('#15','report-ws-number',None)):
+            raw={'header':{'event_id':event_id},'event':{'sender':{'sender_id':{'open_id':'assistant-manager'}},
+                 'message':{'message_type':'text','content':json.dumps({'text':text})}}}
+            with patch.object(ws.lark.JSON,'marshal',return_value=json.dumps(raw)),patch.object(app.FeishuAdapter,'send_text') as send:
+                ws.receive(object())
+                if expected:self.assertIn(expected,send.call_args.args[1])
+                else:send.assert_not_called()
+        record=self.c.execute('SELECT * FROM progress_record').fetchall()
+        self.assertEqual(len(record),1);self.assertEqual(record[0]['task_id'],tid)
+        self.assertEqual(record[0]['report_text'],self.REPORT)
 
 
 if __name__=='__main__':unittest.main()

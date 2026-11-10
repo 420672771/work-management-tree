@@ -756,11 +756,73 @@ def resolve_progress_message(c, text, user_id, session_id=None):
 def is_task_creation_request(text):
     """Only create a draft for an explicit assignment, never for ordinary dialogue."""
     source=str(text or '').strip()
-    if not source or re.search(r'进度|完成\s*\d{1,3}\s*[%％]|已完成|完成了|阻塞|风险|不是在新建',source):
+    if not source or '不是在新建' in source:return False
+    if re.search(r'^(?:新建|创建|新增|安排)\s*(?:一个|一项|一条)?\s*(?:任务|事项)(?!模板)',source):return True
+    if re.search(r'进度|完成\s*\d{1,3}\s*[%％]|已完成|完成了|阻塞|风险',source):
         return False
     if re.search(r'^(?:新建|创建|新增|安排).{0,8}(?:任务|事项)',source):
         return True
     return bool(re.search(r'请.{1,24}(?:负责|完成|推进|落实|开展|组织)',source))
+
+def structured_progress_report(text):
+    """Recognise labelled status reports without treating their prose as commands."""
+    source=str(text or '').strip()
+    if re.match(r'^(?:(?:请|帮我|帮忙|麻烦)\s*)*(?:修改|更改|调整|变更|删除|移除|设置|验收)',source):return None
+    labels=r'任务标题|任务名称|任务情况|任务描述|优先级|计划完成时间|计划完成日期|预计完成时间|进度百分比|完成比例|进度'
+    matches=list(re.finditer(r'(?:\d+[、.．)）]\s*)?('+labels+r')\s*[:：]\s*',source))
+    fields={match[1]:source[match.end():matches[index+1].start() if index+1<len(matches) else len(source)].strip()
+            for index,match in enumerate(matches)}
+    progress=next((fields[key] for key in ('进度百分比','完成比例','进度') if key in fields),None)
+    if progress is None or len(fields)<2:return None
+    percent=re.fullmatch(r'(-?\d+)\s*[%％][。；;]?',progress)
+    if not percent:return None
+    title=fields.get('任务标题') or fields.get('任务名称') or source[:matches[0].start()].strip(' \t\r\n:：')
+    planned=next((fields[key] for key in ('计划完成时间','计划完成日期','预计完成时间') if key in fields),'')
+    return {'title':title,'percent':int(percent[1]),'task_id':task_number(title),'comment':source,
+            'expected_finish':parse_due(planned) if planned else None}
+
+def process_structured_progress_report(c,text,user_id,session_id):
+    report=structured_progress_report(text);row=None
+    if not report and user_id and re.fullmatch(r'(?:#\s*\d+|(?:任务|task)\s*(?:编号\s*[:#]?\s*|[#:：\-]\s*)?\d+)[。]?',normalize_assistant_text(text),re.I):
+        row=c.execute("SELECT * FROM bot_pending_action WHERE session_id=? AND user_id=? AND status='collecting' AND expire_at>? ORDER BY id DESC LIMIT 1",(session_id,user_id,now())).fetchone()
+        action=json.loads(row['action_json']) if row else {}
+        if action.get('type')=='collect_progress_report':report={**action['report'],'task_id':task_number(text)}
+    if not report:return None
+    if not user_id:return '你的飞书账号尚未绑定系统成员，暂不能提交进度。'
+    if not 0<=report['percent']<=100:
+        c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id=? AND status IN ('pending','collecting')",(session_id,user_id))
+        return '进度百分比须在0%到100%之间，请核对后重新发送。'
+    if row is None:
+        action_id=save_bot_action(c,session_id,user_id,{'type':'collect_progress_report','report':report})
+        c.execute("UPDATE bot_pending_action SET status='collecting' WHERE id=?",(action_id,))
+    else:action_id=row['id']
+    tid=report['task_id'];title=report['title']
+    if not tid and title:
+        rows=c.execute("SELECT id,title FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY id",(user_id,)).fetchall()
+        matches=[task for task in rows if re.sub(r'\s+','',task['title']).casefold()==re.sub(r'\s+','',title).casefold()]
+        if len(matches)==1:tid=matches[0]['id']
+        elif len(matches)>1:return f'已识别《{title}》的进度汇报（{report["percent"]}%），但有多条同名任务。请回复任务编号：'+ '、'.join('#'+str(task['id']) for task in matches[:5])+'。'
+    if not tid:
+        label=f'《{title}》' if title else '这项工作'
+        return f'已识别{label}的进度汇报（{report["percent"]}%），但尚未定位到对应任务。若更新已有任务，请回复任务编号，例如“#15”；若要新建，请明确说“新建任务”并提供任务内容，系统会先生成草稿供确认。'
+    task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+    if not task:return f'未找到任务#{tid}，请核对编号。'
+    if task['owner_id']!=user_id:return f'任务#{tid}《{task["title"]}》不是你的责任任务，不能代为填报。'
+    if task['approval_status']!='approved' or task['work_status'] in ('completed','cancelled'):return f'任务#{tid}当前不支持填报进度，请核对任务状态。'
+    try:
+        submit_progress(c,tid,user_id,report['percent'],report['comment'],expected_finish=report['expected_finish'],source='feishu')
+    except (ValueError,PermissionError) as exc:return str(exc)
+    c.execute("UPDATE bot_pending_action SET status='executed',confirmed_at=? WHERE id=?",(now(),action_id))
+    save_bot_task_context(c,session_id,user_id,tid)
+    return f'已记录《{task["title"]}》进度 {report["percent"]}%，已提交上级确认。'
+
+def is_deadline_change_request(text):
+    source=normalize_assistant_text(text)
+    field=r'(?:截止(?:日期|时间)?|计划完成(?:日期|时间)|完成时间|交付日期|到期(?:日期|时间)?)'
+    change=r'(?:修改|更改|调整|变更|更正|改为|改成|改到|改至|设为|设置|定为|推迟|延后|延迟|延期|延长|提前|顺延)'
+    # Complete verbs and a bounded clause prevent “需求调研 … 计划完成时间” from becoming a mutation.
+    return bool(re.search(field+r'[^，,。；;!?！？]{0,30}'+change+'|'+change+r'[^，,。；;!?！？]{0,30}'+field,source)
+                or re.search(r'(?:该|这|此)(?:任务|事项)?.{0,12}(?:到|为)\s*(?:\d{1,2}[./月]|今天|明天|后天|下周)',source))
 
 def feishu_task_list(c, user_id, session_id=None):
     if not user_id:
@@ -1320,7 +1382,7 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         action={'type':'edit_field','task_id':tid,'field':field,'value':value}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟将任务#{tid}《{task["title"]}》的{ {"title":"标题","description":"详情","deliverable":"交付物/验收标准"}[field] }改为：{value}。回复“确认”执行，回复“取消”放弃。'
     due=parse_due(source)
-    if due and re.search(r'(?:截止(?:日期)?|完成时间|交付日期|到期).*(?:改|调|变|延|推|到|为)|(?:改|调|变|延|推).*(?:截止|日期|时间|到期)|(?:该|这|此)(?:任务|事项)?.{0,12}(?:到|为)\s*(?:\d{1,2}[./月]|今天|明天|后天|下周)',source):
+    if due and is_deadline_change_request(source):
         if not tid:
             active=c.execute("SELECT * FROM task WHERE owner_id=? AND approval_status='approved' AND work_status NOT IN ('completed','cancelled') ORDER BY due_at,id",(user_id,)).fetchall()
             if len(active)==1:
@@ -1454,6 +1516,14 @@ def confirm_bot_action(c, user_id, session_id):
     return reply
 
 
+def create_bot_task_draft(c,text,user_id,session_id):
+    if not user_id:return '你的飞书账号尚未绑定系统成员，暂不能新建任务。'
+    c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id=? AND status IN ('pending','collecting')",(session_id,user_id))
+    slots,missing=draft_slots(text,user_id,c);expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
+    c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,user_id,'feishu',text,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
+    domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
+    return '已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+
 def process_bot_message(c, text, user_id, session_id):
     """Shared text workflow for the Feishu callback and WebSocket receiver."""
     source=normalize_assistant_text(text)
@@ -1461,8 +1531,15 @@ def process_bot_message(c, text, user_id, session_id):
     if re.fullmatch(r'(?:取消|取消操作|不确认|否)[。！!]?',source):
         c.execute("UPDATE bot_pending_action SET status='cancelled',confirmed_at=? WHERE session_id=? AND user_id IS ? AND status IN ('pending','collecting')",(now(),session_id,user_id))
         return '已取消待执行操作。'
+    if re.match(r'^(?:新建|创建|新增|安排)\s*(?:一个|一项|一条)?\s*(?:任务|事项)(?!模板)',source):
+        return create_bot_task_draft(c,text,user_id,session_id)
+    report_reply=process_structured_progress_report(c,text,user_id,session_id)
+    if report_reply:return report_reply
     if re.search(r'删除|移除|作废|修改|改为|改成|调整|变更|新建|新增|创建|添加|开始|启动|提交|验收|设置|配置|代理',source):
         c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id IS ? AND status='pending'",(session_id,user_id))
+        row=c.execute("SELECT id,action_json FROM bot_pending_action WHERE session_id=? AND user_id IS ? AND status='collecting' ORDER BY id DESC LIMIT 1",(session_id,user_id)).fetchone()
+        if row and json.loads(row['action_json']).get('type')=='collect_progress_report':
+            c.execute("UPDATE bot_pending_action SET status='superseded' WHERE id=?",(row['id'],))
     action,reply=plan_bot_action(c,text,user_id,session_id)
     if action or reply:return reply
     progress,error=resolve_progress_message(c,source,user_id,session_id)
@@ -1477,11 +1554,7 @@ def process_bot_message(c, text, user_id, session_id):
     if is_team_progress_query(source):return feishu_team_progress(c,user_id)
     if intent=='task_query':return feishu_task_list(c,user_id,session_id)
     if intent=='help':return BOT_HELP
-    if intent=='task_creation':
-        slots,missing=draft_slots(source,user_id,c);expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
-        c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(session_id,user_id,'feishu',source,json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,now(),now()))
-        domain_hint=('。建议责任域：'+slots['domain_name']) if slots.get('org_node_id') else '。责任域暂未自动确定，请在网页确认时选择'
-        return '已识别新任务草稿：'+slots['title']+domain_hint+('。请补充：'+friendly_slot_labels(missing) if missing else '。请在网页确认生成。')
+    if intent=='task_creation':return create_bot_task_draft(c,source,user_id,session_id)
     return assistant_clarification(source)
 
 
