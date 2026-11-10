@@ -57,8 +57,8 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
   const style = document.createElement('style');
   style.textContent = `#weeklyPage .weekly-toolbar,#weeklyPage .weekly-actions{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:16px 0}#weeklyPage button{width:auto;margin:0}#weeklyPage .weekly-toolbar label{margin:0}#weeklyPage .weekly-toolbar input{width:150px}#weeklyPage .weekly-toolbar select{min-width:150px}.weekly-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:20px 0}#weeklyPage .weekly-metric{background:#f7faff;color:#334155;border:1px solid #dce5f3;padding:14px;text-align:left;width:100%;border-radius:8px}#weeklyPage .weekly-metric b{display:block;color:#245dcc;font-size:22px;margin-bottom:5px}#weeklyPage .weekly-metric[aria-expanded=true]{border-color:#2563eb}.weekly-item{padding:16px;border:1px solid #e5eaf2;border-radius:8px;margin:12px 0;overflow-wrap:anywhere}.weekly-item h4{font-size:16px;margin:0 0 8px}.weekly-item p{margin:8px 0;white-space:pre-wrap}.weekly-item textarea{min-height:60px}#weeklyPage textarea{box-sizing:border-box;width:100%;font:inherit}#weeklyPage .weekly-section{margin:24px 0}#weeklyPage .weekly-section h3{font-size:20px}.weekly-history{overflow:auto}.weekly-history table{width:100%;border-collapse:collapse;white-space:nowrap}.weekly-history td,.weekly-history th{text-align:left;padding:10px;border-bottom:1px solid #e5eaf2}.weekly-notice{padding:14px 18px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;margin:16px 0}.weekly-notice button{width:auto;margin:0 0 0 12px}.weekly-meta{color:#667085;font-size:13px;line-height:1.8;white-space:pre-wrap}.weekly-summary{white-space:pre-wrap;line-height:1.8}.weekly-order{display:flex;gap:8px;justify-content:flex-end}.weekly-error{color:#b42318;white-space:pre-wrap}#weeklyPage .weekly-editor label{display:block;margin:14px 0 6px}@media(max-width:850px){.weekly-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:500px){.weekly-metrics{grid-template-columns:1fr}#weeklyPage .weekly-toolbar{align-items:stretch}#weeklyPage .weekly-toolbar input{width:100%}}`;
   style.textContent += `
-    #weeklyPage .weekly-items{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-items:start;margin-top:16px}
-    #weeklyPage .weekly-items .weekly-item{min-width:0;margin:0;padding:22px 24px;border-radius:14px;background:#fff;border-color:#e0e7f0;box-shadow:0 2px 7px #18335404}
+    #weeklyPage .weekly-items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start;margin-top:14px}
+    #weeklyPage .weekly-items .weekly-item{min-width:0;margin:0;padding:14px 16px}
     #weeklyPage .weekly-item h4{line-height:1.5;margin-bottom:6px}
     #weeklyPage .weekly-item p{margin-top:6px;line-height:1.65}
     #weeklyPage .weekly-report-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:12px 0 20px}
@@ -72,45 +72,20 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
     #weeklyPage .weekly-more{position:relative;color:#63738b}#weeklyPage .weekly-more summary{cursor:pointer;padding:8px}#weeklyPage .weekly-more[open]{flex-basis:100%}#weeklyPage .weekly-actions [hidden]{display:none!important}
     #weeklyPage .weekly-order{flex-wrap:wrap;margin-top:10px}
     #weeklyPage .weekly-item label{display:block;margin-top:10px;font-size:13px;color:#63738b}
-    #weeklyPage .weekly-task-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
-    #weeklyPage .weekly-task-heading h4{margin:0;min-width:0;font-size:19px;line-height:1.5;color:#183354;letter-spacing:.1px}
-    #weeklyPage .weekly-task-badges{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:7px;flex-shrink:0;max-width:45%}
-    #weeklyPage .weekly-chip{display:inline-flex;align-items:center;padding:4px 9px;border-radius:6px;background:#f2f5f9;color:#56677d;font-size:12px;font-weight:600;line-height:1.5;white-space:nowrap}
-    #weeklyPage .weekly-chip.priority-p0{background:#fff1ec;color:#a63f27}#weeklyPage .weekly-chip.status-in_progress{background:#edf4ff;color:#285fc0}
-    #weeklyPage .weekly-chip.status-completed{background:#eaf7f0;color:#168052}#weeklyPage .weekly-chip.status-awaiting_acceptance{background:#f2efff;color:#6a4cb0}
-    #weeklyPage .weekly-chip.attention{background:#fff0ee;color:#b34135}#weeklyPage .weekly-chip.watch{background:#fff7e8;color:#95651c}
-    #weeklyPage .weekly-task-update{margin:16px 0 18px}#weeklyPage .weekly-task-update p{margin:5px 0 0;font-size:14px;color:#40526a;line-height:1.85}
-    #weeklyPage .weekly-task-caption{display:flex;flex-wrap:wrap;align-items:center;gap:8px;color:#7b899c;font-size:12px;font-weight:500}
-    #weeklyPage .weekly-task-caption time{font-size:11px;color:#8a96a7}
-    #weeklyPage .weekly-task-progress{display:flex;align-items:center;gap:13px;margin:16px 0 14px}
-    #weeklyPage .weekly-progress-label{color:#718096;font-size:12px;white-space:nowrap}
-    #weeklyPage .weekly-progress-track{flex:1;height:7px;border-radius:999px;background:#edf1f6;overflow:hidden;min-width:36px}
-    #weeklyPage .weekly-progress-track>span{display:block;height:100%;border-radius:inherit;background:#4c7bda}
+    #weeklyPage .weekly-chip{display:inline-block;padding:2px 7px;margin:0 2px;border-radius:5px;background:#f2f5f9;color:#607087;font-size:12px;font-weight:500;line-height:1.6;vertical-align:baseline}
+    #weeklyPage .weekly-chip.priority-p0,#weeklyPage .weekly-chip.risk-alert{background:#fff0ec;color:#b24732}
+    #weeklyPage .weekly-chip.priority-p1,#weeklyPage .weekly-chip.risk-watch{background:#fff7e8;color:#98671e}
+    #weeklyPage .weekly-chip.status-in_progress{background:#edf4ff;color:#2e65c1}
+    #weeklyPage .weekly-chip.status-completed{background:#eaf7ef;color:#188457}
+    #weeklyPage .weekly-chip.status-awaiting_acceptance{background:#f2efff;color:#7252aa}
+    #weeklyPage .weekly-task-progress{display:flex;align-items:center;gap:10px;margin:10px 0 12px}
+    #weeklyPage .weekly-progress-label,#weeklyPage .weekly-progress-unknown{font-size:12px;color:#7b899b;white-space:nowrap}
+    #weeklyPage .weekly-progress-track{flex:1;min-width:28px;height:5px;border-radius:999px;background:#edf1f6;overflow:hidden}
+    #weeklyPage .weekly-progress-track>span{display:block;height:100%;border-radius:inherit;background:#4d80d9}
     #weeklyPage .weekly-item.is-completed .weekly-progress-track>span{background:#20a778}
-    #weeklyPage .weekly-progress-value{color:#365575;min-width:34px;text-align:right;font-size:14px;font-weight:650;font-variant-numeric:tabular-nums}
-    #weeklyPage .weekly-progress-unknown{font-size:12px;color:#8a96a7;white-space:nowrap}
-    #weeklyPage .weekly-task-facts{display:flex;flex-wrap:wrap;gap:8px 22px;margin:12px 0 0;padding-top:14px;border-top:1px solid #edf0f5;font-size:12px;color:#758298}
-    #weeklyPage .weekly-task-facts b{font-weight:500;color:#52647c;margin-left:6px}
-    #weeklyPage .weekly-task-delivery{display:grid;grid-template-columns:120px minmax(0,1fr);gap:8px;margin-top:14px;font-size:13px;line-height:1.75;color:#617087}
-    #weeklyPage .weekly-task-delivery>span{color:#7b899c;font-size:12px}#weeklyPage .weekly-task-delivery p{margin:0;font-size:13px;white-space:pre-wrap}
-    #weeklyPage .weekly-task-next{display:flex;align-items:flex-start;gap:14px;padding:12px 15px;margin-top:17px;background:#f2f6fd;border-left:3px solid #6c8fd5;border-radius:0 8px 8px 0;font-size:13px;line-height:1.8}
-    #weeklyPage .weekly-task-next>b{flex-shrink:0;color:#3e65aa;font-size:12px;padding-top:1px}#weeklyPage .weekly-task-next p{margin:0;color:#4a607e;white-space:pre-wrap}
-    #weeklyPage .weekly-task-risk{margin-top:17px;padding:16px 0 0;border-top:1px dashed #e4e9f1}
-    #weeklyPage .weekly-task-risk h5{margin:0 0 9px;color:#a64b33;font-size:13px;font-weight:650}
-    #weeklyPage .weekly-risk-tags{display:flex;flex-wrap:wrap;gap:7px}#weeklyPage .weekly-risk-tags>span{padding:3px 8px;border-radius:5px;background:#fff7ed;color:#976236;font-size:12px;line-height:1.6}
-    #weeklyPage .weekly-task-block{display:flex;gap:12px;padding:11px 13px;border-radius:7px;background:#fff5f3;margin-top:10px;font-size:13px;line-height:1.8}
-    #weeklyPage .weekly-task-block b{color:#a64939;flex-shrink:0}#weeklyPage .weekly-task-block p{margin:0;color:#77564f}
-    #weeklyPage .weekly-task-footer{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-top:18px;padding-top:12px;border-top:1px solid #edf0f5}
-    #weeklyPage .weekly-note-editor{flex:1;min-width:0;color:#63738b;font-size:12px}#weeklyPage .weekly-note-editor>summary{cursor:pointer;line-height:30px;width:fit-content}
-    #weeklyPage .weekly-note-editor[open]>summary{color:#315f9e}#weeklyPage .weekly-note-editor label{margin-top:6px}#weeklyPage .weekly-note-editor textarea{min-height:76px;margin-top:5px}
-    #weeklyPage .weekly-task-footer .weekly-order{margin:0;flex-shrink:0}#weeklyPage .weekly-task-footer button{padding:6px 10px;font-size:12px}
-    #weeklyPage .weekly-task-note{margin-top:16px;padding:12px 14px;border-radius:8px;background:#f7f9fc;font-size:13px;line-height:1.8;color:#53677f;white-space:pre-wrap}
-    #weeklyPage .weekly-task-note b{display:block;margin-bottom:3px;font-size:12px;color:#728197}
-    #weeklyPage .weekly-section-heading{display:flex;align-items:center;gap:10px;margin:26px 0 12px}#weeklyPage .weekly-section-heading h3{margin:0}
-    #weeklyPage .weekly-section-count{font-size:12px;font-weight:500;color:#8190a4;padding:2px 8px;background:#f1f5fa;border-radius:999px}
-    @media(max-width:640px){#weeklyPage .weekly-items .weekly-item{padding:17px 16px;border-radius:11px}#weeklyPage .weekly-task-heading{flex-direction:column;gap:9px}#weeklyPage .weekly-task-heading h4{font-size:17px}#weeklyPage .weekly-task-badges{max-width:100%;justify-content:flex-start}#weeklyPage .weekly-task-facts{gap:8px 15px}#weeklyPage .weekly-task-delivery{grid-template-columns:1fr;gap:2px}#weeklyPage .weekly-task-footer{flex-direction:column;gap:10px}#weeklyPage .weekly-note-editor{width:100%}#weeklyPage .weekly-task-footer .weekly-order{align-self:flex-end}#weeklyPage .weekly-task-next{gap:10px}#weeklyPage .weekly-task-block{flex-direction:column;gap:2px}}
+    #weeklyPage .weekly-progress-value{font-size:12px;color:#536a85;min-width:30px;text-align:right;font-variant-numeric:tabular-nums}
     @media(max-width:960px){#weeklyPage .weekly-items{grid-template-columns:minmax(0,1fr)}}
-    @media print{#weeklyPage .weekly-items{grid-template-columns:minmax(0,1fr)}#weeklyPage .weekly-item{break-inside:avoid;box-shadow:none}#weeklyPage .weekly-order{display:none}}
+    @media print{#weeklyPage .weekly-items{grid-template-columns:minmax(0,1fr)}#weeklyPage .weekly-item{break-inside:avoid}}
   `;
   document.head.append(style);
   const nav = $('.nav-tabs');
@@ -148,23 +123,12 @@ if(typeof module!=='undefined' && module.exports)module.exports={createWeeklyAut
     return ids.map((id,i)=>taskCard(tasks.get(id),key,i,ids.length)).join('');
   }
   function taskCard(t, section, index, total) {
-    const done=t.work_status==='completed',reasons=Array.isArray(t.risk_reasons)?t.risk_reasons:[],blocked=Boolean(t.block_reason)||t.risk_status==='blocked';
-    const value=t.effective_percent,number=value===null||value===undefined||value===''?NaN:Number(value);
+    const done=t.work_status==='completed',value=t.effective_percent;
+    const number=value===null||value===undefined||value===''?NaN:Number(value);
     const percent=done?100:Number.isFinite(number)&&number>=0&&number<=100?number:null;
-    const note=report.editorial.notes?.[t.id]||'';
-    const attention=!done&&(blocked?'有阻塞':t.overdue?'已逾期':t.risk_status==='at_risk'?'有风险':reasons.length?'需关注':'');
-    const time=value=>{if(!value)return '';const date=new Date(value);return Number.isNaN(date.getTime())?String(value):new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(date);};
-    const progress=percent===null?'<div class="weekly-progress-track" aria-hidden="true"></div><span class="weekly-progress-unknown">暂无已确认进度</span>':`<div class="weekly-progress-track" role="progressbar" aria-label="任务#${t.id}已确认进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div><strong class="weekly-progress-value">${percent}%</strong>`;
-    const risk=!done&&(reasons.length||blocked)?`<div class="weekly-task-risk"><h5>风险与关注${reasons.length?` · ${reasons.length} 项关注条件`:''}</h5>${reasons.length?`<div class="weekly-risk-tags">${reasons.map(reason=>`<span>${escape(reason)}</span>`).join('')}</div>`:''}${t.block_reason?`<div class="weekly-task-block"><b>当前卡点</b><p>${escape(t.block_reason)}</p></div>`:''}</div>`:'';
-    const editorial=editable()&&section?`<div class="weekly-task-footer"><details class="weekly-note-editor" ${note?'open':''}><summary>周报补充${note?' · 已填写':' · 添加说明'}</summary><label>补充说明<textarea data-note="${t.id}" maxlength="4000" placeholder="补充周会结论、协调事项或下一步安排">${escape(note)}</textarea></label></details><div class="weekly-order"><button type="button" class="secondary" data-section="${section}" data-index="${index}" data-move="-1" ${index===0?'disabled':''} aria-label="上移 ${escape(t.title)}">上移</button><button type="button" class="secondary" data-section="${section}" data-index="${index}" data-move="1" ${index===total-1?'disabled':''} aria-label="下移 ${escape(t.title)}">下移</button></div></div>`:note?`<div class="weekly-task-note"><b>周报补充</b>${escape(note)}</div>`:'';
-    return `<article class="weekly-item weekly-task-card${done?' is-completed':''}" data-task-id="${t.id}">
-      <div class="weekly-task-heading"><h4>#${t.id} ${escape(t.title)}</h4><div class="weekly-task-badges"><span class="weekly-chip ${t.priority==='P0'?'priority-p0':''}">${escape(t.priority||'未设优先级')}</span><span class="weekly-chip status-${escape(t.work_status)}">${escape(workNames[t.work_status]||t.work_status)}</span>${attention?`<span class="weekly-chip ${blocked||t.overdue?'attention':'watch'}">${attention}</span>`:''}</div></div>
-      <div class="weekly-task-update"><div class="weekly-task-caption">最新进展${t.latest_progress_at?`<time>${escape(time(t.latest_progress_at))}</time>`:''}</div><p>${escape(t.latest_progress||'暂无进展记录')}</p></div>
-      <div class="weekly-task-progress"><span class="weekly-progress-label">已确认进度</span>${progress}</div>
-      <div class="weekly-task-facts"><span>责任人<b>${escape(t.owner_name||'未知责任人')}</b></span><span>责任域<b>${escape(t.domain_name||'未归类')}</b></span><span>计划完成<b>${escape(t.due_at?.slice(0,10)||'未设置')}</b></span>${t.completed_at?`<span title="${escape(t.completion_source)}">完成时间<b>${escape(time(t.completed_at))}</b></span>`:''}</div>
-      <div class="weekly-task-delivery"><span>交付物 / 验收标准</span><p>${escape(t.deliverable||'未填写')}</p></div>
-      ${!done&&t.suggested_action?`<div class="weekly-task-next"><b>建议下一步</b><p>${escape(t.suggested_action)}</p></div>`:''}${risk}${editorial}
-    </article>`;
+    const progress=percent===null?'<span class="weekly-progress-unknown">暂无已确认进度</span>':`<div class="weekly-progress-track" role="progressbar" aria-label="任务#${t.id}已确认进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div><span class="weekly-progress-value">${percent}%</span>`;
+    const reasons=Array.isArray(t.risk_reasons)?t.risk_reasons:[];
+    return `<article class="weekly-item weekly-task-card${done?' is-completed':''}" data-task-id="${t.id}"><h4>#${t.id} ${escape(t.title)}</h4><p class="weekly-meta">${escape(t.owner_name || '未知责任人')} · ${escape(t.domain_name)} · <span class="weekly-chip priority-${escape(t.priority?.toLowerCase())}">${escape(t.priority)}</span> · <span class="weekly-chip status-${escape(t.work_status)}">${escape(workNames[t.work_status] || t.work_status)}</span> · 截止 ${escape(t.due_at?.slice(0,10))}</p><div class="weekly-task-progress"><span class="weekly-progress-label">已确认进度</span>${progress}</div><p>交付物/验收标准：${escape(t.deliverable || '未填写')}</p>${section==='risks' ? `<p>关注原因：${reasons.map(reason=>`<span class="weekly-chip ${/逾期|阻塞/.test(reason)?'risk-alert':'risk-watch'}">${escape(reason)}</span>`).join('')}</p><p>风险/最后进展：${escape(t.block_reason || t.latest_progress || '暂无进展记录')}</p><p>建议动作：${escape(t.suggested_action)}</p>` : ''}${section==='achievements' ? (t.completed_at ? `<p class="weekly-meta">完成时间：${escape(displayDate(t.completed_at))}（${escape(t.completion_source)}）</p>` : `<p>最后进展：${escape(t.latest_progress || '暂无进展记录')}</p>`) : ''}${editable() && section ? `<label>补充说明<textarea data-note="${t.id}" maxlength="4000">${escape(report.editorial.notes?.[t.id] || '')}</textarea></label><div class="weekly-order"><button type="button" class="secondary" data-section="${section}" data-index="${index}" data-move="-1" ${index===0?'disabled':''} aria-label="上移 ${escape(t.title)}">上移</button><button type="button" class="secondary" data-section="${section}" data-index="${index}" data-move="1" ${index===total-1?'disabled':''} aria-label="下移 ${escape(t.title)}">下移</button></div>` : report.editorial.notes?.[t.id] ? `<p class="weekly-task-note">补充说明：${escape(report.editorial.notes[t.id])}</p>` : ''}</article>`;
   }
   function renderReport() {
     renderActions();renderChanges();

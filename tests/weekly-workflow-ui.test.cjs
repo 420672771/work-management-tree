@@ -118,5 +118,5 @@ test('task card descriptions and editorial notes remain escaped and ordering con
   b.model.snapshot.sections.risks=[44];b.model.editorial.notes[44]='</textarea>'+unsafe;
   await b.context.openPage('weekly');const html=b.elements.get('weeklyContent').innerHTML;
   assert(!html.includes(unsafe));assert(html.includes('&lt;img'));assert(html.includes('data-note="44"'));
-  assert(html.includes('当前卡点'));assert(html.includes('data-move="-1"'));assert(html.includes('data-move="1"'));
+  assert(html.includes('风险/最后进展'));assert(html.includes('data-move="-1"'));assert(html.includes('data-move="1"'));
 });
