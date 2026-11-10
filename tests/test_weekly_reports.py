@@ -129,6 +129,50 @@ class WeeklyReportTests(unittest.TestCase):
         tid=self.task(effective_percent=75,updated_at='2026-11-09T10:00:00+08:00')
         self.assertIsNone(self.generate()['snapshot']['tasks'][0]['effective_percent'])
 
+    def legacy_report(self,tid):
+        report=self.generate();snapshot=report['snapshot']
+        next(task for task in snapshot['tasks'] if task['id']==tid).pop('effective_percent',None)
+        self.c.execute('UPDATE weekly_report SET snapshot_json=? WHERE id=?',(json.dumps(snapshot,ensure_ascii=False),report['id']));self.c.commit()
+        return report['id']
+
+    def test_legacy_report_recovers_confirmed_progress_without_writing_frozen_data(self):
+        tid=self.task(effective_percent=80,updated_at='2026-11-05T10:00:00+08:00')
+        self.c.execute('INSERT INTO progress_record(task_id,reported_percent,effective_percent,report_text,status,reported_at,confirmed_at) VALUES(?,?,?,?,?,?,?)',
+                       (tid,80,80,'此任务完成80%','auto_approved','2026-11-04T09:00:00+00:00','2026-11-05T02:00:00+00:00'));self.c.commit()
+        rid=self.legacy_report(tid)
+        for state in ('pending','published'):
+            self.c.execute('UPDATE weekly_report SET status=? WHERE id=?',(state,rid));self.c.commit()
+            before=dict(self.c.execute('SELECT * FROM weekly_report WHERE id=?',(rid,)).fetchone())
+            status,response=self.api('/api/weekly-reports/'+str(rid))
+            self.assertEqual(status,200);self.assertEqual(response['task_progress'][str(tid)],80)
+            self.assertNotIn('effective_percent',response['snapshot']['tasks'][0])
+            self.assertEqual(dict(self.c.execute('SELECT * FROM weekly_report WHERE id=?',(rid,)).fetchone()),before)
+
+    def test_legacy_report_does_not_infer_progress_from_pending_text_or_future_confirmation(self):
+        pending=self.task(effective_percent=90,updated_at='2026-11-09T10:00:00+08:00')
+        future=self.task(effective_percent=95,updated_at='2026-11-09T10:00:00+08:00')
+        self.c.execute('INSERT INTO progress_record(task_id,reported_percent,report_text,status,reported_at) VALUES(?,?,?,?,?)',
+                       (pending,80,'此任务完成80%','pending','2026-11-07T10:00:00+08:00'))
+        for percent,confirmed in ((30,'2026-11-05T10:00:00+08:00'),(95,'2026-11-09T10:00:00+08:00')):
+            self.c.execute('INSERT INTO progress_record(task_id,reported_percent,effective_percent,report_text,status,reported_at,confirmed_at) VALUES(?,?,?,?,?,?,?)',
+                           (future,percent,percent,'进展','approved','2026-11-04T10:00:00+08:00',confirmed))
+        self.c.commit();rid=self.legacy_report(pending)
+        row=self.c.execute('SELECT snapshot_json FROM weekly_report WHERE id=?',(rid,)).fetchone();snapshot=json.loads(row[0])
+        for task in snapshot['tasks']:task.pop('effective_percent',None)
+        self.c.execute('UPDATE weekly_report SET snapshot_json=? WHERE id=?',(json.dumps(snapshot),rid));self.c.commit()
+        response=self.api('/api/weekly-reports/'+str(rid))[1]
+        self.assertIsNone(response['task_progress'][str(pending)]);self.assertEqual(response['task_progress'][str(future)],30)
+
+    def test_current_week_endpoint_recovers_legacy_progress_and_does_not_refresh_report(self):
+        tid=self.task(effective_percent=80)
+        self.c.execute('INSERT INTO progress_record(task_id,reported_percent,effective_percent,report_text,status,reported_at,confirmed_at) VALUES(?,?,?,?,?,?,?)',
+                       (tid,80,80,'此任务完成80%','approved','2026-11-04T10:00:00+08:00','2026-11-05T10:00:00+08:00'));self.c.commit()
+        rid=self.legacy_report(tid);before=dict(self.c.execute('SELECT * FROM weekly_report WHERE id=?',(rid,)).fetchone())
+        with patch.object(reports,'local_time',side_effect=lambda value=None:reports.datetime.fromisoformat(self.generated) if value is None else reports.datetime.fromisoformat(value).astimezone(reports.CHINA)):
+            response=self.api('/api/weekly-reports/current','POST',{})[1]
+        self.assertEqual(response['id'],rid);self.assertEqual(response['task_progress'][str(tid)],80)
+        self.assertEqual(dict(self.c.execute('SELECT * FROM weekly_report WHERE id=?',(rid,)).fetchone()),before)
+
     def test_key_work_includes_active_p0_and_all_weekly_completions_only(self):
         active = [self.task(priority='P0',work_status=status,estimated_hours=0,complexity='simple')
                   for status in ('assigned','in_progress','awaiting_acceptance')]

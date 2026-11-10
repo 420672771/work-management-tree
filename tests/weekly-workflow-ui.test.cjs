@@ -120,3 +120,14 @@ test('task card descriptions and editorial notes remain escaped and ordering con
   assert(!html.includes(unsafe));assert(html.includes('&lt;img'));assert(html.includes('data-note="44"'));
   assert(html.includes('风险/最后进展'));assert(html.includes('data-move="-1"'));assert(html.includes('data-move="1"'));
 });
+
+test('legacy cards display the recovered cutoff percentage while explicit unknown snapshots stay unknown',async()=>{
+  const b=browser();b.model.task_progress={'51':80,'52':95};
+  b.model.snapshot.tasks=[{id:51,title:'旧周报',work_status:'in_progress',priority:'P0',latest_progress:'此任务完成80%'},
+    {id:52,title:'明确未知的历史进度',work_status:'in_progress',priority:'P0',effective_percent:null}];
+  b.model.snapshot.sections.achievements=[51,52];await b.context.openPage('weekly');
+  const html=b.elements.get('weeklyContent').innerHTML;
+  const first=html.split('data-task-id="51"')[1].split('</article>')[0],second=html.split('data-task-id="52"')[1].split('</article>')[0];
+  assert(first.includes('aria-valuenow="80"'));assert(second.includes('暂无已确认进度'));
+  assert(second.includes('class="weekly-progress-track"'));assert(!second.includes('aria-valuenow="95"'));
+});

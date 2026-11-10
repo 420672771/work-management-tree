@@ -235,6 +235,27 @@ def report_view(row):
     return out
 
 
+def progress_for_display(c, report):
+    """Recover missing legacy percentages as of cutoff without rewriting snapshots."""
+    snapshot=report['snapshot'];cutoff=local_time(snapshot['data_cutoff']) if snapshot.get('data_cutoff') else None
+    if not cutoff:return {}
+    result={}
+    for task in snapshot.get('tasks',[]):
+        if 'effective_percent' in task:continue
+        if task.get('work_status')=='completed':
+            result[str(task['id'])]=100;continue
+        candidates=[]
+        for row in c.execute("SELECT id,reported_percent,effective_percent,reported_at,confirmed_at FROM progress_record "
+                             "WHERE task_id=? AND status IN ('approved','auto_approved')",(task['id'],)):
+            confirmed=local_time(row['confirmed_at']) if row['confirmed_at'] else None
+            reported=local_time(row['reported_at']) if row['reported_at'] else None
+            value=row['effective_percent'] if row['effective_percent'] is not None else row['reported_percent']
+            if confirmed and reported and confirmed<=cutoff and reported<=cutoff and isinstance(value,(int,float)) and 0<=value<=100:
+                candidates.append((confirmed,row['id'],value))
+        result[str(task['id'])]=max(candidates)[2] if candidates else None
+    return result
+
+
 def get_report(c, report_id, user_id):
     actor(c, user_id)
     row = c.execute('SELECT * FROM weekly_report WHERE id=?', (report_id,)).fetchone()

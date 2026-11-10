@@ -2150,6 +2150,8 @@ class Handler(BaseHTTPRequestHandler):
                         out=weekly_reports.revise_report(c,int(match[1]),user_id)
                     else: out=weekly_reports.update_report(c,int(match[1]),user_id,body)
                 c.commit()
+            if isinstance(out,dict) and 'snapshot' in out:
+                out['task_progress']=weekly_reports.progress_for_display(c,out)
             return self.json(200,out)
         except PermissionError as exc: return self.json(403,{'error':str(exc)})
         except LookupError as exc: return self.json(404,{'error':str(exc)})
