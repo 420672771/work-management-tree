@@ -2176,7 +2176,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(503,{'error':'飞书网页登录尚未完成配置，请先使用账号密码。'}) if qr else self.redirect('/?page=profile&binding=not_configured' if bind else '/login?login_error=not_configured')
         state=secrets.token_urlsafe(32);c=db()
         flow_type=('qr_bind' if bind else 'qr_login') if qr else ('bind' if bind else 'login')
-        if popup_channel:flow_type=('popup_bind:' if bind else 'popup_login:')+popup_channel
+        if popup_channel:flow_type=(('popup_qr_bind:' if bind else 'popup_qr_login:') if qr else ('popup_bind:' if bind else 'popup_login:'))+popup_channel
         try:
             c.execute('DELETE FROM login_state WHERE expire_at<=?',(now(),))
             # Refreshing a QR code invalidates this browser's previous attempt.
@@ -2209,9 +2209,9 @@ class Handler(BaseHTTPRequestHandler):
         clear=self.account_cookie('',0,'wmt_oauth_state','/auth/feishu')
         if not valid:return self.redirect('/login?login_error=expired',clear)
         flow_type,_,channel=valid['flow_type'].partition(':')
-        channel=channel if flow_type in ('popup_login','popup_bind') and re.fullmatch(r'[a-f0-9]{32}',channel) else None
+        channel=channel if flow_type in ('popup_login','popup_bind','popup_qr_login','popup_qr_bind') and re.fullmatch(r'[a-f0-9]{32}',channel) else None
         finish=lambda location,cookie=clear:self.feishu_login_result(location,cookie,channel)
-        binding=flow_type in ('bind','qr_bind','popup_bind')
+        binding=flow_type in ('bind','qr_bind','popup_bind','popup_qr_bind')
         target='/?page=profile&binding=' if binding else '/login?login_error='
         if binding and (not current or current['id']!=valid['user_id'] or
             not secrets.compare_digest(valid['session_hash'] or '',hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest())):
@@ -2219,7 +2219,7 @@ class Handler(BaseHTTPRequestHandler):
         if not code:return finish(target+'cancelled')
         try:
             adapter=FeishuAdapter()
-            if valid['flow_type'] in ('qr_login','qr_bind'):
+            if flow_type in ('qr_login','qr_bind','popup_qr_login','popup_qr_bind'):
                 token=adapter.exchange_qr_login_code(code);open_id=adapter.qr_login_open_id(token['access_token'])
             else:
                 token=adapter.exchange_login_code(code);open_id=adapter.login_open_id(token['access_token'])
@@ -2319,11 +2319,13 @@ class Handler(BaseHTTPRequestHandler):
         if p.path=='/auth/feishu/window':
             flow=q.get('flow',['login'])[0];channel=q.get('channel',[''])[0]
             if flow not in ('login','bind') or not re.fullmatch(r'[a-f0-9]{32}',channel):return self.json(400,{'error':'登录窗口参数无效，请重新点击飞书扫码登录'})
-            return self.start_feishu_login(bind=flow=='bind',popup_channel=channel)
+            if flow=='bind' and not self.session_user():return self.redirect('/login')
+            if not FeishuAdapter().login_configured():return self.redirect('/login?login_error=not_configured')
+            return self.send_bytes(200,'text/html; charset=utf-8',(ROOT/'static'/'feishu-scan.html').read_bytes(),'no-store')
         if p.path=='/auth/feishu/qr':
-            flow=q.get('flow',['login'])[0]
-            if flow not in ('login','bind'):return self.json(400,{'error':'不支持的扫码操作'})
-            return self.start_feishu_login(bind=flow=='bind',qr=True)
+            flow=q.get('flow',['login'])[0];channel=q.get('channel',[''])[0]
+            if flow not in ('login','bind') or (channel and not re.fullmatch(r'[a-f0-9]{32}',channel)):return self.json(400,{'error':'不支持的扫码操作'})
+            return self.start_feishu_login(bind=flow=='bind',qr=True,popup_channel=channel or None)
         if p.path=='/auth/feishu/bind':return self.show_feishu_entry(bind=True)
         if p.path=='/auth/feishu/authorize':
             flow=q.get('flow',['login'])[0]

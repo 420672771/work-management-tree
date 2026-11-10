@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>飞书扫码登录 · 工作管理树</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:24px 12px;display:grid;place-items:center;background:#f1f5fb;color:#203954;font:15px/1.6 -apple-system,BlinkMacSystemFont,'Microsoft YaHei',sans-serif}main{width:min(380px,100%);padding:24px 16px;background:white;border:1px solid #dce5f2;border-radius:16px;text-align:center}h1{font-size:22px;margin:0 0 12px}.hint{font-size:13px;color:#6c7d92}#qrContainer{width:300px;max-width:100%;min-height:40px;margin:12px auto}iframe{display:block;border:0;max-width:100%}#qrStatus{min-height:24px}#qrStatus[data-error=true]{color:#b42318}.actions{display:flex;justify-content:center;gap:12px}button{padding:8px 14px;border:1px solid #dce5f2;border-radius:8px;background:#f2f6fc;color:#315685;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}
+</style></head><body><main>
+<h1 id="qrTitle">飞书扫码登录</h1><p class="hint">打开本人手机飞书，使用“扫一扫”扫描下方二维码。</p>
+<div id="qrContainer"></div><p id="qrStatus" role="status" aria-live="polite"></p>
+<p class="hint">扫码确认后自动返回工作管理树。<br>如飞书随后要求授权，请核对本人账号后确认。</p>
+<div class="actions"><button id="qrRefresh" type="button">刷新二维码</button><button id="qrCancel" type="button">取消</button></div>
+</main><script>
+(() => {
+  const query=new URLSearchParams(location.search),flow=query.get('flow')==='bind'?'bind':'login',channel=query.get('channel')||'';
+  const container=document.querySelector('#qrContainer'),status=document.querySelector('#qrStatus'),refresh=document.querySelector('#qrRefresh');
+  const sdkUrl='https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/passport/qrcode/LarkSSOSDKWebQRCode-1.0.3.js';
+  let sdkPromise=null,active=null,expiryTimer,generation=0;
+  if(flow==='bind'){document.title='飞书扫码绑定 · 工作管理树';document.querySelector('#qrTitle').textContent='飞书扫码绑定';}
+  function message(text,error=false){status.textContent=text;status.dataset.error=String(error);}
+  function loadSdk(){
+    if(typeof window.QRLogin==='function')return Promise.resolve();
+    if(sdkPromise)return sdkPromise;
+    sdkPromise=new Promise((resolve,reject)=>{
+      const script=document.createElement('script');script.src=sdkUrl;script.async=true;
+      const timer=setTimeout(()=>finish(new Error('二维码组件加载超时，请检查网络后刷新。')),15000);
+      function finish(error){clearTimeout(timer);script.onload=script.onerror=null;if(error){script.remove();sdkPromise=null;reject(error);}else resolve();}
+      script.onload=()=>finish(typeof window.QRLogin==='function'?null:new Error('二维码组件不可用，请刷新重试。'));
+      script.onerror=()=>finish(new Error('二维码组件加载失败，请检查网络后刷新。'));
+      document.head.append(script);
+    });return sdkPromise;
+  }
+  async function showCode(){
+    const attempt=++generation;active=null;clearTimeout(expiryTimer);container.replaceChildren();refresh.disabled=true;message('正在加载二维码…');
+    try{
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);let data;
+      try{
+        const response=await fetch('/auth/feishu/qr?'+new URLSearchParams({flow,channel}),{cache:'no-store',credentials:'same-origin',signal:controller.signal});
+        data=await response.json();if(!response.ok)throw new Error(data.error||'无法获取二维码，请重试。');
+      }finally{clearTimeout(timer);}
+      const receivedAt=Date.now(),goto=new URL(data.authorization_url);
+      if(goto.origin!=='https://passport.feishu.cn'||goto.pathname!=='/suite/passport/oauth/authorize')throw new Error('飞书扫码地址无效，请联系管理员。');
+      await loadSdk();if(attempt!==generation)return;
+      const sdk=window.QRLogin({id:container.id,goto:goto.href,width:'300',height:'340',style:'border:0;display:block;'});
+      const frame=container.querySelector('iframe');if(!frame)throw new Error('无法显示二维码，请刷新重试。');
+      frame.title='手机飞书扫码';active={goto,sdk,frame};message('请使用手机飞书扫码并确认。');
+      expiryTimer=setTimeout(()=>{active=null;container.replaceChildren();message('二维码已过期，请点击“刷新二维码”。',true);},Math.max(0,Number(data.expires_in)*1000-(Date.now()-receivedAt)));
+    }catch(error){if(attempt===generation)message(error.name==='AbortError'?'获取二维码超时，请刷新重试。':error.message,true);}
+    finally{if(attempt===generation)refresh.disabled=false;}
+  }
+  window.addEventListener('message',event=>{
+    const current=active;
+    if(!current||event.origin!==current.goto.origin||event.source!==current.frame.contentWindow)return;
+    if(!current.sdk.matchOrigin(event.origin)||!current.sdk.matchData(event.data)||typeof event.data.tmp_code!=='string'||event.data.tmp_code.length>4096)return;
+    const target=new URL(current.goto.href);target.searchParams.set('tmp_code',event.data.tmp_code);
+    active=null;clearTimeout(expiryTimer);refresh.disabled=true;message('扫码已确认，正在完成授权…');location.replace(target.href);
+  });
+  refresh.onclick=showCode;document.querySelector('#qrCancel').onclick=()=>window.close();
+  window.addEventListener('pagehide',()=>{generation++;active=null;clearTimeout(expiryTimer);});
+  showCode();
+})();
+</script></body></html>

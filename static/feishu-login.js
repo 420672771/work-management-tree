@@ -1,4 +1,4 @@
-// One entry: the official Feishu window determines whether to show QR login or consent.
+// One entry: always start with the official QR SDK, independent of browser SSO.
 (() => {
   let pending=null;
   function status(text,flow='login'){
@@ -42,7 +42,7 @@
     if(!popup){channel?.close();status('浏览器阻止了登录窗口，请允许本站弹出窗口后重新点击“飞书扫码登录”。',flow);return;}
     pending={key,flow,popup,channel,completing:false};
     if(channel)channel.onmessage=event=>complete(event.data);
-    status('请在飞书窗口扫码或确认授权，完成后将自动返回。',flow);
+    status('请在飞书窗口使用手机扫码确认，完成后将自动返回。',flow);
     pending.closedTimer=setInterval(()=>{
       // Some identity providers sever window.opener. Keep the same-origin result channel alive.
       if(pending?.key===key&&popup.closed){clearInterval(pending.closedTimer);status('请在飞书窗口完成操作；如已关闭，可重新点击“飞书扫码登录”。',flow);}

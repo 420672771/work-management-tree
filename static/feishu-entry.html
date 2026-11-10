@@ -11,12 +11,12 @@
 <body>
   <main>
     <h1 id="entryTitle">飞书扫码登录</h1>
-    <p>点击后，飞书会自动显示二维码或授权确认。</p>
+    <p>点击后显示二维码，请使用手机飞书扫码确认。</p>
     <button id="entryScan" type="button">飞书扫码登录</button>
 
     <a id="entryBack" href="/login">返回账号登录</a>
   </main>
-  <script src="/static/feishu-login.js?v=20261110-auto1"></script>
+  <script src="/static/feishu-login.js?v=20261110-qr-first1"></script>
   <script>
     const entryFlow=location.pathname==='/auth/feishu/bind'?'bind':'login';
     if(entryFlow==='bind'){

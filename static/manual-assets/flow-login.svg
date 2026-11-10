@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="398" viewBox="0 0 1120 398" role="img" aria-labelledby="title desc">
-<title id="title">首次登录与飞书绑定</title><desc id="desc">先使用已分配的员工账号，再完成本人密码修改和飞书绑定。以后点击扫码登录，飞书识别登录状态后显示二维码或账号授权，完成后自动进入系统。按钮提示未配置时，继续使用账号密码登录，并联系运维人员；不要绑定他人的飞书账号。</desc>
+<title id="title">首次登录与飞书绑定</title><desc id="desc">先使用已分配的员工账号，再完成本人密码修改和飞书绑定。以后点击扫码登录，始终先显示二维码，手机飞书扫码确认后自动进入系统。按钮提示未配置时，继续使用账号密码登录，并联系运维人员；不要绑定他人的飞书账号。</desc>
 <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#5577ac" stroke-width="2"/></marker></defs>
 <rect width="1120" height="398" rx="18" fill="#f3f7fe"/>
 <g font-family="Microsoft YaHei,Noto Sans CJK SC,sans-serif">
@@ -30,6 +30,6 @@
 <text x="863.5" y="202" font-size="16" fill="#4d6481">个人中心 → 扫码绑定</text>
 <text x="863.5" y="225" font-size="16" fill="#4d6481">以后可使用飞书扫码登录</text>
 <text x="34" y="286" font-size="17" font-weight="700" fill="#285ca2">以后登录</text>
-<text x="150" y="286" font-size="17" fill="#17385e">点击扫码登录 → 飞书识别登录态 → 手机扫码 / 账号授权 → 自动进入系统</text>
+<text x="150" y="286" font-size="17" fill="#17385e">点击扫码登录 → 显示二维码 → 手机扫码并确认 → 自动进入系统</text>
 <rect x="32" y="330" width="1056" height="43" rx="8" fill="#fff6e6"/>
 <text x="48" y="358" font-size="16" fill="#805619">按钮提示未配置时，继续使用账号密码登录，并联系运维人员；不要绑定他人的飞书账号。</text></g></svg>

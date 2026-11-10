@@ -310,17 +310,21 @@ class AccountTests(unittest.TestCase):
 
     def popup_oauth(self,jar,bind=False):
         channel='a'*32
-        status,_,headers=self.request('/auth/feishu/window?'+urlencode({'flow':'bind' if bind else 'login','channel':channel}),jar=jar)
-        self.assertEqual(status,302)
-        url=urlparse(headers['Location']);self.assertEqual(url.netloc,'accounts.feishu.cn')
+        status,html,headers=self.request('/auth/feishu/window?'+urlencode({'flow':'bind' if bind else 'login','channel':channel}),jar=jar)
+        self.assertEqual(status,200);self.assertNotIn('Location',headers);self.assertIn(b'id="qrContainer"',html)
+        status,data,headers=self.request('/auth/feishu/qr?'+urlencode({'flow':'bind' if bind else 'login','channel':channel}),jar=jar)
+        self.assertEqual(status,200)
+        url=urlparse(data['authorization_url']);self.assertEqual(url.netloc,'passport.feishu.cn')
         query=parse_qs(url.query);self.assertNotIn('prompt',query)
+        c=app.db();row=c.execute('SELECT flow_type FROM login_state WHERE state_hash=?',(app.hashlib.sha256(query['state'][0].encode()).hexdigest(),)).fetchone();c.close()
+        self.assertEqual(row['flow_type'],('popup_qr_bind:' if bind else 'popup_qr_login:')+channel)
         return '/auth/feishu/callback?'+urlencode({'state':query['state'][0],'code':'mock-popup-code'}),channel
 
     def test_popup_login_and_binding_return_only_trusted_result_and_preserve_checks(self):
         member=self.login('member.test','StaffTest2026!')
         for bind,jar in ((True,member),(False,{})):
             callback,channel=self.popup_oauth(jar,bind)
-            with patch.object(app.FeishuAdapter,'exchange_login_code',return_value={'access_token':'private-fixture-token'}),patch.object(app.FeishuAdapter,'login_open_id',return_value='ou_popup_bound'):
+            with patch.object(app.FeishuAdapter,'exchange_qr_login_code',return_value={'access_token':'private-fixture-token'}),patch.object(app.FeishuAdapter,'qr_login_open_id',return_value='ou_popup_bound'):
                 status,html,headers=self.request(callback,jar=jar)
             self.assertEqual(status,200);self.assertIn(b'"channel": "'+channel.encode()+b'"',html)
             self.assertIn(b'"target": "/?page=profile&binding=success"' if bind else b'"target": "/"',html)
@@ -332,11 +336,11 @@ class AccountTests(unittest.TestCase):
     def test_popup_binding_rejects_changed_session_and_handles_unbound_and_cancelled(self):
         member=self.login('member.test','StaffTest2026!');callback,_=self.popup_oauth(member,True)
         other=self.login();other['wmt_oauth_state']=member['wmt_oauth_state']
-        with patch.object(app.FeishuAdapter,'exchange_login_code') as exchange:
+        with patch.object(app.FeishuAdapter,'exchange_qr_login_code') as exchange:
             status,html,_=self.request(callback,jar=other)
             self.assertEqual(status,200);self.assertIn(b'/login?login_error=expired',html);exchange.assert_not_called()
         fresh={};callback,_=self.popup_oauth(fresh)
-        with patch.object(app.FeishuAdapter,'exchange_login_code',return_value={'access_token':'test-token'}),patch.object(app.FeishuAdapter,'login_open_id',return_value='ou_unbound_popup'):
+        with patch.object(app.FeishuAdapter,'exchange_qr_login_code',return_value={'access_token':'test-token'}),patch.object(app.FeishuAdapter,'qr_login_open_id',return_value='ou_unbound_popup'):
             self.assertIn(b'/login?login_error=unbound',self.request(callback,jar=fresh)[1])
         self.assertNotIn('wmt_session',fresh)
         fresh={};callback,_=self.popup_oauth(fresh)
@@ -345,6 +349,7 @@ class AccountTests(unittest.TestCase):
     def test_popup_parameters_cannot_inject_a_channel_or_choose_unknown_flow(self):
         for flow,channel in (('invalid','a'*32),('login',''),('login','<script>'),('login','a'*33)):
             self.assertEqual(self.request('/auth/feishu/window?'+urlencode({'flow':flow,'channel':channel}))[0],400)
+        self.assertEqual(self.request('/auth/feishu/qr?flow=login&channel=%3Cscript%3E')[0],400)
         self.assertEqual(self.request('/auth/feishu/window?flow=bind&channel='+'a'*32)[2]['Location'],'/login')
         c=app.db();self.assertEqual(c.execute('SELECT COUNT(*) FROM login_state').fetchone()[0],0);c.close()
 
