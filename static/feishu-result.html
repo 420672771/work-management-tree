@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>飞书登录结果 · 工作管理树</title></head>
+<body><p id="resultText">飞书操作已完成，正在返回工作管理树…</p><a id="returnLink" href="/login">返回工作管理树</a>
+<script type="application/json" id="feishuResult">__WMT_FEISHU_RESULT__</script>
+<script>
+(() => {
+  const result=JSON.parse(document.querySelector('#feishuResult').textContent);
+  const message={type:'wmt:feishu-complete',channel:result.channel,target:result.target};
+  document.querySelector('#returnLink').href=result.target;
+  const successful=result.target==='/'||result.target==='/?page=profile&binding=success';
+  if(!successful)document.querySelector('#resultText').textContent='飞书操作未完成，请返回工作管理树查看提示。';
+  let delivered=false;
+  try{if(window.opener){window.opener.postMessage(message,location.origin);delivered=true;}}catch{}
+  try{if(typeof BroadcastChannel==='function'){const channel=new BroadcastChannel('wmt-feishu-'+result.channel);channel.postMessage(message);setTimeout(()=>channel.close(),500);delivered=true;}}catch{}
+  if(delivered)setTimeout(()=>window.close(),350);
+})();
+</script></body></html>

@@ -2168,25 +2168,35 @@ class Handler(BaseHTTPRequestHandler):
         if bind and not self.session_user():return self.redirect('/login')
         if not FeishuAdapter().login_configured():return self.redirect('/?page=profile&binding=not_configured' if bind else '/login?login_error=not_configured')
         return self.send_bytes(200,'text/html; charset=utf-8',(ROOT/'static'/'feishu-entry.html').read_bytes(),'no-store')
-    def start_feishu_login(self,bind=False,qr=False):
+    def start_feishu_login(self,bind=False,qr=False,popup_channel=None):
         user=self.session_user()
         if bind and not user:
             return self.json(401,{'error':'请先登录个人账号，再扫码绑定。'}) if qr else self.redirect('/login')
         if not FeishuAdapter().login_configured():
             return self.json(503,{'error':'飞书网页登录尚未完成配置，请先使用账号密码。'}) if qr else self.redirect('/?page=profile&binding=not_configured' if bind else '/login?login_error=not_configured')
         state=secrets.token_urlsafe(32);c=db()
+        flow_type=('qr_bind' if bind else 'qr_login') if qr else ('bind' if bind else 'login')
+        if popup_channel:flow_type=('popup_bind:' if bind else 'popup_login:')+popup_channel
         try:
             c.execute('DELETE FROM login_state WHERE expire_at<=?',(now(),))
             # Refreshing a QR code invalidates this browser's previous attempt.
             c.execute('DELETE FROM login_state WHERE state_hash=?',(hashlib.sha256(self.cookie('wmt_oauth_state').encode()).hexdigest(),))
             c.execute('INSERT INTO login_state(state_hash,expire_at,created_at,flow_type,user_id,session_hash) VALUES(?,?,?,?,?,?)',
                 (hashlib.sha256(state.encode()).hexdigest(),(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat(),now(),
-                 ('qr_bind' if bind else 'qr_login') if qr else ('bind' if bind else 'login'),user['id'] if bind else None,hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest() if bind else None));c.commit()
+                 flow_type,user['id'] if bind else None,hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest() if bind else None));c.commit()
         finally:c.close()
         adapter=FeishuAdapter();url=adapter.qr_authorization_url(state) if qr else adapter.authorization_url(state)
         cookie=self.account_cookie(state,600,'wmt_oauth_state','/auth/feishu')
         if qr:return self.json(200,{'authorization_url':url,'expires_in':600},cookie)
         self.redirect(url,cookie)
+    def feishu_login_result(self,location,cookie,channel=None):
+        if not channel:return self.redirect(location,cookie)
+        data=json.dumps({'channel':channel,'target':location},ensure_ascii=False).replace('<','\\u003c')
+        html=(ROOT/'static'/'feishu-result.html').read_text().replace('__WMT_FEISHU_RESULT__',data).encode()
+        self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8')
+        self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(html)))
+        for value in ([cookie] if isinstance(cookie,str) else cookie or []):self.send_header('Set-Cookie',value)
+        self.end_headers();self.wfile.write(html)
     def finish_feishu_login(self,query):
         state=query.get('state',[''])[0];code=query.get('code',[''])[0]
         if not state or not secrets.compare_digest(state,self.cookie('wmt_oauth_state')):return self.redirect('/login?login_error=expired')
@@ -2198,19 +2208,22 @@ class Handler(BaseHTTPRequestHandler):
         finally:c.close()
         clear=self.account_cookie('',0,'wmt_oauth_state','/auth/feishu')
         if not valid:return self.redirect('/login?login_error=expired',clear)
-        binding=valid['flow_type'] in ('bind','qr_bind')
+        flow_type,_,channel=valid['flow_type'].partition(':')
+        channel=channel if flow_type in ('popup_login','popup_bind') and re.fullmatch(r'[a-f0-9]{32}',channel) else None
+        finish=lambda location,cookie=clear:self.feishu_login_result(location,cookie,channel)
+        binding=flow_type in ('bind','qr_bind','popup_bind')
         target='/?page=profile&binding=' if binding else '/login?login_error='
         if binding and (not current or current['id']!=valid['user_id'] or
             not secrets.compare_digest(valid['session_hash'] or '',hashlib.sha256(self.cookie('wmt_session').encode()).hexdigest())):
-            return self.redirect('/login?login_error=expired',clear)
-        if not code:return self.redirect(target+'cancelled',clear)
+            return finish('/login?login_error=expired')
+        if not code:return finish(target+'cancelled')
         try:
             adapter=FeishuAdapter()
             if valid['flow_type'] in ('qr_login','qr_bind'):
                 token=adapter.exchange_qr_login_code(code);open_id=adapter.qr_login_open_id(token['access_token'])
             else:
                 token=adapter.exchange_login_code(code);open_id=adapter.login_open_id(token['access_token'])
-        except Exception:return self.redirect(target+'authorization_failed',clear)
+        except Exception:return finish(target+'authorization_failed')
         c=db()
         try:
             c.execute('BEGIN IMMEDIATE')
@@ -2218,21 +2231,21 @@ class Handler(BaseHTTPRequestHandler):
                 # A reset/logout during OAuth must invalidate the pending binding, too.
                 live=c.execute('SELECT 1 FROM login_session WHERE session_id=? AND user_id=? AND expire_at>?',
                                (self.cookie('wmt_session'),current['id'],now())).fetchone()
-                if not live:return self.redirect('/login?login_error=expired',clear)
+                if not live:return finish('/login?login_error=expired')
                 occupied=c.execute('SELECT id FROM user WHERE feishu_open_id=? AND id<>?',(open_id,current['id'])).fetchone()
-                if occupied:return self.redirect(target+'already_bound',clear)
+                if occupied:return finish(target+'already_bound')
                 old=c.execute('SELECT feishu_open_id FROM user WHERE id=?',(current['id'],)).fetchone()[0]
-                if old and old!=open_id:return self.redirect(target+'different_account',clear)
+                if old and old!=open_id:return finish(target+'different_account')
                 c.execute('UPDATE user SET feishu_open_id=? WHERE id=?',(open_id,current['id']))
                 if old!=open_id:record_feishu_binding(c,current['id'],'bind',old,open_id,str(current['id']))
                 audit(c,'user',current['id'],'self_bind_feishu',str(current['id']),after={'bound':True});c.commit()
-                return self.redirect(target+'success',clear)
+                return finish(target+'success')
             user=c.execute('SELECT id FROM user WHERE feishu_open_id=?',(open_id,)).fetchone()
-            if not user:return self.redirect(target+'unbound',clear)
+            if not user:return finish(target+'unbound')
             c.execute('DELETE FROM login_session WHERE session_id=?',(self.cookie('wmt_session'),))
             session_id=accounts.new_session(c,user['id']);audit(c,'login',user['id'],'feishu_login',str(user['id']),after={'channel':'feishu'});c.commit()
-            return self.redirect('/',[clear,self.account_cookie(session_id)])
-        except sqlite3.IntegrityError:return self.redirect(target+'already_bound',clear)
+            return finish('/',[clear,self.account_cookie(session_id)])
+        except sqlite3.IntegrityError:return finish(target+'already_bound')
         finally:c.close()
     def logout(self):
         c=db()
@@ -2303,6 +2316,10 @@ class Handler(BaseHTTPRequestHandler):
         if p.path=='/static/feishu-login.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'feishu-login.js').read_bytes(),'no-cache')
         if p.path in ('/api/auth/options','/api/me'):return self.handle_account_api(p.path)
+        if p.path=='/auth/feishu/window':
+            flow=q.get('flow',['login'])[0];channel=q.get('channel',[''])[0]
+            if flow not in ('login','bind') or not re.fullmatch(r'[a-f0-9]{32}',channel):return self.json(400,{'error':'登录窗口参数无效，请重新点击飞书扫码登录'})
+            return self.start_feishu_login(bind=flow=='bind',popup_channel=channel)
         if p.path=='/auth/feishu/qr':
             flow=q.get('flow',['login'])[0]
             if flow not in ('login','bind'):return self.json(400,{'error':'不支持的扫码操作'})
