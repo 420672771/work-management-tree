@@ -16,7 +16,7 @@ assert(base.startsWith('http://127.0.0.1:'));
    if(role==='other'){
     await page.waitForFunction(()=>typeof currentUsers!=='undefined'&&currentUsers.length>0);
     const response=await page.request.post(base+'/api/tasks/'+task,{data:{action:'update',operator_id:users.manager,org_node_id:domains[0]}});
-    assert.equal(response.status(),403);
+    assert.equal(response.status(),404);
     assert.equal(await page.locator('#approvals .pending-draft-actions').count(),0);
     await context.close();continue;
    }
@@ -58,10 +58,14 @@ assert(base.startsWith('http://127.0.0.1:'));
     await page.locator('#pendingDraftForm [name="priority"]').selectOption('P0');
     await page.locator('#pendingDraftForm [name="description"]').fill('已补充任务范围与业务约束');
     await submit.click();await page.locator('#pendingDraftDialog').waitFor({state:'hidden'});
-    const changed=await read();assert.equal(changed.owner_id,users.pm);assert.equal(changed.due_at,'2030-12-01T17:00:00+08:00');
+    assert.equal((await page.request.get(base+'/api/tasks/'+task)).status(),404);
+    const nextOwner=await browser.newContext();
+    assert((await nextOwner.request.post(base+'/api/auth/login',{data:{username:'draft.pm',password:'DraftFixture2026!'}})).ok());
+    const changed=await (await nextOwner.request.get(base+'/api/tasks/'+task)).json();assert.equal(changed.owner_id,users.pm);assert.equal(changed.due_at,'2030-12-01T17:00:00+08:00');
     assert.equal(changed.priority,'P0');assert.equal(changed.description,'已补充任务范围与业务约束');assert.equal(changed.deliverable,before.deliverable);
-    const chain=await (await page.request.get(base+'/api/approvals/'+approval)).json();
+    const chain=await (await nextOwner.request.get(base+'/api/approvals/'+approval)).json();
     assert.equal(chain.status,'pending');assert.equal(chain.approver_id,changed.approver_id);assert.equal(chain.approver_id,users.manager);
+    await nextOwner.close();
    }
    assert.deepEqual(errors,[]);await context.close();
   }

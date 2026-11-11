@@ -80,7 +80,7 @@ class RoutineTests(unittest.TestCase):
         self.assertEqual(summary['target_count'],2);self.assertEqual(summary['owner_ids'],[self.owner,self.other])
         self.assertEqual(self.api(f'/api/tasks/{ids[0]}/hours',{'actual_hours':3},tasks[0]['owner_id'])[0],200)
         self.assertEqual(self.c.execute('SELECT actual_hours FROM task WHERE id=?',(ids[1],)).fetchone()[0],0)
-        self.assertEqual(self.api(f'/api/tasks/{ids[0]}/hours',{'actual_hours':7},tasks[1]['owner_id'])[0],403)
+        self.assertEqual(self.api(f'/api/tasks/{ids[0]}/hours',{'actual_hours':7},tasks[1]['owner_id'])[0],404)
 
     def test_same_position_can_have_different_routines_and_unselected_staff_are_excluded(self):
         position=self.position();self.assign(position,self.owner);self.assign(position,self.other)
@@ -255,7 +255,7 @@ class RoutineTests(unittest.TestCase):
 
     def test_hours_cannot_be_spoofed_and_invalid_values_are_atomic(self):
         self.template(); tid = self.generate()[0]
-        self.assertEqual(self.api(f'/api/tasks/{tid}/hours', {'actual_hours': 10, 'operator_id': self.owner}, self.other)[0], 403)
+        self.assertEqual(self.api(f'/api/tasks/{tid}/hours', {'actual_hours': 10, 'operator_id': self.owner}, self.other)[0], 404)
         for bad in (None, '', -1, 169, True, 'NaN', 'Infinity'):
             self.assertEqual(self.api(f'/api/tasks/{tid}/hours', {'actual_hours': bad}, self.owner)[0], 400)
         self.assertEqual(self.c.execute('SELECT actual_hours FROM task WHERE id=?', (tid,)).fetchone()[0], 0)

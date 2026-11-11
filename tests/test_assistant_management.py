@@ -366,7 +366,7 @@ class AssistantManagementTests(unittest.TestCase):
         task=self.c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         self.assertEqual(task['priority'],'P0');self.assertEqual(task['owner_id'],self.pm)
         self.assertEqual(self.c.execute('SELECT approver_id FROM approval_record WHERE id=?',(aid,)).fetchone()[0],task['approver_id'])
-        self.assertIn('只有任务责任人',self.say(f'任务#{tid} 优先级改为P1',user=self.member))
+        self.assertIn('无权查看',self.say(f'任务#{tid} 优先级改为P1',user=self.member))
 
     def test_single_task_fields_show_full_values_and_accept_numbered_owner(self):
         tid=self.task()

@@ -12,6 +12,7 @@ import assistant_management
 import assistant_dialogue
 import assistant_queries
 import responsibility_domains
+import task_visibility
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("WMT_DB", ROOT / "data" / "worktree.db"))
@@ -599,6 +600,18 @@ def approval_view(c, r):
         d['progress']=None; d['progress_history']=[]
     return d
 
+def visible_task_rows(c, scope):
+    return [task_view(c,row) for row in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at,id") if scope.task(row)]
+
+def task_dashboard(c, scope, tasks=None):
+    tasks=visible_task_rows(c,scope) if tasks is None else tasks
+    today=datetime.now(timezone.utc).date().isoformat()
+    pending=sum(scope.approval(row) for row in c.execute("SELECT * FROM approval_record WHERE status='pending'"))
+    unreported=sum(scope.owns(row['user_id']) for row in c.execute("SELECT user_id FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)))
+    return {'total':len(tasks),'active':sum(t['work_status']!='completed' for t in tasks),
+            'completed':sum(t['work_status']=='completed' for t in tasks),'overdue':sum(t['time_status']=='overdue' for t in tasks),
+            'risk':sum(t['risk_status']!='normal' for t in tasks),'pending_approval':pending,'unreported':unreported}
+
 # 绩效只对已确认生效的任务计算。标准工时用于衡量工作量，实际工时只用于负荷与估算偏差分析。
 PERFORMANCE_DEFAULTS={
     'priority':{'P0':1.5,'P1':1.2,'P2':1.0},
@@ -917,7 +930,7 @@ def managed_user_ids(c, user_id):
     found=[]; frontier=[int(user_id)]
     while frontier:
         marks=','.join('?' for _ in frontier)
-        rows=c.execute(f"SELECT user_id FROM reporting_line WHERE direct_leader_id IN ({marks}) AND (effective_to IS NULL OR effective_to='')",frontier).fetchall()
+        rows=c.execute(f"SELECT user_id FROM reporting_line WHERE direct_leader_id IN ({marks}) AND effective_from<=? AND (effective_to IS NULL OR effective_to='' OR effective_to>?)",(*frontier,now(),now())).fetchall()
         next_ids=[int(row['user_id']) for row in rows if int(row['user_id']) not in found and int(row['user_id'])!=int(user_id)]
         found.extend(next_ids); frontier=next_ids
     return found
@@ -934,6 +947,8 @@ def feishu_team_progress(c, user_id):
                        FROM task t JOIN user u ON u.id=t.owner_id
                        WHERE t.approval_status='approved' AND t.owner_id IN ({marks})
                        ORDER BY CASE WHEN t.work_status IN ('completed','cancelled') THEN 1 ELSE 0 END,t.due_at,t.id""",people).fetchall()
+    visibility=task_visibility.Scope(c,user_id,sys.modules[__name__])
+    rows=[row for row in rows if visibility.task(row)]
     if not rows: return '你的团队当前没有已生效任务。'
     labels={'assigned':'待开始','in_progress':'进行中','awaiting_acceptance':'待验收','completed':'已完成','cancelled':'已取消'}
     counts={key:0 for key in labels}
@@ -1038,7 +1053,8 @@ def referenced_task_id(c, session_id, user_id, text):
     if row:
         try:
             if datetime.fromisoformat(row['updated_at']) >= datetime.now(timezone.utc)-timedelta(minutes=30):
-                return int(row['task_id'])
+                task=c.execute('SELECT * FROM task WHERE id=?',(row['task_id'],)).fetchone()
+                return int(row['task_id']) if task and task_visibility.Scope(c,user_id,sys.modules[__name__]).task(task) else None
         except (TypeError,ValueError):
             pass
     # If there is exactly one active task, pronouns are still unambiguous even
@@ -1585,7 +1601,18 @@ def create_bot_task_draft(c,text,user_id,session_id):
 
 def process_bot_message(c, text, user_id, session_id):
     """Shared text workflow for the Feishu callback and WebSocket receiver."""
-    reply=_process_bot_message(c,text,user_id,session_id)
+    tid=task_number(text) if user_id and not is_task_creation_request(text) else None
+    # A bare #number can select a person/position while collecting reference
+    # data. Only treat it as a task number outside that established dialogue.
+    if tid and re.match(r'^#\s*\d+',normalize_assistant_text(text)) and assistant_management.pending(c,session_id,user_id):tid=None
+    task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone() if tid else None
+    if tid and (not task or not task_visibility.Scope(c,user_id,sys.modules[__name__]).task(task)):
+        # An invalid new operation must not leave an earlier action armed for
+        # an unrelated "确认". Ordinary read-only queries retain their context.
+        if not re.match(r'^(?:查看|查询|看看|列出)',normalize_assistant_text(text)):
+            c.execute("UPDATE bot_pending_action SET status='superseded' WHERE session_id=? AND user_id=? AND status IN ('pending','collecting')",(session_id,user_id))
+        reply=f'未找到任务#{tid}或无权查看。'
+    else:reply=_process_bot_message(c,text,user_id,session_id)
     assistant_dialogue.record(c,session_id,user_id,text,reply,now())
     return reply
 
@@ -1847,13 +1874,14 @@ def task_detail(text):
     detail=re.sub(r'(?:并)?(?:于|在)\s*\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日.*$','',detail).strip(' ，,。；;')
     return detail or '待补充任务范围'
 
-def similar_tasks(c, title, limit=5):
+def similar_tasks(c, title, limit=5, visibility=None):
     """Find likely duplicate tasks without treating a fuzzy match as a hard block."""
     source=re.sub(r'\s|[，,。；;：:、（）()【】\[\]·—-]','',str(title or '')).lower()
     if len(source)<2: return []
     source_chars=set(source)
     candidates=[]
     for task in c.execute("SELECT id,title,owner_id,due_at,approval_status,work_status FROM task WHERE approval_status<>'rejected' ORDER BY updated_at DESC"):
+        if visibility and not visibility.task(task):continue
         target=re.sub(r'\s|[，,。；;：:、（）()【】\[\]·—-]','',task['title']).lower()
         if not target: continue
         score=1.0 if source in target or target in source else len(source_chars & set(target))/max(1,len(source_chars | set(target)))
@@ -2132,6 +2160,10 @@ class Handler(BaseHTTPRequestHandler):
             return accounts.public_user(c,row) if row else None
         finally: c.close()
     def actor_id(self, submitted=None): return getattr(self,'authenticated_user_id',None) or submitted
+    def data_scope(self,c,submitted=None):
+        actual=getattr(self,'authenticated_user_id',None)
+        demo=not login_required() and monthly_demo_enabled()
+        return task_visibility.Scope(c,actual or (submitted if demo else None),sys.modules[__name__],unrestricted_demo=demo)
     def handle_monthly_reports(self, path, query=None):
         # Test-only identity switching is opt-in; real login sessions always win.
         user=self.session_user()
@@ -2510,7 +2542,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(200,content_type,asset.read_bytes(),'no-cache')
         if p.path=='/' or p.path=='/index.html':
             if not login_required() and not self.require_auth(): return
-            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-people"></script><script defer src="/static/responsibility-domains.js?v=20261106-1"></script><script defer src="/static/stale-approval-guard.js?v=20261104-layout1"></script><script defer src="/static/pending-approval-manage.js?v=20261111-save-fix"></script><script defer src="/static/layout-guard.js?v=20261106-domains"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
+            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-people"></script><script defer src="/static/responsibility-domains.js?v=20261106-1"></script><script defer src="/static/stale-approval-guard.js?v=20261111-visibility"></script><script defer src="/static/pending-approval-manage.js?v=20261111-save-fix"></script><script defer src="/static/layout-guard.js?v=20261106-domains"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
         if p.path=='/manual' or p.path=='/manual.html':
             if not self.require_auth(): return
             data=(ROOT/'static'/'manual.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
@@ -2541,11 +2573,11 @@ class Handler(BaseHTTPRequestHandler):
             finally: c.close()
         if p.path.startswith('/api/weekly-reports'):
             return self.handle_weekly_reports(p.path,q)
-        c=db()
+        c=db(); scope=self.data_scope(c,q.get('actor_id',[None])[0])
         if p.path=='/api/bootstrap':
-            task_rows=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
-            today=datetime.now(timezone.utc).date().isoformat()
-            out={'dashboard':{'total':len(task_rows),'active':sum(x['work_status']!='completed' for x in task_rows),'completed':sum(x['work_status']=='completed' for x in task_rows),'overdue':sum(x['time_status']=='overdue' for x in task_rows),'risk':sum(x['risk_status']!='normal' for x in task_rows),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]},'users':[accounts.public_user(c,x) for x in c.execute('SELECT * FROM user ORDER BY id')],'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
+            task_rows=visible_task_rows(c,scope)
+            out={'dashboard':task_dashboard(c,scope,task_rows),'users':[accounts.public_user(c,x) for x in c.execute('SELECT * FROM user ORDER BY id')],
+                 'tree':[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')],'tasks':task_rows}
         elif p.path=='/api/users': out=[accounts.public_user(c,x) for x in c.execute('SELECT * FROM user ORDER BY id')]
         elif p.path=='/api/tree': out=[rowdict(x) for x in c.execute('SELECT * FROM org_node ORDER BY id')]
         elif p.path=='/api/domains':
@@ -2553,19 +2585,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.management_user(c,{'actor_id':q.get('actor_id',[None])[0]},message='仅部门负责人和管理 PM 可维护责任域')
                 out=responsibility_domains.listing(c)
             except PermissionError as exc:c.close();return self.json(403,{'error':str(exc)})
-        elif p.path=='/api/tasks': out=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at")]
+        elif p.path=='/api/tasks': out=visible_task_rows(c,scope)
         elif p.path=='/api/tasks/similar':
-            out=similar_tasks(c,q.get('title',[''])[0])
+            out=similar_tasks(c,q.get('title',[''])[0],visibility=scope)
         elif re.fullmatch(r'/api/tasks/\d+',p.path):
             task=c.execute('SELECT * FROM task WHERE id=?',(int(p.path.rsplit('/',1)[1]),)).fetchone()
-            if not task: return self.json(404,{'error':'task not found'})
+            if not task or not scope.task(task): c.close();return self.json(404,{'error':'task not found'})
             out=task_view(c,task)
         elif p.path=='/api/approvals':
             rows=c.execute("SELECT * FROM approval_record WHERE status=? ORDER BY created_at",(q.get('status',['pending'])[0],)).fetchall()
-            out=[approval_view(c,x) for x in rows]
+            out=[approval_view(c,x) for x in rows if scope.approval(x)]
         elif re.fullmatch(r'/api/approvals/\d+',p.path):
             approval=c.execute('SELECT * FROM approval_record WHERE id=?',(int(p.path.rsplit('/',1)[1]),)).fetchone()
-            if not approval: return self.json(404,{'error':'approval not found'})
+            if not approval or not scope.approval(approval): c.close();return self.json(404,{'error':'approval not found'})
             out=approval_view(c,approval)
         elif p.path=='/api/reporting-lines': out=[rowdict(x) for x in c.execute('SELECT * FROM reporting_line ORDER BY user_id,effective_from DESC')]
         elif p.path=='/api/org/departments': out=[rowdict(x) for x in c.execute('SELECT * FROM org_department WHERE status=? ORDER BY name',('active',))]
@@ -2575,7 +2607,10 @@ class Handler(BaseHTTPRequestHandler):
             out=[]
             for row in c.execute("SELECT d.*,u.name AS user_name,du.name AS delegate_name FROM delegate d JOIN user u ON u.id=d.user_id JOIN user du ON du.id=d.delegate_user_id ORDER BY d.end_at DESC"):
                 item=rowdict(row); item['is_active']=item['start_at']<=now()<=item['end_at']; out.append(item)
-        elif p.path=='/api/progress': out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(q.get('task_id',[0])[0],))]
+        elif p.path=='/api/progress':
+            task=c.execute('SELECT * FROM task WHERE id=?',(q.get('task_id',[0])[0],)).fetchone()
+            if not task or not scope.task(task):c.close();return self.json(404,{'error':'task not found'})
+            out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(task['id'],))]
         elif p.path=='/api/routine/templates':
             try:out=routines.list_templates(c,q.get('week',[None])[0])
             except ValueError as exc:c.close();return self.json(400,{'error':str(exc)})
@@ -2606,10 +2641,15 @@ class Handler(BaseHTTPRequestHandler):
             marks=','.join('?' for _ in status)
             out=[]
             for draft in c.execute(f"SELECT d.*,u.name AS user_name FROM conversation_draft d LEFT JOIN user u ON u.id=d.user_id WHERE d.status IN ({marks}) AND d.expire_at>? ORDER BY d.updated_at DESC",(*status,now())):
-                item=rowdict(draft); item['slots']=json.loads(item.pop('slots_json')); item['missing_slots']=json.loads(item['missing_slots']); out.append(item)
-        elif p.path=='/api/ops/daily-preview': out={'date':q.get('date',[None])[0] or datetime.now(timezone.utc).date().isoformat(),'targets':daily_targets(c,q.get('date',[None])[0])}
-        elif p.path=='/api/dashboard':
-            tasks=[task_view(c,x) for x in c.execute("SELECT * FROM task WHERE approval_status='approved'")]; today=datetime.now(timezone.utc).date().isoformat(); out={'total':len(tasks),'active':sum(x['work_status']!='completed' for x in tasks),'completed':sum(x['work_status']=='completed' for x in tasks),'overdue':sum(x['time_status']=='overdue' for x in tasks),'risk':sum(x['risk_status']!='normal' for x in tasks),'pending_approval':c.execute("SELECT count(*) FROM approval_record WHERE status='pending'").fetchone()[0],'unreported':c.execute("SELECT count(*) FROM daily_report_status WHERE report_date=? AND status='unreported'",(today,)).fetchone()[0]}
+                if not scope.draft(draft):continue
+                item=rowdict(draft); item['can_edit']=scope.edit_draft(draft); item['slots']=json.loads(item.pop('slots_json')); item['missing_slots']=json.loads(item['missing_slots']); out.append(item)
+        elif p.path=='/api/ops/daily-preview':
+            targets=[]
+            for target in daily_targets(c,q.get('date',[None])[0]):
+                target['tasks']=[task for task in target['tasks'] if scope.task(task)]
+                if target['tasks']:targets.append(target)
+            out={'date':q.get('date',[None])[0] or datetime.now(timezone.utc).date().isoformat(),'targets':targets}
+        elif p.path=='/api/dashboard': out=task_dashboard(c,scope)
         elif p.path=='/api/test-issues': out=[rowdict(x) for x in c.execute("SELECT * FROM test_issue ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END,id DESC")]
         elif p.path=='/api/performance/config': out=performance_config(c)
         elif p.path=='/api/performance/personal':
@@ -2664,6 +2704,7 @@ class Handler(BaseHTTPRequestHandler):
             c.close(); return self.json(400,{'error':str(exc) or '请求格式不正确'})
         t=now(); response_code=200
         try:
+            scope=self.data_scope(c,b.get('actor_id') or b.get('operator_id') or b.get('user_id'))
             roster_actor=None
             if (p.path=='/api/users' or p.path.startswith('/api/users/') or
                 p.path in ('/api/org/positions','/api/org/user-positions','/api/reporting-lines') or
@@ -2834,31 +2875,37 @@ class Handler(BaseHTTPRequestHandler):
                 self.management_user(c,b)
                 generated=generate_routines(c,b.get('instance_date'),template_ids=b.get('template_ids')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/ops/daily-run':
+                if not scope.all:raise PermissionError('仅部门负责人和管理 PM 可执行部门运营任务')
                 out=run_daily_jobs(c,b.get('report_date'),b.get('kind','all')); c.commit()
             elif p.path=='/api/task/drafts/parse':
+                if getattr(self,'authenticated_user_id',None):b['user_id']=self.authenticated_user_id
                 if not b.get('text'): return self.json(400,{'error':'text is required'})
                 from datetime import timedelta
                 batch_id=b.get('session_id') or f"web:{b.get('user_id','anonymous')}:{secrets.token_hex(6)}"; expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat(); drafts=[]; duplicates=[]
                 for slots,missing in ai_drafts(b['text'],b.get('user_id'),c):
                     matches=task_duplicate_candidates(c,slots)
+                    visible_matches=scope.duplicates(matches)
                     if matches['exact']:
-                        duplicates.extend([{**item,'kind':'exact'} for item in matches['exact']])
+                        duplicates.extend([{**item,'kind':'exact'} for item in visible_matches['exact']])
                         continue
                     oid=c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(batch_id,b.get('user_id'),b.get('source_type','text'),b['text'],json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,t,t)).lastrowid
-                    drafts.append({'id':oid,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','similar_tasks':matches['similar']})
-                    duplicates.extend([{**item,'kind':'similar'} for item in matches['similar']])
+                    drafts.append({'id':oid,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','similar_tasks':visible_matches['similar']})
+                    duplicates.extend([{**item,'kind':'similar'} for item in visible_matches['similar']])
                 c.commit(); out={'session_id':batch_id,'drafts':drafts,'duplicates':duplicates,'expire_at':expire}
             elif p.path=='/api/task/draft/parse':
+                if getattr(self,'authenticated_user_id',None):b['user_id']=self.authenticated_user_id
                 if not b.get('text'): return self.json(400,{'error':'text is required'})
                 from datetime import timedelta
                 slots,missing=draft_slots(b['text'],b.get('user_id'),c); expire=(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat()
                 matches=task_duplicate_candidates(c,slots)
+                visible_matches=scope.duplicates(matches)
                 if matches['exact']:
-                    return self.json(409,{'error':'已存在相同任务，未生成重复草稿','duplicates':matches['exact']})
+                    return self.json(409,{'error':'已存在相同任务，未生成重复草稿','duplicates':visible_matches['exact']})
                 oid=c.execute('INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(b.get('session_id') or f"web:{b.get('user_id','anonymous')}",b.get('user_id'),b.get('source_type','text'),b['text'],json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',expire,t,t)).lastrowid; c.commit(); out={'id':oid,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','expire_at':expire}
             elif p.path.startswith('/api/task/draft/') and p.path.endswith('/complete'):
                 did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
-                if not draft or draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
+                if not draft or not scope.edit_draft(draft):return self.json(404,{'error':'draft not found'})
+                if draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
                 slots=json.loads(draft['slots_json'])
                 optional_fields=('description','org_node_id','priority','task_type')
                 for key,value in b.items():
@@ -2870,12 +2917,14 @@ class Handler(BaseHTTPRequestHandler):
                 if slots.get('task_type') not in ('ROUTINE','PROJECT','ADHOC'): slots['task_type']=None
                 missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
                 matches=task_duplicate_candidates(c,slots,exclude_draft_id=did)
+                visible_matches=scope.duplicates(matches)
                 if matches['exact']:
-                    return self.json(409,{'error':'已存在相同任务，请修改草稿后再保存','duplicates':matches['exact']})
-                c.execute('UPDATE conversation_draft SET slots_json=?,missing_slots=?,status=?,updated_at=? WHERE id=?',(json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',t,did)); c.commit(); out={'id':did,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','similar_tasks':matches['similar']}
+                    return self.json(409,{'error':'已存在相同任务，请修改草稿后再保存','duplicates':visible_matches['exact']})
+                c.execute('UPDATE conversation_draft SET slots_json=?,missing_slots=?,status=?,updated_at=? WHERE id=?',(json.dumps(slots,ensure_ascii=False),json.dumps(missing,ensure_ascii=False),'collecting' if missing else 'preview',t,did)); c.commit(); out={'id':did,'slots':slots,'missing_slots':missing,'status':'collecting' if missing else 'preview','similar_tasks':visible_matches['similar']}
             elif p.path.startswith('/api/task/draft/') and p.path.endswith('/confirm'):
                 did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
-                if not draft or draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
+                if not draft or not scope.edit_draft(draft):return self.json(404,{'error':'draft not found'})
+                if draft['expire_at']<t: return self.json(410,{'error':'draft expired or not found'})
                 slots=json.loads(draft['slots_json']); missing=[k for k in ('title','owner_id','due_at') if not slots.get(k)]
                 if missing: return self.json(400,{'error':'missing slots','fields':missing})
                 try: fields=validate_task_fields(c,{**slots,'priority':slots.get('priority') or 'P1','task_type':slots.get('task_type') or 'PROJECT'},require_all=True)
@@ -2884,15 +2933,17 @@ class Handler(BaseHTTPRequestHandler):
                     existing=assistant_dialogue.task_matches(c,fields['title'],fields['owner_id'],draft['user_id'],sys.modules[__name__],exact_only=True)
                     if existing:return self.json(409,{'error':'已存在同名任务，请核对已有任务，未重复创建','duplicates':existing})
                 matches=task_duplicate_candidates(c,fields,exclude_draft_id=did)
+                visible_matches=scope.duplicates(matches)
                 if matches['exact']:
-                    return self.json(409,{'error':'已存在相同任务，未重复创建','duplicates':matches['exact']})
+                    return self.json(409,{'error':'已存在相同任务，未重复创建','duplicates':visible_matches['exact']})
                 approver_id=approver_for(c,fields['owner_id']); confirmation_id=task_confirmation_approver(c,fields['owner_id'],approver_id); approval_status='pending' if confirmation_id else 'approved'
                 oid=c.execute("INSERT INTO task(org_node_id,title,description,owner_id,due_at,priority,risk_status,deliverable,source,task_type,approval_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fields['org_node_id'],fields['title'],fields['description'],fields['owner_id'],fields['due_at'],fields['priority'],'normal',fields['deliverable'],'conversation',fields['task_type'],approval_status,approver_id,t,t)).lastrowid
                 aid=create_approval(c,'task_confirm',oid,oid,confirmation_id)
                 c.execute("UPDATE conversation_draft SET status='generated',updated_at=? WHERE id=?",(t,did)); audit(c,'task',oid,'create_from_draft',str(draft['user_id'] or 'local'),after=slots); c.commit(); out={'task_id':oid,'approval_id':aid,'status':approval_status}
             elif p.path.startswith('/api/task/draft/') and p.path.endswith('/discard'):
-                did=int(p.path.split('/')[4])
-                if not discard_draft(c,did,'local'): return self.json(404,{'error':'draft is no longer available'})
+                did=int(p.path.split('/')[4]); draft=c.execute('SELECT * FROM conversation_draft WHERE id=?',(did,)).fetchone()
+                if not draft or not scope.edit_draft(draft):return self.json(404,{'error':'draft not found'})
+                if not discard_draft(c,did,str(scope.actor_id or 'local')): return self.json(404,{'error':'draft is no longer available'})
                 c.commit(); out={'id':did,'status':'discarded'}
             elif p.path=='/api/tasks':
                 required=['title','owner_id','due_at']; missing=[x for x in required if not b.get(x)]
@@ -2900,8 +2951,9 @@ class Handler(BaseHTTPRequestHandler):
                 try: fields=validate_task_fields(c,b,require_all=True)
                 except ValueError as exc: return self.json(400,{'error':str(exc)})
                 matches=task_duplicate_candidates(c,fields)
+                visible_matches=scope.duplicates(matches)
                 if matches['exact']:
-                    return self.json(409,{'error':'已存在相同任务，未重复创建','duplicates':matches['exact']})
+                    return self.json(409,{'error':'已存在相同任务，未重复创建','duplicates':visible_matches['exact']})
                 approver_id=approver_for(c,fields['owner_id'])
                 task_type=fields['task_type']
                 complexity=b.get('complexity','general')
@@ -2946,11 +2998,14 @@ class Handler(BaseHTTPRequestHandler):
                 oid=c.execute('INSERT INTO performance_adjustment(user_id,period_start,period_end,score_delta,reason,created_by,created_at) VALUES(?,?,?,?,?,?,?)',(b['user_id'],start,end,float(b.get('score_delta') or 0),b['reason'],operator,t)).lastrowid; audit(c,'performance_adjustment',oid,'create',str(operator),after=b); c.commit(); out={'id':oid}
             elif p.path.startswith('/api/approvals/') and p.path.endswith('/confirm'):
                 aid=int(p.path.split('/')[3]); operator=self.actor_id(b.get('operator_id'))
+                approval=c.execute('SELECT * FROM approval_record WHERE id=?',(aid,)).fetchone()
+                if not approval or not scope.approval(approval):return self.json(404,{'error':'approval not found'})
                 if not operator: return self.json(403,{'error':'operator_id is required'})
                 decide_approval(c,aid,b.get('result'),operator,reason=b.get('reason',''))
                 c.commit(); out={'id':aid,'status':b['result']}
             elif p.path.startswith('/api/tasks/') and p.path.endswith('/progress'):
                 tid=int(p.path.split('/')[3]); task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
+                if not task or not scope.task(task):return self.json(404,{'error':'task not found'})
                 if not task or task['approval_status']!='approved': return self.json(400,{'error':'only approved tasks may receive progress'})
                 percent=b.get('percent');
                 if not isinstance(percent,int) or percent<0 or percent>100 or not b.get('comment'): return self.json(400,{'error':'percent (0-100 integer) and comment are required'})
@@ -2960,7 +3015,7 @@ class Handler(BaseHTTPRequestHandler):
                 rid,aid,_=submit_progress(c,tid,reporter,percent,b['comment'],b.get('blocked',False),b.get('block_reason',''),b.get('expected_finish'),b.get('source','web')); c.commit(); out={'id':rid,'approval_id':aid,'status':'pending'}
             elif p.path.startswith('/api/tasks/'):
                 tid=int(p.path.split('/')[3]); old=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone();
-                if not old: return self.json(404,{'error':'task not found'})
+                if not old or not scope.task(old): return self.json(404,{'error':'task not found'})
                 # Each action carries its accountable actor under its own field.
                 # Never fall back to an anonymous caller: destructive edits still
                 # require operator_id, while acceptance/feedback use their named actor.

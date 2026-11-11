@@ -79,7 +79,8 @@ class TaskConfirmationTests(unittest.TestCase):
     def test_unrelated_pm_and_forged_operator_do_not_gain_confirmation_rights(self):
         _,aid=self.create(self.pm)
         for actor in (self.other,self.member):
-            self.assertEqual(self.confirm(aid,actor,operator_id=self.manager)[0],403)
+            # An unrelated employee cannot discover the approval by its ID.
+            self.assertEqual(self.confirm(aid,actor,operator_id=self.manager)[0],403 if actor==self.other else 404)
         self.assertEqual(self.c.execute('SELECT status FROM approval_record WHERE id=?',(aid,)).fetchone()[0],'pending')
 
     def test_regular_member_still_requires_assigned_approver(self):

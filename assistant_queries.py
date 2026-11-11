@@ -101,6 +101,8 @@ def reply(c, text, user_id, session_id, api, *, known_query=False):
         params.append(current['state'])
     rows = c.execute('SELECT t.id,t.title,t.due_at,t.owner_id,t.work_status,t.effective_percent,u.name AS owner_name '
                      'FROM task t LEFT JOIN user u ON u.id=t.owner_id WHERE ' + ' AND '.join(conditions) + ' ORDER BY t.due_at,t.id', params).fetchall()
+    visibility = api.task_visibility.Scope(c, user_id, api)
+    rows = [row for row in rows if visibility.task(row)]
     today = datetime.fromisoformat(api.now()).astimezone(CHINA).date()
     def due_date(row):
         try:

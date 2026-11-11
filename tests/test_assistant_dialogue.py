@@ -260,6 +260,7 @@ class AssistantDialogueTests(unittest.TestCase):
     def test_web_confirmation_rechecks_duplicate_after_other_task_is_created(self):
         self.say('新建任务 '+self.BRIEF);draft,_=self.draft();tid=self.task()
         handler=object.__new__(app.Handler);handler.path='/api/task/draft/'+str(draft['id'])+'/confirm'
+        handler.authenticated_user_id=self.pm
         handler.require_auth=lambda:True;handler.body=lambda:{};responses=[]
         handler.json=lambda status,body:responses.append((status,body))
         handler.do_POST()

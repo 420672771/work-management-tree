@@ -13,6 +13,13 @@ assert(base.startsWith('http://127.0.0.1:'));
    await page.locator('#loginPassword').fill('DraftFixture2026!');await page.locator('#loginSubmit').click();
    await page.waitForURL(base+'/');await page.locator('#approvalsTab').click();
    const card=title=>page.locator('#approvals .approval-card').filter({has:page.getByRole('button',{name:title,exact:true})});
+   if(role==='member'){
+    await card('待确认任务责任域回归测试').waitFor();
+    assert.equal(await card('PM上级确认测试').count(),0);
+    assert.equal(await card('负责人本人确认测试').count(),0);
+    assert.equal((await page.request.get(base+'/api/tasks/'+confirmations.pm_superior)).status(),404);
+    assert.deepEqual(errors,[]);await context.close();continue;
+   }
    await card('PM上级确认测试').waitFor();
    const approve=async(title,key)=>{
     await card(title).getByRole('button',{name:'确认',exact:true}).click();
