@@ -32,15 +32,24 @@ def main():
         tid = c.execute('INSERT INTO task(title,description,deliverable,owner_id,org_node_id,due_at,priority,approver_id,approval_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                         ('待确认任务责任域回归测试', '原始任务详情\n保留链接 https://example.invalid/design', '保留原验收标准', users['member'], domains[0], '2030-11-13T09:30:00+08:00', 'P1', approver, 'pending', timestamp, timestamp)).lastrowid
         aid = c.execute("INSERT INTO approval_record(task_id,biz_id,biz_type,approver_id,status,created_at) VALUES(?,?,'task_confirm',?,'pending',?)", (tid, tid, approver, timestamp)).lastrowid
+        confirmations = {}
+        for key, owner, title in [('pm_self', users['pm'], 'PM本人确认测试'),
+                                  ('pm_superior', users['pm'], 'PM上级确认测试'),
+                                  ('manager_self', users['manager'], '负责人本人确认测试')]:
+            assigned = app.approver_for(c, owner)
+            task_id = c.execute('INSERT INTO task(title,owner_id,org_node_id,due_at,priority,approver_id,approval_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                                (title, owner, domains[0], '2030-11-20T17:00:00+08:00', 'P1', assigned, 'pending', timestamp, timestamp)).lastrowid
+            app.create_approval(c, 'task_confirm', task_id, task_id, app.task_confirmation_approver(c, owner, assigned))
+            confirmations[key] = task_id
         c.commit()
         c.close()
         server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         fixture = Path(folder) / 'fixture.json'
-        fixture.write_text(json.dumps({'base': f'http://127.0.0.1:{server.server_port}', 'task': tid, 'approval': aid, 'domains': domains, 'users': users}))
+        fixture.write_text(json.dumps({'base': f'http://127.0.0.1:{server.server_port}', 'task': tid, 'approval': aid, 'domains': domains, 'users': users, 'confirmations': confirmations}))
         try:
-            subprocess.run(['node', 'tests/pending-drafts.browser.cjs'], cwd=ROOT,
+            subprocess.run(['node', sys.argv[1] if len(sys.argv)>1 else 'tests/pending-drafts.browser.cjs'], cwd=ROOT,
                            env=dict(os.environ, WMT_PENDING_DRAFT_FIXTURE=str(fixture)), check=True, timeout=120)
         finally:
             server.shutdown()
