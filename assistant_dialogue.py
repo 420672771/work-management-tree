@@ -47,7 +47,7 @@ def task_matches(c,title,owner_id,actor_id,api,*,exact_only=False):
 
 
 def creation_clarification(text):
-    return bool(re.fullmatch(r'(?:这|这个|这条|这项|上面|上述|刚才|前面)?(?:说的|发的|提到的)?(?:是|算是|属于|按|作为)?\s*(?:一[个条项])?\s*(?:新增|新建|新的)(?:的)?\s*(?:任务|事项)[。！!]*',text.strip()))
+    return bool(re.fullmatch(r'(?:我)?(?:这|这个|这条|这项|上面|上述|刚才|前面)?(?:说的|发的|提到的)?(?:是|算是|属于|按|作为)?\s*(?:一[个条项])?\s*(?:新增|新建|新的)(?:的)?\s*(?:任务|事项)(?:需求)?[。！!]*',text.strip()))
 
 
 def labelled_fields(text):

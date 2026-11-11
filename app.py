@@ -10,6 +10,7 @@ import accounts
 import routines
 import assistant_management
 import assistant_dialogue
+import assistant_queries
 import responsibility_domains
 
 ROOT = Path(__file__).parent
@@ -990,6 +991,8 @@ def is_task_query_request(text):
     their dedicated, permission-checked handlers.
     """
     source=re.sub(r'\s+','',str(text or '')).lower()
+    if is_task_creation_request(source) or assistant_dialogue.creation_clarification(source):
+        return False
     if not source or re.search(r'(?:任务|事项)?#?\d+.*(?:完成|开始|删除|验收|改为|变更)|(?:完成|开始|删除|验收|改为|变更).*(?:任务|事项)?#?\d+',source):
         return False
     # Direct list expressions are always a query, with or without an explicit “我”.
@@ -1528,6 +1531,8 @@ def process_bot_message(c, text, user_id, session_id):
 
 def _process_bot_message(c, text, user_id, session_id):
     source=normalize_assistant_text(text)
+    query_reply=assistant_queries.reply(c,text,user_id,session_id,sys.modules[__name__])
+    if query_reply is not None:return query_reply
     dialogue=assistant_dialogue.TaskDialogue(c,user_id,session_id,sys.modules[__name__])
     dialogue_reply=dialogue.handle(text)
     if dialogue_reply:return dialogue_reply
@@ -1556,7 +1561,7 @@ def _process_bot_message(c, text, user_id, session_id):
     intent=rule_bot_intent(source) if dialogue.model_failed else classify_bot_intent(source)
     if is_department_progress_query(source):return feishu_department_progress(c,user_id)
     if is_team_progress_query(source):return feishu_team_progress(c,user_id)
-    if intent=='task_query':return feishu_task_list(c,user_id,session_id)
+    if intent=='task_query':return assistant_queries.reply(c,text,user_id,session_id,sys.modules[__name__],known_query=True)
     if intent=='help':return BOT_HELP
     if intent=='task_creation':return create_bot_task_draft(c,source,user_id,session_id)
     return dialogue.clarify(text)
