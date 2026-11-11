@@ -1,9 +1,9 @@
 /* Pending task confirmations are drafts until their approver accepts them.
- * Give the accountable owner (and demo managers) a direct way to correct or
+ * Give the accountable owner, department managers and PMs a way to correct or
  * remove a submitted draft without granting the approver edit permissions. */
 (() => {
   const $ = (selector) => document.querySelector(selector);
-  const actorId = () => Number(localStorage.getItem('wmt_demo_actor_id') || $('#demoActor')?.value || 0);
+  const actorId = () => Number(window.currentActorId?.() || 0);
   const dateOnly = (value) => value ? String(value).slice(0, 10) : '';
   const notify = (message, kind = 'success') => {
     let node = $('#pendingDraftNotice');
@@ -33,6 +33,7 @@
       .pending-draft-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px 16px}.pending-draft-grid .full{grid-column:1/-1}
       .pending-draft-grid label{display:grid;gap:7px;color:#40516b;font-weight:600}.pending-draft-grid input,.pending-draft-grid textarea,.pending-draft-grid select{box-sizing:border-box;width:100%;min-height:42px;padding:9px 11px;border:1px solid #d6e0ee;border-radius:9px;background:#fff;color:#233551;font:inherit}.pending-draft-grid textarea{min-height:92px;resize:vertical}
       .pending-draft-dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}.pending-draft-dialog-actions button{margin:0}
+      .pending-draft-error{margin:16px 0 0;color:#a52b2b}
       .pending-draft-notice{position:fixed;z-index:9999;left:50%;bottom:28px;transform:translate(-50%,20px);max-width:min(520px,calc(100vw - 32px));padding:12px 16px;border:1px solid #b9e2c3;border-radius:10px;background:#edf9f0;color:#176b36;box-shadow:0 12px 32px #172b4d2b;opacity:0;pointer-events:none;transition:.18s ease}.pending-draft-notice[data-kind=error]{border-color:#f0c5c5;background:#fff4f4;color:#a52b2b}.pending-draft-notice.show{opacity:1;transform:translate(-50%,0)}
       #approvalDetailDialog .panel-heading{position:relative;min-height:34px;padding:0 48px 0 0}#approvalDetailDialog .approval-close-icon{position:absolute;top:0;right:0;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;margin:0;padding:0;border:1px solid #dce4ef;border-radius:9px;background:#f8fafc;color:#66758b;font-size:25px;font-weight:400;line-height:1;box-shadow:none;cursor:pointer;transition:background .15s,color .15s,border-color .15s}#approvalDetailDialog .approval-close-icon:hover{border-color:#b9cbe5;background:#eef4ff;color:#17459b}
       @media(max-width:640px){#pendingDraftDialog form{padding:22px 18px}.pending-draft-grid{grid-template-columns:1fr}.pending-draft-grid .full{grid-column:auto}.pending-draft-actions{margin:8px 0 0;display:flex}}
@@ -92,11 +93,10 @@
       dialog.id = 'pendingDraftDialog';
       document.body.append(dialog);
     }
-    dialog.innerHTML = `<form method="dialog" id="pendingDraftForm"><h3>修改待确认任务</h3><p class="pending-draft-hint">修改后将保留待确认状态；如更换责任人，系统会同步调整确认人。</p><div class="pending-draft-grid"><label class="full">任务标题<input name="title" required maxlength="200"></label><label>责任人<select name="owner_id" required></select></label><label>责任域<select name="org_node_id" required></select></label><label>截止日期<input name="due_at" type="date" required></label><label>优先级<select name="priority"><option>P0</option><option>P1</option><option>P2</option></select></label><label class="full">任务详情<textarea name="description" placeholder="补充背景、工作范围或关键约束"></textarea></label><label class="full">交付物/验收标准<textarea name="deliverable" placeholder="说明产出和验收标准"></textarea></label></div><div class="pending-draft-dialog-actions"><button type="button" class="secondary" data-cancel>取消</button><button type="submit">保存修改</button></div></form>`;
+    dialog.innerHTML = `<form method="dialog" id="pendingDraftForm"><h3>修改待确认任务</h3><p class="pending-draft-hint">修改后将保留待确认状态；如更换责任人，系统会同步调整确认人。</p><div class="pending-draft-grid"><label class="full">任务标题<input name="title" required maxlength="200"></label><label>责任人<select name="owner_id" required></select></label><label>责任域<select name="org_node_id" required></select></label><label>截止日期<input name="due_at" type="date" required></label><label>优先级<select name="priority"><option>P0</option><option>P1</option><option>P2</option></select></label><label class="full">任务详情<textarea name="description" placeholder="补充背景、工作范围或关键约束"></textarea></label></div><p class="pending-draft-error" role="alert" tabindex="-1" hidden></p><div class="pending-draft-dialog-actions"><button type="button" class="secondary" data-cancel>取消</button><button type="submit">保存修改</button></div></form>`;
     const form = $('#pendingDraftForm');
     form.title.value = task.title || '';
     form.description.value = task.description || '';
-    form.deliverable.value = task.deliverable || '';
     form.due_at.value = dateOnly(task.due_at);
     form.priority.value = task.priority || 'P1';
     form.owner_id.innerHTML = users.map(user => `<option value="${Number(user.id)}">${String(user.name).replace(/[&<>"']/g, '')}</option>`).join('');
@@ -107,21 +107,35 @@
     form.onsubmit = async (event) => {
       event.preventDefault();
       const submit = form.querySelector('[type=submit]');
+      const errorMessage = form.querySelector('[role=alert]');
+      errorMessage.hidden = true; errorMessage.textContent = '';
       submit.disabled = true; submit.textContent = '正在保存…';
-      const body = {
-        action: 'update', operator_id: actorId(), title: form.title.value.trim(),
-        owner_id: Number(form.owner_id.value), org_node_id: Number(form.org_node_id.value),
-        due_at: form.due_at.value ? `${form.due_at.value}T17:00:00+08:00` : '', priority: form.priority.value,
-        description: form.description.value.trim(), deliverable: form.deliverable.value.trim()
-      };
       try {
+        const values = new FormData(form);
+        const body = {action: 'update', operator_id: actorId()};
+        // Submit only edited fields. The simplified page removes legacy
+        // deliverable controls; never read them or erase their stored values.
+        // A domain-only correction must also retain the exact deadline and
+        // leave the existing owner/confirmation chain alone.
+        for (const name of ['title', 'description', 'owner_id', 'org_node_id', 'due_at', 'priority']) {
+          const value = values.get(name);
+          if (value === null) continue;
+          const original = name === 'due_at' ? dateOnly(task[name]) : String(task[name] ?? '');
+          if (value === original) continue;
+          body[name] = ['owner_id', 'org_node_id'].includes(name) ? Number(value)
+            : name === 'due_at' && value ? `${value}T17:00:00+08:00` : value.trim();
+        }
+        if (Object.keys(body).length === 2) { closeDialog(); return; }
         const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw Error(result.error || '保存失败，请稍后重试。');
         closeDialog();
         await window.loadApprovals?.();
         notify('待确认任务已更新，等待确认人处理。');
-      } catch (error) { notify(error.message || '保存失败，请稍后重试。', 'error'); }
+      } catch (error) {
+        errorMessage.textContent = error.message || '保存失败，请稍后重试。';
+        errorMessage.hidden = false; errorMessage.focus();
+      }
       finally { submit.disabled = false; submit.textContent = '保存修改'; }
     };
     if (!dialog.open) dialog.showModal();
