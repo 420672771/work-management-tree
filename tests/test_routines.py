@@ -46,9 +46,14 @@ class RoutineTests(unittest.TestCase):
                     deliverable='巡检、备份与异常处理记录', recurrence='WEEKLY', estimated_hours=16.5, **changes)
 
     def template(self):
-        status, out = self.api('/api/routine/templates', self.payload())
-        self.assertEqual(status, 200)
-        return out['id']
+        return self.stored_template(self.payload())
+
+    def stored_template(self, payload):
+        # Generator tests start with an existing template before its first run.
+        # Creation's immediate run is covered separately through the API below.
+        fields=routines.template_fields(self.c,payload);fields['created_at']=app.now()
+        tid=self.c.execute('INSERT INTO task_template('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',tuple(fields.values())).lastrowid
+        self.c.commit();return tid
 
     def generate(self, day='2026-11-09'):
         ids = app.generate_routines(self.c, day); self.c.commit(); return ids
@@ -64,8 +69,65 @@ class RoutineTests(unittest.TestCase):
 
     def people_template(self, owners):
         payload=self.payload();payload.pop('owner_id');payload['owner_ids']=owners
-        status,result=self.api('/api/routine/templates',payload)
-        self.assertEqual(status,200,result);return result['id']
+        return self.stored_template(payload)
+
+    def test_creation_immediately_generates_current_calendar_week_only(self):
+        old=self.template()
+        for stamp,monday in [('2026-11-08T09:59:00+00:00','2026-11-02'),
+                             ('2026-11-08T10:01:00+00:00','2026-11-02'),
+                             ('2026-11-08T16:01:00+00:00','2026-11-09'),
+                             ('2023-12-31T15:59:00+00:00','2023-12-25')]:
+            with self.subTest(stamp=stamp),patch.object(app,'now',return_value=stamp):
+                body=self.payload();body.pop('owner_id');body['owner_ids']=[self.owner,self.other,self.owner]
+                status,out=self.api('/api/routine/templates',body)
+                self.assertEqual(status,200,out);self.assertEqual(out['count'],2)
+                tasks=[dict(self.c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()) for tid in out['generated_task_ids']]
+                self.assertEqual({task['owner_id'] for task in tasks},{self.owner,self.other})
+                self.assertTrue(all(task['routine_week_start']==monday and task['parent_template_id']==out['id'] and task['approval_status']=='approved' for task in tasks))
+                self.assertTrue(all(task['estimated_hours']==16.5 for task in tasks))
+                self.assertEqual(app.generate_routines(self.c,monday,template_ids=[out['id']]),[])
+                self.c.commit()
+                next_week=(datetime.fromisoformat(monday)+timedelta(days=7)).date().isoformat()
+                later=app.generate_routines(self.c,next_week,template_ids=[out['id']]);self.c.commit()
+                self.assertEqual(len(later),2)
+        self.assertFalse(self.c.execute('SELECT 1 FROM task_instance WHERE template_id=?',(old,)).fetchone())
+
+    def test_creation_uses_existing_scheduler_rule_after_the_immediate_run(self):
+        with patch.object(app,'now',return_value='2026-11-08T10:01:00+00:00'):
+            status,out=self.api('/api/routine/templates',self.payload())
+        self.assertEqual(status,200)
+        ids=app.generate_routines(self.c,current_time=datetime.fromisoformat('2026-11-08T18:02:00+08:00'),template_ids=[out['id']]);self.c.commit()
+        self.assertEqual(len(ids),1)
+        self.assertEqual(self.c.execute('SELECT routine_week_start FROM task WHERE id=?',(ids[0],)).fetchone()[0],'2026-11-09')
+        self.assertEqual(self.c.execute('SELECT routine_week_start FROM task WHERE id=?',(out['generated_task_ids'][0],)).fetchone()[0],'2026-11-02')
+
+    def test_generation_failure_rolls_back_template_and_audit(self):
+        before=self.c.execute('SELECT count(*) FROM task_template').fetchone()[0]
+        audit_count=self.c.execute('SELECT count(*) FROM audit_log').fetchone()[0]
+        task_count=self.c.execute('SELECT count(*) FROM task').fetchone()[0]
+        generate=app.generate_routines
+        def fail_after_generation(*args,**kwargs):
+            generate(*args,**kwargs)
+            raise ValueError('生成失败，请重试')
+        with patch.object(app,'generate_routines',side_effect=fail_after_generation):
+            status,out=self.api('/api/routine/templates',self.payload())
+        self.assertEqual(status,400);self.assertIn('生成失败',out['error'])
+        self.assertEqual(self.c.execute('SELECT count(*) FROM task_template').fetchone()[0],before)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM audit_log').fetchone()[0],audit_count)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM task').fetchone()[0],task_count)
+        self.assertEqual(self.c.execute('SELECT count(*) FROM task_instance').fetchone()[0],0)
+
+    def test_editing_template_does_not_regenerate_current_week_or_change_snapshots(self):
+        with patch.object(app,'now',return_value='2026-11-12T00:00:00+00:00'):
+            status,out=self.api('/api/routine/templates',self.payload())
+        self.assertEqual(status,200);original=out['generated_task_ids'][0]
+        body=self.payload();body.pop('owner_id');body.update(owner_ids=[self.owner,self.other],estimated_hours=20)
+        status,edited=self.api('/api/routine/templates/'+str(out['id']),body)
+        self.assertEqual(status,200);self.assertEqual(edited['count'],0)
+        self.assertEqual(self.c.execute('SELECT estimated_hours FROM task WHERE id=?',(original,)).fetchone()[0],16.5)
+        ids=app.generate_routines(self.c,'2026-11-12',template_ids=[out['id']]);self.c.commit()
+        self.assertEqual(len(ids),1)
+        self.assertEqual(self.c.execute('SELECT owner_id FROM task WHERE id=?',(ids[0],)).fetchone()[0],self.other)
 
     def test_multi_select_generates_independent_tasks_only_for_selected_people(self):
         position=self.position();self.assign(position,self.owner);self.assign(position,self.other)

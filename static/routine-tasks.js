@@ -63,6 +63,7 @@
     if(!response.ok)return alert(out.error||'停用失败');await loadOrg();
   };
   window.addEventListener('load',()=>{
+    const saveMessage=document.createElement('p');saveMessage.id='routineSaveMessage';saveMessage.className='muted';saveMessage.setAttribute('role','status');$('#orgRoutine').append(saveMessage);
     const create=$('#orgRoutine>.org-panel-action button'),open=create?.onclick;
     if(create)create.onclick=()=>{open?.();$('#routineId').value='';document.querySelectorAll('#routineOwnerOptions input').forEach(input=>input.checked=false);selectionSummary();filterPeople();$('#routineDialog h3').textContent='新增例行任务模板';$('#routineTitle').focus();};
     $('#routineOwnerOptions').addEventListener('change',selectionSummary);
@@ -79,7 +80,9 @@
           owner_ids:owners,deliverable:$('#routineDeliverable').value,estimated_hours:Number($('#routineHours').value),
           recurrence:'WEEKLY',actor_id:currentActorId(),priority:previous?.priority||'P1',description:previous?.description||''}),out=await r.json().catch(()=>({}));
         if(!r.ok)return alert(out.error||'模板保存失败');
-        $('#routineDialog').close();form.reset();document.querySelectorAll('#routineOwnerOptions input').forEach(input=>input.checked=false);selectionSummary();await loadOrg(true);
+        $('#routineDialog').close();form.reset();document.querySelectorAll('#routineOwnerOptions input').forEach(input=>input.checked=false);selectionSummary();
+        saveMessage.textContent=id?'模板已修改，后续任务按新配置生成。':`模板已保存，已生成 ${out.count} 条本周例行任务，后续按周自动生成。`;
+        try{await load();await loadOrg(true);}catch{saveMessage.textContent+=' 页面刷新失败，请刷新页面查看。';}
       }catch(error){alert(error.message||'模板保存失败');}finally{button.disabled=false;}
     };
     const card=window.taskCard;if(card)window.taskCard=t=>card(t).replace(/<\/div>$/,routineTaskSummary(t)+'</div>');

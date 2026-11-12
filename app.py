@@ -2605,7 +2605,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(200,content_type,asset.read_bytes(),'no-cache')
         if p.path=='/' or p.path=='/index.html':
             if not login_required() and not self.require_auth(): return
-            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261106-people"></script><script defer src="/static/responsibility-domains.js?v=20261106-1"></script><script defer src="/static/stale-approval-guard.js?v=20261111-visibility"></script><script defer src="/static/pending-approval-manage.js?v=20261111-save-fix"></script><script defer src="/static/layout-guard.js?v=20261106-domains"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
+            data=(ROOT/'static'/'index.html').read_bytes().replace(b'</body>',b'<script defer src="/static/task-create-feedback.js?v=20261104-layout2"></script><script>window.getWmtDraftData=()=>({users:typeof currentUsers!=="undefined"?currentUsers:[],nodes:typeof nodeNames!=="undefined"?nodeNames:{}});</script><script defer src="/static/multi-draft.js?v=20261104-layout5"></script><script defer src="/static/phase1-refinement.js?v=20261106-weekly1"></script><script defer src="/static/routine-tasks.js?v=20261112-immediate"></script><script defer src="/static/responsibility-domains.js?v=20261106-1"></script><script defer src="/static/stale-approval-guard.js?v=20261111-visibility"></script><script defer src="/static/pending-approval-manage.js?v=20261111-save-fix"></script><script defer src="/static/layout-guard.js?v=20261106-domains"></script></body>'); return self.send_bytes(200,'text/html; charset=utf-8',data,'no-cache')
         if p.path=='/manual' or p.path=='/manual.html':
             if not self.require_auth(): return
             data=(ROOT/'static'/'manual.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-cache'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
@@ -2924,16 +2924,21 @@ class Handler(BaseHTTPRequestHandler):
                     audit(c,'task_template',oid,'deactivate',str(template_actor),before=rowdict(old),after={'status':'inactive'})
                     c.commit();return self.json(200,{'id':oid,'status':'inactive'})
                 fields=routines.template_fields(c,b)
+                generated=[]
                 if p.path=='/api/routine/templates':
                     fields['created_at']=t
                     oid=c.execute('INSERT INTO task_template('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',tuple(fields.values())).lastrowid
                     audit(c,'task_template',oid,'create',str(template_actor),after=fields)
+                    # Creation starts this calendar week, even after Sunday's
+                    # scheduler cutoff (which deliberately targets next week).
+                    current_day=datetime.fromisoformat(t).astimezone(routines.CHINA).date().isoformat()
+                    generated=generate_routines(c,current_day,template_ids=[oid])
                 else:
                     oid=int(p.path.rsplit('/',1)[1]); old=c.execute('SELECT * FROM task_template WHERE id=?',(oid,)).fetchone()
                     if not old:return self.json(404,{'error':'模板不存在'})
                     c.execute('UPDATE task_template SET '+','.join(key+'=?' for key in fields)+' WHERE id=?',(*fields.values(),oid))
                     audit(c,'task_template',oid,'update',str(template_actor),before=rowdict(old),after=fields)
-                c.commit(); out={'id':oid,'status':'ok'}
+                c.commit(); out={'id':oid,'status':'ok','generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/routine/generate':
                 self.management_user(c,b)
                 generated=generate_routines(c,b.get('instance_date'),template_ids=b.get('template_ids')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
