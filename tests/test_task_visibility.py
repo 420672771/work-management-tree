@@ -102,6 +102,49 @@ class TaskVisibilityTests(unittest.TestCase):
         self.assertEqual(self.api(f'/api/tasks/{self.own_pending}',self.member)[0],200)
         self.assertEqual(self.api(f'/api/approvals/{self.own_approval}',self.member)[0],200)
 
+    def test_progress_history_keeps_every_report_and_real_decision(self):
+        reports=[]
+        for index in range(15):
+            rid,aid,_=app.submit_progress(self.c,self.own,self.member,index*5,
+                '第'+str(index)+'次反馈 <img src=x onerror=alert(1)>',index==14,'等待接口权限' if index==14 else '',
+                '2030-12-01',source='feishu' if index%2 else 'web')
+            self.c.execute('UPDATE progress_record SET reported_at=? WHERE id=?',('2030-11-01T10:00:00+08:00',rid))
+            if index<12:
+                app.decide_approval(self.c,aid,'approved',self.manager)
+            elif index==12:
+                self.c.execute("UPDATE progress_record SET status='auto_approved',effective_percent=60,confirmed_at=? WHERE id=?",(app.now(),rid))
+                self.c.execute("UPDATE approval_record SET status='approved',result_reason='超时自动生效',operated_at=? WHERE id=?",(app.now(),aid))
+            elif index==13:
+                app.decide_approval(self.c,aid,'rejected',self.manager,reason='请补充验收证据')
+            reports.append(rid)
+        status,rows=self.api('/api/progress?task_id='+str(self.own),self.member)
+        self.assertEqual(status,200)
+        self.assertEqual([r['id'] for r in rows],reports[::-1])
+        self.assertEqual([r['confirmation_status'] for r in rows[:4]],['pending','rejected','auto_approved','approved'])
+        self.assertEqual(rows[1]['status'],'pending')  # Preserve the legacy raw value for existing consumers.
+        self.assertEqual(rows[1]['decision_by'],self.manager)
+        self.assertEqual(rows[1]['decision_name'],self.c.execute('SELECT name FROM user WHERE id=?',(self.manager,)).fetchone()[0])
+        self.assertEqual(rows[1]['result_reason'],'请补充验收证据')
+        self.assertTrue(rows[1]['decision_at'])
+        self.assertEqual(rows[0]['reported_percent'],70)
+        self.assertEqual(rows[0]['block_reason'],'等待接口权限')
+        self.assertEqual(rows[0]['reported_by'],self.member)
+        self.assertTrue(rows[0]['reporter_name'])
+        self.assertIsNone(rows[2]['decision_by'])
+        for actor in (self.leader,self.pm,self.manager):
+            self.assertEqual(self.api('/api/progress?task_id='+str(self.own),actor)[0],200)
+        self.assertEqual(self.api('/api/progress?task_id='+str(self.own)+'&actor_id='+str(self.pm),self.peer)[0],404)
+
+    def test_progress_history_handles_empty_and_legacy_records_without_approval(self):
+        self.assertEqual(self.api('/api/progress?task_id='+str(self.own),self.member),(200,[]))
+        self.c.execute("INSERT INTO progress_record(task_id,reported_percent,report_text,status,reported_at) VALUES(?,25,'旧版反馈','approved',?)",(self.own,app.now()))
+        status,rows=self.api('/api/progress?task_id='+str(self.own),self.member)
+        self.assertEqual(status,200)
+        self.assertEqual(rows[0]['confirmation_status'],'approved')
+        self.assertIsNone(rows[0]['decision_name'])
+        self.c.execute("UPDATE task SET work_status='completed' WHERE id=?",(self.own,))
+        self.assertEqual(len(self.api('/api/progress?task_id='+str(self.own),self.member)[1]),1)
+
     def test_guessing_foreign_ids_does_not_permit_any_draft_mutation(self):
         before=[tuple(row) for row in self.c.execute('SELECT * FROM conversation_draft ORDER BY id')]
         for endpoint,body in [('complete',{'title':'越权修改'}),('confirm',{}),('discard',{})]:

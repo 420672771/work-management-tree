@@ -56,6 +56,20 @@ def main():
                 c.execute("INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,'text',?,?,'[]','preview',?,?,?)",
                           ('visibility-'+key,owner,title+'草稿',json.dumps(slots),(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),timestamp,timestamp))
         self_confirmation={}
+        if browser_test.endswith('progress-history.browser.cjs'):
+            c.execute("UPDATE task SET approval_status='approved',work_status='in_progress' WHERE id=?",(tid,))
+            for index in range(14):
+                rid,progress_aid,_=app.submit_progress(c,tid,users['member'],index*5,
+                    f'第{index+1}次反馈：方案联调 <img src=x onerror=alert(1)>\n已保留历史说明',
+                    index==13,'等待业务确认' if index==13 else '', '2030-12-01',source='feishu' if index%2 else 'web')
+                c.execute('UPDATE progress_record SET reported_at=? WHERE id=?',('2030-11-01T10:00:00+08:00',rid))
+                if index<11:
+                    app.decide_approval(c,progress_aid,'approved',approver)
+                elif index==11:
+                    c.execute("UPDATE progress_record SET status='auto_approved',confirmed_at=?,effective_percent=55 WHERE id=?",(timestamp,rid))
+                    c.execute("UPDATE approval_record SET status='approved',result_reason='超时自动生效',operated_at=? WHERE id=?",(timestamp,progress_aid))
+                elif index==12:
+                    app.decide_approval(c,progress_aid,'rejected',approver,reason='请补充验收证据')
         if browser_test.endswith('self-confirmations.browser.cjs'):
             scenarios=[('pm_progress','PM进度本人确认示例',users['pm'],'in_progress'),
                        ('manager_progress','负责人进度本人确认示例',users['manager'],'in_progress'),

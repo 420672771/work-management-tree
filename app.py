@@ -638,6 +638,30 @@ def approval_view(c, r):
         d['progress']=None; d['progress_history']=[]
     return d
 
+def progress_history(c, task_id):
+    """Read all reports, including decisions whose legacy report stayed pending."""
+    rows=c.execute("""SELECT r.*,reporter.name AS reporter_name,confirmer.name AS confirmer_name,
+        a.status AS approval_status,a.result_reason,a.operated_by,a.operated_at,
+        operator.name AS operator_name
+        FROM progress_record r
+        LEFT JOIN user reporter ON reporter.id=r.reported_by
+        LEFT JOIN user confirmer ON confirmer.id=r.confirmed_by
+        LEFT JOIN (SELECT biz_id,MAX(id) AS id FROM approval_record
+            WHERE biz_type='progress_confirm' AND task_id=? GROUP BY biz_id) latest ON latest.biz_id=r.id
+        LEFT JOIN approval_record a ON a.id=latest.id
+        LEFT JOIN user operator ON operator.id=a.operated_by
+        WHERE r.task_id=? ORDER BY r.reported_at DESC,r.id DESC""",(task_id,task_id))
+    out=[]
+    for row in rows:
+        item=rowdict(row)
+        item['confirmation_status']=('auto_approved' if item['status']=='auto_approved'
+                                     else item['approval_status'] or item['status'])
+        item['decision_by']=item['operated_by'] or item['confirmed_by']
+        item['decision_name']=item['operator_name'] or item['confirmer_name']
+        item['decision_at']=item['operated_at'] or item['confirmed_at']
+        out.append(item)
+    return out
+
 def visible_task_rows(c, scope):
     return [task_view(c,row) for row in c.execute("SELECT * FROM task WHERE approval_status='approved' ORDER BY due_at,id") if scope.task(row)]
 
@@ -2528,6 +2552,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'accounts.js').read_bytes(),'no-cache')
         if p.path=='/static/feishu-login.js':
             return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'feishu-login.js').read_bytes(),'no-cache')
+        if p.path=='/static/task-progress-history.js':
+            return self.send_bytes(200,'application/javascript; charset=utf-8',(ROOT/'static'/'task-progress-history.js').read_bytes(),'no-cache')
         if p.path in ('/api/auth/options','/api/me'):return self.handle_account_api(p.path)
         if p.path=='/auth/feishu/window':
             flow=q.get('flow',['login'])[0];channel=q.get('channel',[''])[0]
@@ -2647,7 +2673,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path=='/api/progress':
             task=c.execute('SELECT * FROM task WHERE id=?',(q.get('task_id',[0])[0],)).fetchone()
             if not task or not scope.task(task):c.close();return self.json(404,{'error':'task not found'})
-            out=[rowdict(x) for x in c.execute('SELECT * FROM progress_record WHERE task_id=? ORDER BY reported_at DESC,id DESC',(task['id'],))]
+            out=progress_history(c,task['id'])
         elif p.path=='/api/routine/templates':
             try:out=routines.list_templates(c,q.get('week',[None])[0])
             except ValueError as exc:c.close();return self.json(400,{'error':str(exc)})
