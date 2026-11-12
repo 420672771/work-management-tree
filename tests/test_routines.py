@@ -345,9 +345,12 @@ class RoutineTests(unittest.TestCase):
     def test_employee_cannot_create_edit_or_manually_generate_templates(self):
         template = self.template()
         body = {**self.payload(), 'actor_id': self.manager}
-        self.assertEqual(self.api('/api/routine/templates', body, self.owner)[0], 403)
-        self.assertEqual(self.api('/api/routine/templates/' + str(template), body, self.owner)[0], 403)
-        self.assertEqual(self.api('/api/routine/generate', {'actor_id': self.manager}, self.owner)[0], 403)
+        for path in ('/api/routine/templates','/api/routine/templates/'+str(template)):
+            status,error=self.api(path,body,self.owner)
+            self.assertEqual(status,403);self.assertIn('例行任务模板',error['error'])
+            self.assertNotIn('密码',error['error'])
+        status,error=self.api('/api/routine/generate',{'actor_id':self.manager},self.owner)
+        self.assertEqual(status,403);self.assertIn('补生成例行任务',error['error'])
 
     def test_scoped_generation_does_not_touch_other_templates(self):
         first = self.template(); second = self.template()

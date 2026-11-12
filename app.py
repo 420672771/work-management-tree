@@ -2916,7 +2916,7 @@ class Handler(BaseHTTPRequestHandler):
                 if b['start_at']>=b['end_at']: return self.json(400,{'error':'delegate period is invalid'})
                 oid=c.execute('INSERT INTO delegate(user_id,delegate_user_id,scope,start_at,end_at) VALUES(?,?,?,?,?)',(b['user_id'],b['delegate_user_id'],b.get('scope','approval'),b['start_at'],b['end_at'])).lastrowid; audit(c,'delegate',oid,'create','local',after=b); c.commit(); out={'id':oid}
             elif p.path=='/api/routine/templates' or re.fullmatch(r'/api/routine/templates/\d+',p.path):
-                template_actor=self.management_user(c,b)
+                template_actor=self.management_user(c,b,message='仅部门负责人和管理 PM 可创建、修改或停用例行任务模板')
                 if b.get('action')=='deactivate' and p.path!='/api/routine/templates':
                     oid=int(p.path.rsplit('/',1)[1]);old=c.execute('SELECT * FROM task_template WHERE id=?',(oid,)).fetchone()
                     if not old:return self.json(404,{'error':'模板不存在'})
@@ -2940,7 +2940,7 @@ class Handler(BaseHTTPRequestHandler):
                     audit(c,'task_template',oid,'update',str(template_actor),before=rowdict(old),after=fields)
                 c.commit(); out={'id':oid,'status':'ok','generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/routine/generate':
-                self.management_user(c,b)
+                self.management_user(c,b,message='仅部门负责人和管理 PM 可补生成例行任务')
                 generated=generate_routines(c,b.get('instance_date'),template_ids=b.get('template_ids')); c.commit(); out={'generated_task_ids':generated,'count':len(generated)}
             elif p.path=='/api/ops/daily-run':
                 if not scope.all:raise PermissionError('仅部门负责人和管理 PM 可执行部门运营任务')
