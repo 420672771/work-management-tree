@@ -281,7 +281,7 @@ if(typeof module!=='undefined'&&module.exports)module.exports={layoutMonthlyMap,
   };
   const baseOpen=window.openPage;
   window.openPage=async function(name){
-    if(active&&name!=='monthly'){if(busy||!await flush())return;active=false;fullscreen(false);page.classList.add('hidden');}
+    if(active&&name!=='monthly'){if(busy||!await flush())return;active=false;fullscreen(false);page.classList.add('hidden');tab.classList.remove('active');}
     if(name!=='monthly')return baseOpen(name);
     if(active)return;
     await baseOpen(name);if($('#weeklyPage')&&!$('#weeklyPage').classList.contains('hidden'))return;
