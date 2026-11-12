@@ -13,7 +13,7 @@
     const status=row.confirmation_status||row.status,label=statuses[status]||'状态未记录';
     const percent=Number(row.reported_percent),known=row.reported_percent!=null&&Number.isFinite(percent)&&percent>=0&&percent<=100;
     return `<li class="progress-history-item" data-progress-id="${escape(row.id)}">
-      <div class="progress-history-head"><strong>${known?escape(percent)+'%':'比例未记录'}</strong><span class="progress-history-status ${Object.hasOwn(statuses,status)?status:''}">${label}</span><span class="progress-history-meta"><time datetime="${escape(row.reported_at||'')}" title="${escape(row.reported_at||'')}">${escape(time(row.reported_at))}</time> · ${escape(row.reporter_name||'提交人未记录')}</span></div>
+      <div class="progress-history-head"><strong>${known?escape(percent)+'%':'比例未记录'}</strong><span class="progress-history-status ${Object.hasOwn(statuses,status)?status:''}">${label}</span>${known?`<span class="progress-history-mini-track" role="progressbar" aria-label="本次填报进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${percent}%，${label}"><span style="width:${percent}%"></span></span>`:''}<span class="progress-history-meta"><time datetime="${escape(row.reported_at||'')}" title="${escape(row.reported_at||'')}">${escape(time(row.reported_at))}</time> · ${escape(row.reporter_name||'提交人未记录')}</span></div>
       <div class="progress-history-body"><p class="progress-history-text">${escape(row.report_text||'未填写进度说明')}</p><button type="button" class="progress-history-toggle" hidden aria-expanded="false">展开</button></div>
       ${row.is_blocked?`<p class="progress-history-blocked"><b>阻塞：</b>${escape(row.block_reason||'未填写原因')}</p>`:''}
       ${row.expected_finish?`<p class="progress-history-meta">预计完成：${escape(String(row.expected_finish).slice(0,10))}</p>`:''}
@@ -76,6 +76,8 @@
       .progress-history-item{border-bottom:1px solid #e8edf4;margin:0 0 8px;padding:0 0 8px;overflow-wrap:anywhere}
       .progress-history-head{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;line-height:1.5}
       .progress-history-head strong{font-size:14px;color:#253754}
+      .progress-history-mini-track{display:block;flex:1 1 80px;min-width:48px;max-width:240px;height:5px;border-radius:3px;background:#e7eef9;overflow:hidden}
+      .progress-history-mini-track>span{display:block;height:100%;border-radius:inherit;background:#4281df}
       #taskDetailDialog .progress-history-head>.progress-history-meta{margin:0 0 0 auto;line-height:1.5}
       .progress-history-meta{font-size:12px;color:#64748b;margin:6px 0;line-height:1.6}
       .progress-history-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;white-space:pre-wrap;margin:5px 0 0;font-size:14px;line-height:1.55}
