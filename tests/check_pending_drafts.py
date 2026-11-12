@@ -60,7 +60,7 @@ def main():
             c.execute("UPDATE task SET approval_status='approved',work_status='in_progress' WHERE id=?",(tid,))
             for index in range(14):
                 rid,progress_aid,_=app.submit_progress(c,tid,users['member'],index*5,
-                    f'第{index+1}次反馈：方案联调 <img src=x onerror=alert(1)>\n已保留历史说明',
+                    f'第{index+1}次反馈：方案联调 <img src=x onerror=alert(1)>\n已保留历史说明'+ ('\n'+ '\n'.join(f'阶段{step}：已完成验证，等待业务确认。' for step in range(1,9)) if index==0 else ''),
                     index==13,'等待业务确认' if index==13 else '', '2030-12-01',source='feishu' if index%2 else 'web')
                 c.execute('UPDATE progress_record SET reported_at=? WHERE id=?',('2030-11-01T10:00:00+08:00',rid))
                 if index<11:
