@@ -138,6 +138,105 @@
         max-width:none !important;
       }
     }
+    /* Task details: use both halves of the drawer instead of a long label list. */
+    #taskDetailDialog .task-detail {
+      padding:20px 24px !important;
+      min-height:0 !important;
+    }
+    #taskDetailDialog .panel-heading {
+      position:sticky;
+      top:0;
+      z-index:12;
+      align-items:flex-start;
+      margin:0 0 10px;
+      padding:0 44px 10px 0;
+      background:#fff;
+      box-shadow:0 -24px 0 #fff;
+    }
+    #taskDetailDialog .panel-heading h3 {
+      font-size:18px;
+      line-height:1.45;
+      overflow-wrap:anywhere;
+    }
+    #taskDetailDialog .task-detail-close {
+      top:0 !important;
+      right:0 !important;
+      width:32px !important;
+      min-width:32px !important;
+      height:32px !important;
+      font-size:22px !important;
+    }
+    #taskDetailDialog .task-detail-grid {
+      grid-template-columns:76px minmax(0,1fr) 76px minmax(0,1fr);
+      gap:6px 10px;
+      align-items:start;
+      margin:0;
+      line-height:1.5;
+    }
+    #taskDetailDialog .task-detail-grid dt {
+      font-size:13px;
+      overflow-wrap:anywhere;
+    }
+    #taskDetailDialog .task-detail-grid dd {
+      min-width:0;
+      margin:0;
+      font-size:14px;
+    }
+    #taskDetailDialog .task-detail h4 {
+      margin:14px 0 6px;
+      font-size:14px;
+      line-height:1.5;
+    }
+    #taskDetailDialog .task-detail-text {
+      font-size:14px;
+      line-height:1.6;
+    }
+    #taskDetailDialog .progress-history-jump {
+      margin:0 0 12px;
+      padding:6px 10px;
+      font-size:13px;
+    }
+    #taskDetailContent > .task-actions {
+      margin:12px 0;
+      gap:8px;
+    }
+    #taskDetailDialog .acceptance-rejected-detail {
+      margin:12px 0 0;
+      padding:10px 12px;
+    }
+    #taskDetailDialog .acceptance-rejected-detail h4 {
+      margin:0 0 4px;
+    }
+    #taskDetailDialog .acceptance-rejected-detail p {
+      font-size:13px;
+      line-height:1.55;
+    }
+    #taskDetailDialog .task-progress-history {
+      margin-top:16px;
+      padding-top:12px;
+    }
+    #taskDetailDialog .progress-history-row h4 {
+      margin:0;
+    }
+    #taskDetailDialog .progress-history-row button {
+      padding:6px 10px;
+      font-size:13px;
+    }
+    #taskDetailDialog .progress-history-meta {
+      margin:5px 0;
+      line-height:1.5;
+    }
+    #taskDetailDialog .progress-history-item {
+      margin-bottom:10px;
+      padding-bottom:10px;
+    }
+    @media(max-width:540px) {
+      #taskDetailDialog .task-detail {padding:16px 18px !important}
+      #taskDetailDialog .task-detail-grid {
+        grid-template-columns:76px minmax(0,1fr);
+        gap:5px 10px;
+      }
+    }
   `;
 
   const style = document.createElement('style');
