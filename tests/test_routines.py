@@ -342,11 +342,22 @@ class RoutineTests(unittest.TestCase):
         app.normalize_legacy_conversation_tasks(self.c)
         self.assertEqual(dict(self.c.execute('SELECT * FROM task WHERE id=?', (tid,)).fetchone()), first)
 
-    def test_employee_cannot_create_edit_or_manually_generate_templates(self):
+    def test_employee_can_create_template_for_multiple_other_people(self):
+        body=self.payload();body.pop('owner_id');body.update(owner_ids=[self.manager,self.other],actor_id=self.manager)
+        status,out=self.api('/api/routine/templates',body,self.owner)
+        self.assertEqual(status,200,out);self.assertEqual(out['count'],2)
+        rows=self.c.execute('SELECT * FROM task WHERE parent_template_id=?',(out['id'],)).fetchall()
+        self.assertEqual({row['owner_id'] for row in rows},{self.manager,self.other})
+        self.assertTrue(all(row['approval_status']=='approved' for row in rows))
+        audit=self.c.execute("SELECT actor FROM audit_log WHERE object_type='task_template' AND object_id=? AND action='create'",(out['id'],)).fetchone()
+        self.assertEqual(audit[0],str(self.owner))
+
+    def test_employee_cannot_edit_deactivate_or_manually_generate_templates(self):
         template = self.template()
         body = {**self.payload(), 'actor_id': self.manager}
-        for path in ('/api/routine/templates','/api/routine/templates/'+str(template)):
-            status,error=self.api(path,body,self.owner)
+        path='/api/routine/templates/'+str(template)
+        for payload in (body,{'action':'deactivate','actor_id':self.manager}):
+            status,error=self.api(path,payload,self.owner)
             self.assertEqual(status,403);self.assertIn('例行任务模板',error['error'])
             self.assertNotIn('密码',error['error'])
         status,error=self.api('/api/routine/generate',{'actor_id':self.manager},self.owner)

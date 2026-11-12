@@ -87,6 +87,29 @@ class TaskVisibilityTests(unittest.TestCase):
         self.assertEqual(self.ids('/api/approvals',self.member),{self.own_approval})
         self.assertEqual(self.ids('/api/task/drafts',self.member),{self.own_draft})
 
+    def test_employee_template_creation_for_others_uses_signed_identity_and_keeps_task_scope(self):
+        domain=self.c.execute("SELECT id FROM org_node WHERE node_type='domain' AND inactive_at IS NULL LIMIT 1").fetchone()[0]
+        body={'title':'员工安排多人每周维护','owner_ids':[self.peer,self.pm,self.manager],
+              'org_node_id':domain,'estimated_hours':2,'deliverable':'维护记录','actor_id':self.manager}
+        self.assertEqual(self.api('/api/routine/templates',999999,body)[0],401)
+        status,out=self.api('/api/routine/templates',self.member,body)
+        self.assertEqual(status,200,out);self.assertEqual(out['count'],3)
+        recipients={row[0] for row in self.c.execute('SELECT owner_id FROM task WHERE parent_template_id=?',(out['id'],))}
+        self.assertEqual(recipients,{self.peer,self.pm,self.manager})
+        actor=self.c.execute("SELECT actor FROM audit_log WHERE object_type='task_template' AND object_id=? AND action='create'",(out['id'],)).fetchone()[0]
+        self.assertEqual(actor,str(self.member))
+        for tid in out['generated_task_ids']:
+            self.assertEqual(self.api('/api/tasks/'+str(tid),self.member)[0],404)
+            self.assertEqual(self.api('/api/tasks/'+str(tid),self.pm)[0],200)
+        for user,allowed in [(self.member,False),(self.pm,True),(self.manager,True)]:
+            code,rows=self.api('/api/routine/templates?actor_id='+str(self.manager),user)
+            self.assertEqual(code,200)
+            self.assertEqual(next(row['can_manage'] for row in rows if row['id']==out['id']),allowed)
+        self.assertEqual(self.api('/api/routine/templates/'+str(out['id']),self.member,{**body,'action':'deactivate'})[0],403)
+        self.assertEqual(self.api('/api/routine/generate',self.member,{'actor_id':self.manager,'template_ids':[out['id']]})[0],403)
+        self.assertEqual(self.api('/api/users',self.member,{'name':'越权新增成员','actor_id':self.manager})[0],403)
+        self.assertEqual(self.c.execute('SELECT role FROM user WHERE id=?',(self.member,)).fetchone()[0],'member')
+
     def test_team_scope_follows_actual_subtree_and_never_includes_upstream_pm_or_head(self):
         self.assertEqual(self.ids('/api/tasks',self.leader),{self.leader_task,self.own,self.junior_task})
         self.assertEqual(self.ids('/api/approvals',self.leader),{self.own_approval})

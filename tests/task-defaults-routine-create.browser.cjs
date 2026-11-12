@@ -4,6 +4,7 @@ const {base,users,domains}=JSON.parse(require('node:fs').readFileSync(process.en
 assert(base.startsWith('http://127.0.0.1:'));
 (async()=>{
  const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+ let employeeTemplate;
  try{
   for(const role of ['pm','member','manager']){
    const context=await browser.newContext(),page=await context.newPage(),errors=[];
@@ -48,8 +49,34 @@ assert(base.startsWith('http://127.0.0.1:'));
     await page.evaluate(id=>setDemoActor(id),users.manager);
     assert.equal(await page.locator('#owners').inputValue(),String(users.manager));
    }
+   if(role==='member'){
+    await page.evaluate(()=>openPage('org'));await page.evaluate(()=>openOrgSection('orgRoutine'));
+    assert.equal(await page.locator('#routineTemplates .routine-template-row button').count(),0);
+    await page.locator('#orgRoutine>.org-panel-action button').click();await page.locator('#routineDialog').waitFor();
+    await page.locator('#routineTitle').fill('员工创建并分配给其他人的例行模板');
+    await page.locator('#routineNode').selectOption(String(domains[0]));
+    for(const uid of [users.pm,users.other])await page.locator('#routineOwnerOptions input[value="'+uid+'"]').check();
+    assert.equal(await page.locator('#routineOwnerOptions input[value="'+users.member+'"]').isChecked(),false);
+    await page.locator('#routineDeliverable').fill('需求方案、发布版本与运维问题记录');await page.locator('#routineHours').fill('15');
+    const created=page.waitForResponse(response=>response.url().endsWith('/api/routine/templates')&&response.request().method()==='POST');
+    await page.locator('#routineForm button[type="submit"]').click();const response=await created;
+    assert(response.ok());employeeTemplate=await response.json();assert.equal(employeeTemplate.count,2);
+    await page.locator('#routineDialog').waitFor({state:'hidden'});
+    await page.waitForFunction(()=>document.querySelector('#routineSaveMessage')?.textContent.includes('已生成 2 条本周例行任务'));
+    await page.locator('#routineTemplates').getByText('员工创建并分配给其他人的例行模板',{exact:true}).waitFor();
+    assert.equal(await page.locator('#routineTemplates .routine-template-row button').count(),0);
+    for(const id of employeeTemplate.generated_task_ids)assert.equal((await page.request.get(base+'/api/tasks/'+id)).status(),404);
+   }
+   if(role==='manager'){
+    await page.evaluate(()=>openPage('org'));await page.evaluate(()=>openOrgSection('orgRoutine'));
+    const row=page.locator('.routine-template-row').filter({hasText:'员工创建并分配给其他人的例行模板'});
+    await row.getByRole('button',{name:'编辑模板',exact:true}).waitFor();
+    const owners=[];
+    for(const id of employeeTemplate.generated_task_ids){const response=await page.request.get(base+'/api/tasks/'+id);assert(response.ok());const task=await response.json();owners.push(task.owner_id);assert.equal(task.estimated_hours,15);assert.equal(task.approval_status,'approved');}
+    assert.deepEqual(owners.sort((a,b)=>a-b),[users.pm,users.other].sort((a,b)=>a-b));
+   }
    assert.deepEqual(errors,[]);await context.close();
   }
-  console.log('PASS: role-specific default owner, preserve manual choice, reset after submit, template save immediately creates independent current-week tasks, repeated run skips duplicates');
+  console.log('PASS: role-specific default owner, manual choice and reset, employee creates multi-recipient template excluding self, immediate per-person tasks, task privacy, maintenance buttons match management permissions, duplicate generation skipped');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1)});

@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1120" height="574" viewBox="0 0 1120 574" role="img" aria-labelledby="title desc">
-<title id="title">多人例行任务：名单明确、每人一份</title><desc id="desc">按模板直接多选实际承担人员，同岗位员工也可以配置不同工作。。移除人员或修改模板只影响后续生成；已有任务保留。重复补生成会跳过已生成的员工。</desc>
+<title id="title">多人例行任务：名单明确、每人一份</title><desc id="desc">按模板直接多选实际承担人员，同岗位员工也可以配置不同工作。。已有模板由负责人或管理 PM 维护；已有任务保留，重复补生成会跳过已有任务。</desc>
 <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#5577ac" stroke-width="2"/></marker></defs>
 <rect width="1120" height="574" rx="18" fill="#f3f7fe"/>
 <g font-family="Microsoft YaHei,Noto Sans CJK SC,sans-serif">
 <text x="32" y="44" font-size="25" font-weight="700" fill="#17385e">多人例行任务：名单明确、每人一份</text>
 <text x="32" y="76" font-size="16" fill="#536b89">按模板直接多选实际承担人员，同岗位员工也可以配置不同工作。</text>
-<text x="34" y="124" font-size="17" font-weight="700" fill="#285ca2">负责人 / 管理 PM</text>
+<text x="34" y="124" font-size="17" font-weight="700" fill="#285ca2">所有员工</text>
 <rect x="32.0" y="140" width="332.0" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
 <circle cx="55.0" cy="166" r="13" fill="#2b65c5"/><text x="55.0" y="171" text-anchor="middle" font-size="15" fill="#fff">1</text>
 <text x="77.0" y="172" font-size="19" font-weight="700" fill="#17385e">建立模板</text>
@@ -21,8 +21,8 @@
 <rect x="756.0" y="140" width="332.0" height="108" rx="12" fill="#e9f6ef" stroke="#bfd0e8"/>
 <circle cx="779.0" cy="166" r="13" fill="#2b65c5"/><text x="779.0" y="171" text-anchor="middle" font-size="15" fill="#fff">3</text>
 <text x="801.0" y="172" font-size="19" font-weight="700" fill="#17385e">生成任务</text>
-<text x="773.0" y="202" font-size="16" fill="#4d6481">每周自动生成下周任务</text>
-<text x="773.0" y="225" font-size="16" fill="#4d6481">当周缺人时手动补生成</text>
+<text x="773.0" y="202" font-size="16" fill="#4d6481">保存即生成本周任务</text>
+<text x="773.0" y="225" font-size="16" fill="#4d6481">后续按原规则每周生成</text>
 <text x="34" y="300" font-size="17" font-weight="700" fill="#285ca2">所选每位员工</text>
 <rect x="32.0" y="316" width="332.0" height="108" rx="12" fill="#fff" stroke="#bfd0e8"/>
 <circle cx="55.0" cy="342" r="13" fill="#2b65c5"/><text x="55.0" y="347" text-anchor="middle" font-size="15" fill="#fff">1</text>
@@ -42,4 +42,4 @@
 <text x="773.0" y="378" font-size="16" fill="#4d6481">各自补充交付说明</text>
 <text x="773.0" y="401" font-size="16" fill="#4d6481">指定确认人逐条验收</text>
 <rect x="32" y="506" width="1056" height="43" rx="8" fill="#fff6e6"/>
-<text x="48" y="534" font-size="16" fill="#805619">移除人员或修改模板只影响后续生成；已有任务保留。重复补生成会跳过已生成的员工。</text></g></svg>
+<text x="48" y="534" font-size="16" fill="#805619">已有模板由负责人或管理 PM 维护；已有任务保留，重复补生成会跳过已有任务。</text></g></svg>
