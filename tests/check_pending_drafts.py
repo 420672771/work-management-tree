@@ -55,13 +55,24 @@ def main():
                 slots={'title':title+'草稿','owner_id':owner,'due_at':'2030-11-20T17:00:00+08:00'}
                 c.execute("INSERT INTO conversation_draft(session_id,user_id,source_type,raw_text,slots_json,missing_slots,status,expire_at,created_at,updated_at) VALUES(?,?,'text',?,?,'[]','preview',?,?,?)",
                           ('visibility-'+key,owner,title+'草稿',json.dumps(slots),(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),timestamp,timestamp))
+        self_confirmation={}
+        if browser_test.endswith('self-confirmations.browser.cjs'):
+            scenarios=[('pm_progress','PM进度本人确认示例',users['pm'],'in_progress'),
+                       ('manager_progress','负责人进度本人确认示例',users['manager'],'in_progress'),
+                       ('pm_accept','PM交付本人验收示例',users['pm'],'awaiting_acceptance'),
+                       ('manager_accept','负责人交付本人验收示例',users['manager'],'awaiting_acceptance'),
+                       ('pm_superior_accept','PM交付上级验收示例',users['pm'],'awaiting_acceptance'),
+                       ('member_accept','普通成员交付验收示例',users['member'],'awaiting_acceptance')]
+            for key,title,owner,status in scenarios:
+                self_confirmation[key]=c.execute("INSERT INTO task(title,owner_id,org_node_id,due_at,approval_status,work_status,approver_id,created_at,updated_at) VALUES(?,?,?,?,'approved',?,?,?,?)",
+                    (title,owner,domains[0],'2030-11-20T17:00:00+08:00',status,app.approver_for(c,owner),timestamp,timestamp)).lastrowid
         c.commit()
         c.close()
         server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         fixture = Path(folder) / 'fixture.json'
-        fixture.write_text(json.dumps({'base': f'http://127.0.0.1:{server.server_port}', 'task': tid, 'approval': aid, 'domains': domains, 'users': users, 'confirmations': confirmations, 'visibility': visibility}))
+        fixture.write_text(json.dumps({'base': f'http://127.0.0.1:{server.server_port}', 'task': tid, 'approval': aid, 'domains': domains, 'users': users, 'confirmations': confirmations, 'visibility': visibility, 'self_confirmation': self_confirmation}))
         try:
             subprocess.run(['node', browser_test], cwd=ROOT,
                            env=dict(os.environ, WMT_PENDING_DRAFT_FIXTURE=str(fixture)), check=True, timeout=120)

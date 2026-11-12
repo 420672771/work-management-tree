@@ -145,14 +145,94 @@ class TaskConfirmationTests(unittest.TestCase):
         self.assertIn('确认已通过',app.process_bot_message(self.c,'确认',self.pm,'pm-self'));self.c.commit()
         self.assertEqual(self.c.execute('SELECT confirm_source FROM task WHERE id=?',(tid,)).fetchone()[0],'feishu')
 
-    def test_progress_and_acceptance_do_not_silently_gain_new_self_permissions(self):
-        tid,aid=self.create(self.pm);self.confirm(aid,self.pm)
-        status,progress=self.api(f'/api/tasks/{tid}/progress',self.pm,{'percent':50,'comment':'已完成方案初稿'})
-        self.assertEqual(status,200);self.assertEqual(self.confirm(progress['approval_id'],self.pm)[0],403)
+    def test_progress_and_acceptance_support_self_and_pm_superior_without_auto_approval(self):
+        for owner,actor in ((self.pm,self.pm),(self.pm,self.manager),(self.manager,self.manager)):
+            tid,aid=self.create(owner,f'本人工作全流程{owner}-{actor}');self.confirm(aid,owner)
+            status,progress=self.api(f'/api/tasks/{tid}/progress',owner,{'percent':50,'comment':'已完成方案初稿'})
+            self.assertEqual(status,200);self.assertIsNotNone(progress['approval_id'])
+            self.assertEqual(self.c.execute('SELECT effective_percent FROM task WHERE id=?',(tid,)).fetchone()[0],0)
+            view=self.api('/api/approvals/'+str(progress['approval_id']),owner)[1]
+            self.assertIn(owner,view['eligible_approver_ids'])
+            self.assertEqual(self.confirm(progress['approval_id'],self.other)[0],403)
+            self.assertEqual(self.confirm(progress['approval_id'],actor)[0],200)
+            self.assertEqual(self.c.execute('SELECT confirmed_by FROM progress_record WHERE id=?',(progress['id'],)).fetchone()[0],actor)
+            self.assertEqual(self.c.execute('SELECT effective_percent FROM task WHERE id=?',(tid,)).fetchone()[0],50)
+            self.assertEqual(self.api(f'/api/tasks/{tid}',owner,{'work_status':'awaiting_acceptance'})[0],200)
+            detail=self.api(f'/api/tasks/{tid}',owner)[1];self.assertIn(owner,detail['eligible_acceptor_ids'])
+            self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.other,{'result':'passed','acceptor_id':self.manager})[0],403)
+            self.assertEqual(self.api(f'/api/tasks/{tid}/accept',actor,{'result':'passed'})[0],200)
+            self.assertEqual(self.c.execute('SELECT acceptor_id FROM acceptance WHERE task_id=?',(tid,)).fetchone()[0],actor)
+
+    def test_regular_member_progress_and_acceptance_still_require_assigned_superior(self):
+        tid,aid=self.create(self.member);self.confirm(aid,self.manager)
+        status,progress=self.api(f'/api/tasks/{tid}/progress',self.member,{'percent':50,'comment':'完成初稿'})
+        self.assertEqual(status,200);self.assertEqual(self.confirm(progress['approval_id'],self.member)[0],403)
         self.assertEqual(self.confirm(progress['approval_id'],self.manager)[0],200)
-        self.c.execute("UPDATE task SET work_status='awaiting_acceptance' WHERE id=?",(tid,));self.c.commit()
-        self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.pm,{'result':'passed'})[0],403)
+        self.api(f'/api/tasks/{tid}',self.member,{'work_status':'awaiting_acceptance'})
+        self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.member,{'result':'passed'})[0],403)
         self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.manager,{'result':'passed'})[0],200)
+
+    def test_managerial_routine_100_percent_progress_still_waits_for_self_acceptance(self):
+        tid,aid=self.create(self.manager);self.confirm(aid,self.manager)
+        self.c.execute("UPDATE task SET task_type='ROUTINE',routine_week_start='2030-11-18' WHERE id=?",(tid,));self.c.commit()
+        _,progress=self.api(f'/api/tasks/{tid}/progress',self.manager,{'percent':100,'comment':'本周例行交付完成'})
+        self.assertEqual(self.confirm(progress['approval_id'],self.manager)[0],200)
+        self.assertEqual(self.c.execute('SELECT work_status FROM task WHERE id=?',(tid,)).fetchone()[0],'awaiting_acceptance')
+        self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.manager,{'result':'passed'})[0],200)
+
+    def test_existing_progress_permission_is_live_and_head_does_not_need_old_foreign_approver(self):
+        tid,aid=self.create(self.manager);self.confirm(aid,self.manager)
+        _,progress=self.api(f'/api/tasks/{tid}/progress',self.manager,{'percent':30,'comment':'旧确认人回归'})
+        self.c.execute('UPDATE approval_record SET approver_id=? WHERE id=?',(self.pm,progress['approval_id']));self.c.commit()
+        self.assertEqual(self.confirm(progress['approval_id'],self.pm)[0],403)
+        self.assertEqual(self.confirm(progress['approval_id'],self.manager)[0],200)
+
+    def test_repair_of_missing_managerial_progress_approval_is_idempotent_and_preserves_history(self):
+        tid,aid=self.create(self.manager);self.confirm(aid,self.manager)
+        stamp=app.now()
+        rid=self.c.execute("INSERT INTO progress_record(task_id,reported_percent,report_text,status,reported_at) VALUES(?,40,'旧进度缺少确认人','pending',?)",(tid,stamp)).lastrowid
+        rejected=self.c.execute("INSERT INTO progress_record(task_id,reported_percent,report_text,status,reported_at) VALUES(?,20,'已驳回记录','pending',?)",(tid,stamp)).lastrowid
+        rejected_approval=app.create_approval(self.c,'progress_confirm',rejected,tid,self.manager)
+        self.c.execute("UPDATE approval_record SET status='rejected' WHERE id=?",(rejected_approval,));self.c.commit()
+        app.initialize();app.initialize()
+        repaired=self.c.execute("SELECT * FROM approval_record WHERE biz_type='progress_confirm' AND biz_id=?",(rid,)).fetchall()
+        self.assertEqual(len(repaired),1);self.assertEqual(repaired[0]['approver_id'],self.manager)
+        self.assertEqual(self.c.execute('SELECT status FROM approval_record WHERE id=?',(rejected_approval,)).fetchone()[0],'rejected')
+        self.assertEqual(self.c.execute('SELECT COUNT(*) FROM approval_record WHERE biz_id=? AND biz_type=?',(rejected,'progress_confirm')).fetchone()[0],1)
+        self.assertEqual(self.confirm(repaired[0]['id'],self.manager)[0],200)
+
+    def test_concurrent_pm_self_and_superior_acceptance_only_records_one_decision(self):
+        tid,aid=self.create(self.pm);self.confirm(aid,self.pm)
+        self.c.execute("UPDATE task SET work_status='awaiting_acceptance' WHERE id=?",(tid,));self.c.commit()
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            results=list(workers.map(lambda actor:self.api(f'/api/tasks/{tid}/accept',actor,{'result':'passed'}),[self.pm,self.manager]))
+        self.assertEqual(sorted(result[0] for result in results),[200,400])
+        self.assertEqual(self.c.execute('SELECT COUNT(*) FROM acceptance WHERE task_id=?',(tid,)).fetchone()[0],1)
+
+    def test_self_acceptance_can_reject_then_resubmit_with_real_operators_recorded(self):
+        tid,aid=self.create(self.pm);self.confirm(aid,self.pm)
+        self.c.execute("UPDATE task SET work_status='awaiting_acceptance' WHERE id=?",(tid,));self.c.commit()
+        self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.pm,{'result':'rejected','reason':'补充交付物'})[0],200)
+        self.assertEqual(self.c.execute('SELECT work_status FROM task WHERE id=?',(tid,)).fetchone()[0],'in_progress')
+        self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.manager,{'result':'passed'})[0],400)
+        self.api(f'/api/tasks/{tid}',self.pm,{'work_status':'awaiting_acceptance'})
+        self.assertEqual(self.api(f'/api/tasks/{tid}/accept',self.manager,{'result':'passed'})[0],200)
+        self.assertEqual([row[0] for row in self.c.execute('SELECT acceptor_id FROM acceptance WHERE task_id=? ORDER BY id',(tid,))],[self.pm,self.manager])
+
+    def test_feishu_self_progress_and_acceptance_recheck_role_when_confirming(self):
+        tid,aid=self.create(self.pm);self.confirm(aid,self.pm)
+        _,progress=self.api(f'/api/tasks/{tid}/progress',self.pm,{'percent':60,'comment':'飞书确认进度'})
+        reply=app.process_bot_message(self.c,f'确认进度任务#{tid}通过',self.pm,'self-progress');self.c.commit()
+        self.assertIn('回复“确认”',reply)
+        self.assertIn('确认已通过',app.process_bot_message(self.c,'确认',self.pm,'self-progress'));self.c.commit()
+        self.c.execute("UPDATE task SET work_status='awaiting_acceptance' WHERE id=?",(tid,));self.c.commit()
+        self.assertIn('回复“确认”',app.process_bot_message(self.c,f'验收任务#{tid}通过',self.pm,'self-accept'));self.c.commit()
+        self.c.execute("UPDATE user SET role='member' WHERE id=?",(self.pm,));self.c.commit()
+        self.assertIn('未执行',app.process_bot_message(self.c,'确认',self.pm,'self-accept'));self.c.commit()
+        self.assertEqual(self.c.execute('SELECT COUNT(*) FROM acceptance WHERE task_id=?',(tid,)).fetchone()[0],0)
+        self.c.execute("UPDATE user SET role='pm' WHERE id=?",(self.pm,));self.c.commit()
+        app.process_bot_message(self.c,f'验收任务#{tid}通过',self.pm,'self-accept');self.c.commit()
+        self.assertIn('验收通过',app.process_bot_message(self.c,'确认',self.pm,'self-accept'));self.c.commit()
 
     def test_confirmation_reminders_reach_both_pm_candidates_and_manager_self(self):
         tid,aid=self.create(self.pm);manager_task,_=self.create(self.manager)

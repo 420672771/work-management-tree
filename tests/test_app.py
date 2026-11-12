@@ -530,7 +530,7 @@ class WorkTreeTests(unittest.TestCase):
             users=initial['users']; tree=initial['tree']
             self.assertGreaterEqual(len(users),2); self.assertTrue(tree)
             manager=next(user for user in users if user['role']=='manager')
-            owner=next(user for user in users if user['id']!=manager['id'])
+            owner=next(user for user in users if user['role']=='member')
             domain=next(node for node in tree if node['node_type']=='domain')
             child=call('/api/tree',{'parent_id':domain['id'],'node_type':'subdomain','name':'接口测试责任域','boundary':'接口测试边界','owner_id':owner['id']})
             self.assertTrue(any(node['id']==child['id'] for node in call('/api/tree')))

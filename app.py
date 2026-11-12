@@ -124,7 +124,7 @@ def create_approval(c, biz_type, biz_id, task_id, approver_id):
     return c.execute("INSERT INTO approval_record(biz_type,biz_id,task_id,approver_id,due_at,created_at) VALUES(?,?,?,?,?,?)",(biz_type,biz_id,task_id,approver_id,now(),now())).lastrowid
 
 def task_confirmation_approver(c, owner_id, assigned=None):
-    """New-task confirmation is separate from progress/acceptance assignment."""
+    """Keep a concrete confirmation recipient, including a self-confirming head."""
     owner=c.execute('SELECT role FROM user WHERE id=?',(owner_id,)).fetchone()
     if owner and owner['role']=='manager':return int(owner_id)
     assigned=assigned or approver_for(c,owner_id)
@@ -145,11 +145,9 @@ def department_superior_for(c, owner_id):
     row=c.execute("SELECT d.owner_user_id FROM org_department d JOIN user head ON head.id=d.owner_user_id JOIN user owner ON owner.department=d.name WHERE owner.id=? AND d.status='active' AND head.role='manager' AND head.id<>? ORDER BY d.id LIMIT 1",(owner_id,owner_id)).fetchone()
     return int(row[0]) if row else None
 
-def approval_actor_ids(c, approval):
+def task_decision_actor_ids(c, task_id, assigned):
     """Resolve current eligible actors; managerial access is not a blanket grant."""
-    assigned=approval['approver_id']
-    if approval['biz_type']!='task_confirm':return [int(assigned)] if assigned else []
-    owner=c.execute('SELECT t.owner_id,u.role FROM task t JOIN user u ON u.id=t.owner_id WHERE t.id=?',(approval['task_id'],)).fetchone()
+    owner=c.execute('SELECT t.owner_id,u.role FROM task t JOIN user u ON u.id=t.owner_id WHERE t.id=?',(task_id,)).fetchone()
     if not owner:return []
     if owner['role']=='manager':return [int(owner['owner_id'])]
     actors=[int(assigned)] if assigned and int(assigned)!=int(owner['owner_id']) else []
@@ -158,6 +156,18 @@ def approval_actor_ids(c, approval):
         superior=department_superior_for(c,owner['owner_id'])
         if superior:actors.append(superior)
     return sorted(set(actors))
+
+def approval_actor_ids(c, approval):
+    if approval['biz_type'] not in ('task_confirm','progress_confirm'):
+        return [int(approval['approver_id'])] if approval['approver_id'] else []
+    return task_decision_actor_ids(c,approval['task_id'],approval['approver_id'])
+
+def acceptance_actor_ids(c, task):
+    assigned=task['approver_id'] or approver_for(c,task['owner_id'])
+    return task_decision_actor_ids(c,task['id'],assigned)
+
+def can_accept_task(c, task, actor_id):
+    return bool(actor_id and int(actor_id) in acceptance_actor_ids(c,task))
 
 def can_confirm_approval(c, approval, actor_id):
     return bool(actor_id and int(actor_id) in approval_actor_ids(c,approval))
@@ -182,6 +192,32 @@ def decide_approval(c, approval_id, result, operator, *, source='manual', reason
         c.execute('UPDATE task SET effective_percent=?,progress_percent=?,risk_status=?,expected_finish=?,work_status=?,updated_at=? WHERE id=?',
                   (record['reported_percent'],record['reported_percent'],'blocked' if record['is_blocked'] else 'normal',record['expected_finish'],progress_work_status(c,approval['task_id'],record['reported_percent']),stamp,approval['task_id']))
     audit(c,'approval',approval_id,result,str(operator),after={'result':result,'reason':reason,'source':source})
+
+def decide_acceptance(c, task_id, result, actor_id, *, reason='', source='manual'):
+    if result not in ('passed','rejected'):raise ValueError('result must be passed or rejected')
+    if not c.in_transaction:c.execute('BEGIN IMMEDIATE')
+    task=c.execute('SELECT * FROM task WHERE id=?',(task_id,)).fetchone()
+    if not task:raise LookupError('task not found')
+    if task['work_status']!='awaiting_acceptance':raise ValueError('task is not awaiting acceptance')
+    if not can_accept_task(c,task,actor_id):raise PermissionError('only an eligible acceptor may accept')
+    stamp=now();status='completed' if result=='passed' else 'in_progress'
+    changed=c.execute("UPDATE task SET work_status=?,updated_at=? WHERE id=? AND work_status='awaiting_acceptance'",(status,stamp,task_id))
+    if changed.rowcount!=1:raise ValueError('task is not awaiting acceptance')
+    c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(task_id,actor_id,result,reason,stamp))
+    audit(c,'task',task_id,'accept' if result=='passed' else 'reject',str(actor_id),after={'result':result,'reason':reason,'source':source})
+
+def ensure_managerial_progress_approvals(c):
+    """Recover live managerial reports that previously had no approval recipient."""
+    rows=c.execute("""SELECT r.id,r.task_id,t.owner_id,t.approver_id FROM progress_record r
+        JOIN task t ON t.id=r.task_id JOIN user u ON u.id=t.owner_id
+        WHERE r.status='pending' AND u.role IN ('manager','pm') AND t.approval_status='approved'
+        AND t.work_status IN ('assigned','in_progress','awaiting_acceptance')
+        AND NOT EXISTS(SELECT 1 FROM approval_record a WHERE a.biz_type='progress_confirm' AND a.biz_id=r.id)
+        AND NOT EXISTS(SELECT 1 FROM progress_record newer WHERE newer.task_id=r.task_id
+            AND newer.status IN ('approved','auto_approved') AND newer.reported_at>r.reported_at)""").fetchall()
+    for row in rows:
+        approver=task_confirmation_approver(c,row['owner_id'],row['approver_id'])
+        create_approval(c,'progress_confirm',row['id'],row['task_id'],approver)
 
 TASK_PRIORITIES={'P0','P1','P2'}
 TASK_TYPES={'ROUTINE','PROJECT','ADHOC'}
@@ -563,7 +599,7 @@ def initialize():
     c=db()
     try:
         migrate(c)
-        seed(c); c.execute("UPDATE user SET role='member' WHERE role='owner'"); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); normalize_legacy_conversation_tasks(c); c.commit()
+        seed(c); c.execute("UPDATE user SET role='member' WHERE role='owner'"); initialize_responsibility_domains(c); ensure_feishu_binding_history(c); normalize_legacy_conversation_tasks(c); ensure_managerial_progress_approvals(c); c.commit()
     finally:
         c.close()
 
@@ -580,6 +616,8 @@ def task_view(c, r):
     d['latest_progress']=rowdict(progress)
     acceptance=c.execute('SELECT a.*,u.name AS acceptor_name FROM acceptance a LEFT JOIN user u ON u.id=a.acceptor_id WHERE a.task_id=? ORDER BY a.id DESC LIMIT 1',(d['id'],)).fetchone()
     d['latest_acceptance']=rowdict(acceptance)
+    d['eligible_acceptor_ids']=acceptance_actor_ids(c,r)
+    d['eligible_acceptor_names']=[row['name'] for uid in d['eligible_acceptor_ids'] if (row:=c.execute('SELECT name FROM user WHERE id=?',(uid,)).fetchone())]
     return d
 
 def approval_view(c, r):
@@ -893,7 +931,7 @@ def process_structured_progress_report(c,text,user_id,session_id):
     except (ValueError,PermissionError) as exc:return str(exc)
     c.execute("UPDATE bot_pending_action SET status='executed',confirmed_at=? WHERE id=?",(now(),action_id))
     save_bot_task_context(c,session_id,user_id,tid)
-    return f'已记录《{task["title"]}》进度 {report["percent"]}%，已提交上级确认。'
+    return f'已记录《{task["title"]}》进度 {report["percent"]}%，已提交确认。'
 
 def is_deadline_change_request(text):
     source=normalize_assistant_text(text)
@@ -1418,7 +1456,7 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         if int(task['owner_id'])!=int(user_id): return None,'只有任务责任人可以提交验收。'
         if task['work_status']!='in_progress': return None,f'任务#{tid}当前不是进行中状态。'
         action={'type':'submit_acceptance','task_id':tid}; save_bot_action(c,session_id,user_id,action)
-        return action,f'拟提交任务#{tid}《{task["title"]}》等待上级验收。回复“确认”执行，回复“取消”放弃。'
+        return action,f'拟提交任务#{tid}《{task["title"]}》等待可验收人处理。回复“确认”执行，回复“取消”放弃。'
     if re.search(r'(?:删除|移除|作废)',source):
         if not tid: return None,'请注明要删除的任务编号，例如：删除任务#15。'
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
@@ -1431,8 +1469,7 @@ def plan_bot_action(c, text, user_id, session_id, allow_model=True):
         task=c.execute('SELECT * FROM task WHERE id=?',(tid,)).fetchone()
         if not task: return None,f'未找到任务#{tid}。'
         if task['work_status']!='awaiting_acceptance': return None,f'任务#{tid}当前不是待验收状态。'
-        approver=task['approver_id'] or approver_for(c,task['owner_id'])
-        if int(approver or 0)!=int(user_id): return None,'只有该任务责任人的上级确认人可以验收。'
+        if not can_accept_task(c,task,user_id): return None,'只有该任务的可验收人可以验收。'
         result='rejected' if '驳回' in source else 'passed'
         action={'type':'accept_task','task_id':tid,'result':result}; save_bot_action(c,session_id,user_id,action)
         return action,f'拟{("驳回" if result=="rejected" else "验收通过")}任务#{tid}《{task["title"]}》。回复“确认”执行，回复“取消”放弃。'
@@ -1519,15 +1556,14 @@ def execute_bot_action(c, action, user_id):
     if typ in ('start_task','submit_acceptance'):
         task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone(); expected='assigned' if typ=='start_task' else 'in_progress'
         if not task or int(task['owner_id'])!=int(user_id) or task['work_status']!=expected: raise PermissionError('当前无法执行该任务状态变更')
-        status='in_progress' if typ=='start_task' else 'awaiting_acceptance'; c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',(status,t,task['id'])); audit(c,'task',task['id'],typ,str(user_id)); return '任务已开始。' if typ=='start_task' else '已提交验收，等待上级确认。'
+        status='in_progress' if typ=='start_task' else 'awaiting_acceptance'; c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',(status,t,task['id'])); audit(c,'task',task['id'],typ,str(user_id)); return '任务已开始。' if typ=='start_task' else '已提交验收，等待可验收人处理。'
     if typ=='delete_task':
         task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
         if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权删除该任务')
         c.execute('DELETE FROM approval_record WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM progress_record WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM feedback WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM acceptance WHERE task_id=?',(task['id'],)); c.execute('DELETE FROM task WHERE id=?',(task['id'],)); audit(c,'task',action['task_id'],'delete',str(user_id),before=rowdict(task)); return '任务已删除。'
     if typ=='accept_task':
-        task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone(); approver=task['approver_id'] or approver_for(c,task['owner_id']) if task else None
-        if not task or task['work_status']!='awaiting_acceptance' or int(approver or 0)!=int(user_id): raise PermissionError('当前无权验收该任务')
-        c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(task['id'],user_id,action['result'],'飞书机器人操作',t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if action['result']=='passed' else 'in_progress',t,task['id'])); audit(c,'task',task['id'],'accept' if action['result']=='passed' else 'reject',str(user_id)); return '已'+('验收通过。' if action['result']=='passed' else '驳回任务，已退回责任人继续处理。')
+        decide_acceptance(c,action['task_id'],action['result'],user_id,reason='飞书机器人操作',source='feishu')
+        return '已'+('验收通过。' if action['result']=='passed' else '驳回任务，已退回责任人继续处理。')
     if typ=='change_owner':
         task=c.execute('SELECT * FROM task WHERE id=?',(action['task_id'],)).fetchone()
         if not task or not bot_can_manage_task(c,user_id,task): raise PermissionError('无权变更该任务责任人')
@@ -1642,7 +1678,7 @@ def _process_bot_message(c, text, user_id, session_id):
     if progress:
         try:
             _,_,task=submit_progress(c,progress['task_id'],user_id,progress['percent'],progress['comment'],progress['blocked'],progress['block_reason'],progress['expected_finish'],'feishu')
-            return f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交上级确认。'
+            return f'已记录《{task["title"]}》进度 {progress["percent"]}%，已提交确认。'
         except (ValueError,PermissionError) as exc:return str(exc)
     if error:return error
     intent=rule_bot_intent(source) if dialogue.model_failed else classify_bot_intent(source)
@@ -1793,7 +1829,8 @@ def submit_progress(c, task_id, reporter_id, percent, comment, blocked=False, bl
     if not isinstance(percent,int) or percent<0 or percent>100: raise ValueError('完成比例应为 0 至 100')
     if not comment: raise ValueError('请补充进度说明')
     t=now(); rid=c.execute("INSERT INTO progress_record(task_id,reported_percent,report_text,is_blocked,block_reason,expected_finish,reported_by,reported_at,source) VALUES(?,?,?,?,?,?,?,?,?)",(task_id,percent,comment,1 if blocked else 0,block_reason,expected_finish,reporter_id,t,source)).lastrowid
-    aid=create_approval(c,'progress_confirm',rid,task_id,task['approver_id']); c.execute("UPDATE task SET work_status='in_progress',updated_at=? WHERE id=?",(t,task_id)); audit(c,'progress',rid,'report_pending',str(reporter_id),after={'percent':percent,'comment':comment,'blocked':blocked,'source':source})
+    approver=task_confirmation_approver(c,task['owner_id'],task['approver_id'])
+    aid=create_approval(c,'progress_confirm',rid,task_id,approver); c.execute("UPDATE task SET work_status='in_progress',updated_at=? WHERE id=?",(t,task_id)); audit(c,'progress',rid,'report_pending',str(reporter_id),after={'percent':percent,'comment':comment,'blocked':blocked,'source':source})
     return rid,aid,task
 
 def concise_task_title(text):
@@ -3041,13 +3078,9 @@ class Handler(BaseHTTPRequestHandler):
                     if int(feedback_user)!=int(old['owner_id']): return self.json(403,{'error':'only the task owner may submit feedback'})
                     c.execute('INSERT INTO feedback(task_id,user_id,content,parsed_due_at,progress,risk,created_at) VALUES(?,?,?,?,?,?,?)',(tid,feedback_user,b.get('content',''),parse_due(b.get('content','')),b.get('progress',''),b.get('risk',''),t)); c.execute("UPDATE task SET risk_status=?,updated_at=? WHERE id=?",('blocked' if b.get('risk') else old['risk_status'],t,tid)); action='feedback'
                 elif p.path.endswith('/accept'):
-                    result=b.get('result');
-                    if result not in ('passed','rejected'): return self.json(400,{'error':'result must be passed or rejected'})
-                    if old['work_status']!='awaiting_acceptance': return self.json(400,{'error':'task is not awaiting acceptance'})
                     acceptor_id=self.actor_id(b.get('acceptor_id'))
-                    approver_id=old['approver_id'] or approver_for(c,old['owner_id'])
-                    if not acceptor_id or int(acceptor_id)!=int(approver_id): return self.json(403,{'error':'only the task owner\'s approver may accept'})
-                    c.execute('INSERT INTO acceptance(task_id,acceptor_id,result,reason,created_at) VALUES(?,?,?,?,?)',(tid,acceptor_id,result,b.get('reason',''),t)); c.execute('UPDATE task SET work_status=?,updated_at=? WHERE id=?',('completed' if result=='passed' else 'in_progress',t,tid)); action='accept' if result=='passed' else 'reject'
+                    decide_acceptance(c,tid,b.get('result'),acceptor_id,reason=b.get('reason',''))
+                    c.commit();return self.json(200,{'id':tid,'status':'ok'})
                 else:
                     allowed={'title','description','deliverable','org_node_id','task_type','work_status','risk_status','due_at','priority','owner_id','estimated_hours','actual_hours','complexity','business_impact','urgent_source','urgent_level','plan_impact'}; changes={k:v for k,v in b.items() if k in allowed};
                     if not changes: return self.json(400,{'error':'no editable fields'})
